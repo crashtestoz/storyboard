@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Storyboard → Video</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- ================= header ================= -->
+    <header class="header">
+      <div class="brand">
+        <span class="brand-mark">▦</span>
+        <span>Storyboard&nbsp;→&nbsp;Video</span>
+      </div>
+      <div class="header-divider"></div>
+      <div>
+        <span class="project-name" id="projectTitle">—</span>
+        <span class="project-meta" id="projectMeta"></span>
+      </div>
+      <div class="header-spacer"></div>
+      <div class="poc-banner">
+        <span>◆</span>
+        <span>POC — UI only, no backend. Render is simulated.</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btnReset" title="Reset mock state">Reset</button>
+      <button class="btn btn-danger" id="btnStop">Stop</button>
+      <button class="btn btn-primary" id="btnRender">▶ Render all</button>
+    </header>
+
+    <!-- ================= rail ================= -->
+    <aside class="rail">
+
+      <section>
+        <div class="section-label">
+          Scene description
+          <span class="hint">— reused every shot</span>
+        </div>
+        <textarea id="sceneDescription" rows="7"
+          placeholder="Subject appearance and overall style — the things that should stay true across every shot."></textarea>
+      </section>
+
+      <section>
+        <div class="section-label">
+          Style references
+          <span class="hint">— project-wide</span>
+        </div>
+        <div class="style-refs" id="styleRefs"></div>
+      </section>
+
+      <section>
+        <div class="section-label">Defaults for new shots</div>
+        <div class="field">
+          <label>Model</label>
+          <select id="defModel">
+            <option value="fl2va">MiniMax H3 · FL2VA</option>
+            <option value="ref2va">MiniMax H3 · Ref2VA</option>
+            <option value="krea2-still">Krea-2 Turbo (still)</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Resolution</label>
+            <select id="defRes">
+              <option value="960x544">960 × 544</option>
+              <option value="1024x1024">1024 × 1024</option>
+              <option value="1344x768">1344 × 768</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Steps</label>
+            <input type="number" id="defSteps" value="8">
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-label">
+          Queue
+          <span class="hint">— serial, one at a time</span>
+        </div>
+        <div class="queue-list" id="queueList"></div>
+      </section>
+
+    </aside>
+
+    <!-- ================= main ================= -->
+    <main class="main">
+
+      <div class="strip-wrap">
+        <div class="strip-head">
+          <div class="section-label" style="margin:0">
+            Storyboard
+            <span class="hint">— drag to reorder</span>
+          </div>
+        </div>
+        <div class="strip" id="strip"></div>
+      </div>
+
+      <div class="workspace">
+        <section id="editor"></section>
+        <section id="preview"></section>
+      </div>
+
+    </main>
+
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

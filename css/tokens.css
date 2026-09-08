@@ -1,0 +1,79 @@
+/* ==========================================================================
+   THEME TOKENS — the reskin surface.
+   --------------------------------------------------------------------------
+   This is the ONLY file that should need changing to match MCC's look.
+   Every colour, radius, spacing step and font in the app resolves through a
+   variable declared here; app.css contains no literal colours.
+
+   Current values are a neutral dark-dashboard placeholder, chosen to be
+   close in spirit to MCC (dark ground, panel tiles, one accent, semantic
+   status colours) so the swap is a value-for-value replacement rather than
+   a re-layout. Replace with MCC's real tokens when this repo has access to
+   them.
+   ========================================================================== */
+
+:root {
+  /* --- ground & panels ------------------------------------------------- */
+  --bg:            #0e1116;
+  --bg-sunken:     #0a0d11;
+  --panel:         #151a21;
+  --panel-raised:  #1b222b;
+  --panel-hover:   #202832;
+  --border:        #262f3a;
+  --border-strong: #36434f;
+
+  /* --- type ------------------------------------------------------------ */
+  --text:          #e4e9ef;
+  --text-dim:      #93a1b1;
+  --text-faint:    #63707e;
+
+  /* --- accent ---------------------------------------------------------- */
+  --accent:        #4f9cf0;
+  --accent-dim:    #2b5f96;
+  --accent-ghost:  rgba(79, 156, 240, 0.12);
+
+  /* --- semantic / status ----------------------------------------------- */
+  --ok:            #3fb96b;
+  --ok-ghost:      rgba(63, 185, 107, 0.12);
+  --running:       #4f9cf0;
+  --running-ghost: rgba(79, 156, 240, 0.14);
+  --warn:          #d99a2b;
+  --warn-ghost:    rgba(217, 154, 43, 0.13);
+  --err:           #dd5c5c;
+  --err-ghost:     rgba(221, 92, 92, 0.13);
+  --idle:          #63707e;
+  --idle-ghost:    rgba(99, 112, 126, 0.12);
+
+  /* --- geometry -------------------------------------------------------- */
+  --radius:        8px;
+  --radius-sm:     5px;
+  --radius-lg:     12px;
+
+  --sp-1:          4px;
+  --sp-2:          8px;
+  --sp-3:          12px;
+  --sp-4:          16px;
+  --sp-5:          24px;
+  --sp-6:          32px;
+
+  /* --- type scale ------------------------------------------------------ */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+          Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               monospace;
+
+  --fs-xs:         11px;
+  --fs-sm:         12px;
+  --fs-base:       13px;
+  --fs-md:         15px;
+  --fs-lg:         18px;
+
+  /* --- elevation ------------------------------------------------------- */
+  --shadow:        0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-lg:     0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* --- layout ---------------------------------------------------------- */
+  --rail-w:        290px;
+  --header-h:      48px;
+  --strip-h:       164px;
+}
