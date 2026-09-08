@@ -46,6 +46,8 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "id": new_id(),
         "title": "New shot",
         "prompt": "",
+        "soundNote": "",
+        "characterIds": [],
         "startRef": None,
         "endRef": None,
         "model": d.get("model", "fl2va"),
@@ -63,11 +65,31 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+def default_character(name: str = "", description: str = "") -> dict[str, Any]:
+    """One member of the cast.
+
+    ``name`` and ``description`` are required — the name is how a shot prompt
+    refers to them, and the description is what actually conditions the model.
+    An image and a voice clip are optional: they become Ref2VA references
+    (a picture, and a soundtrack carrying that voice) when a shot using this
+    character runs on a model that takes reference lists.
+    """
+    return {
+        "id": new_id("c"),
+        "name": name,
+        "description": description,
+        "image": None,   # {path, url, label}
+        "voice": None,   # {path, url, label}
+    }
+
+
 def default_board(name: str) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "name": name or "Untitled storyboard",
         "sceneDescription": "",
+        "soundscape": "",
+        "characters": [],
         "styleRefs": [],
         "defaults": {
             "model": "fl2va",
@@ -256,6 +278,8 @@ class Store:
         board.setdefault("schema", SCHEMA)
         board.setdefault("name", "Untitled storyboard")
         board.setdefault("sceneDescription", "")
+        board.setdefault("soundscape", "")
+        board.setdefault("characters", [])
         board.setdefault("styleRefs", [])
         board.setdefault("createdAt", time.time())
         board.setdefault("updatedAt", time.time())
@@ -266,6 +290,13 @@ class Store:
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
 
+        for ch in board.get("characters") or []:
+            ch.setdefault("id", new_id("c"))
+            ch.setdefault("name", "")
+            ch.setdefault("description", "")
+            ch.setdefault("image", None)
+            ch.setdefault("voice", None)
+
         shots = board.setdefault("shots", [])
         seen: set[str] = set()
         for shot in shots:
@@ -275,6 +306,8 @@ class Store:
             seen.add(shot["id"])
             shot.setdefault("title", "Untitled shot")
             shot.setdefault("prompt", "")
+            shot.setdefault("soundNote", "")
+            shot.setdefault("characterIds", [])
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("model", defaults["model"])
