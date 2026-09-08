@@ -223,6 +223,11 @@ class Orchestrator:
             self.store.save(slug, board)
             return
 
+        # Clear what this run is about to be judged on. Otherwise a previous
+        # run's outputs satisfy the checks even if this one writes nothing —
+        # the exact failure mode the validation exists to catch.
+        self._clear_expected(spec)
+
         run.summary = spec.summary
         run.status = "running"
         run.started_at = time.time()
@@ -318,6 +323,19 @@ class Orchestrator:
             # last frame of the upstream clip
             ref["resolved"] = str(frames[-1].relative_to(self.workspace))
         return None
+
+    def _clear_expected(self, spec) -> None:
+        for path in spec.expected_outputs:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        if spec.frames_dir:
+            try:
+                for f in Path(spec.frames_dir).glob("*.png"):
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
         """Dump this run's stdout plus a short header to <shot>/run.log."""

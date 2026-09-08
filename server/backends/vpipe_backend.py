@@ -265,7 +265,7 @@ class VpipeBackend(Backend):
                 spec, outputs = self._fl2va_spec(
                     shot, paths, prompt, width, height, frames, steps, seed
                 )
-            expected_seconds = _estimate_seconds(width, height, frames, steps)
+            expected_seconds = _estimate_seconds(width, height, frames, steps, model)
             frames_dir = paths.abs_frames
 
         spec_path = paths.abs_dir / "shot.vpipeline"
@@ -881,7 +881,8 @@ def _ref_source(ref: Any, paths: ShotPaths) -> str | None:
     return ref.get("path") or ref.get("resolved") or None
 
 
-def _estimate_seconds(w: int, h: int, frames: int, steps: int) -> float:
+def _estimate_seconds(w: int, h: int, frames: int, steps: int,
+                      model: str = "fl2va") -> float:
     """Baseline for the runtime sanity check.
 
     Only used to catch a run that finished implausibly fast, so it needs to be
@@ -902,6 +903,14 @@ def _estimate_seconds(w: int, h: int, frames: int, steps: int) -> float:
     px = (w * h) / (960 * 544)
     fixed = 170.0
     denoise = 1.95 * (frames ** 1.37) * (steps / 8.0) * px
+
+    # Ref2VA packs its references into the same sequence being denoised, and
+    # encodes each one twice up front (vision tower, then video VAE). Measured
+    # on this machine: ~35 min against ~27 min for the same geometry on FL2VA
+    # with one image reference. Approximate, and only used to spot a run that
+    # finished implausibly fast.
+    if model == "ref2va":
+        return (fixed + denoise) * 1.3
     return fixed + denoise
 
 
