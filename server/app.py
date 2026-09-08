@@ -180,6 +180,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(raw)
 
+        if path == "/api/library":
+            return self._send_json({"images": ctx.store.library()})
+
         if path == "/api/status":
             return self._send_json(ctx.orch.status())
 

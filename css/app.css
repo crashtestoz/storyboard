@@ -915,3 +915,96 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .toast[data-kind="error"] { border-color: var(--err); color: var(--err); background: var(--err-ghost); }
 .toast[data-kind="warn"]  { border-color: var(--warn); color: var(--warn); background: var(--warn-ghost); }
+
+/* --- image picker modal -------------------------------------------------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  padding: var(--sp-5);
+}
+
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: min(880px, 100%);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: var(--sp-4);
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: var(--sp-3);
+}
+
+.modal-foot {
+  padding: var(--sp-2) var(--sp-4) var(--sp-3);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.pick {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-sunken);
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s;
+}
+
+.pick:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+.pick img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  display: block;
+}
+
+.pick-meta {
+  padding: 5px var(--sp-2) 6px;
+  font-size: var(--fs-xs);
+  line-height: 1.35;
+}
+
+.pick-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pick-project { color: var(--text-faint); }
+
+.drop-hint {
+  border-color: var(--accent) !important;
+  background: var(--accent-ghost) !important;
+}
+
+.style-refs.dropping, .ref-slot.dropping {
+  border-color: var(--accent);
+  background: var(--accent-ghost);
+}
+
+/* A class rule with display: grid beats the UA's [hidden] { display: none },
+   so the modal has to opt out explicitly or it is permanently visible. */
+.modal[hidden] { display: none !important; }

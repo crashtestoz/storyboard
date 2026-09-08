@@ -264,22 +264,6 @@ function wireChrome() {
     renderEditor();
   });
 
-  $("#styleRefFile").addEventListener("change", async (e) => {
-    const files = [...e.target.files];
-    e.target.value = "";
-    for (const f of files) {
-      try {
-        const ref = await API.uploadRef(state.slug, f);
-        state.board.styleRefs.push(ref);
-      } catch (err) {
-        toast(`Upload failed: ${err.message}`, "error");
-      }
-    }
-    markDirty();
-    await saveNow();
-    render();
-  });
-
   window.addEventListener("beforeunload", (e) => {
     if (state.dirty) {
       e.preventDefault();
@@ -396,9 +380,67 @@ function renderRail() {
   // innerHTML, so a button living inside it would be destroyed on the first
   // render and appendChild(null) would throw on the second.
   const add = el("button", "style-ref-add", "+");
-  add.title = "Upload a reference image";
-  add.addEventListener("click", () => $("#styleRefFile").click());
+  add.title = "Add a reference image (pick an existing one or upload)";
+  add.addEventListener("click", async () => {
+    const chosen = await chooseImage("Choose a style reference");
+    if (!chosen) return;
+    state.board.styleRefs.push(chosen);
+    markDirty();
+    await saveNow();
+    render();
+  });
   wrap.appendChild(add);
+
+  // Drag images straight in from Finder.
+  wrap.ondragover = (e) => {
+    e.preventDefault();
+    wrap.classList.add("dropping");
+  };
+  wrap.ondragleave = () => wrap.classList.remove("dropping");
+  wrap.ondrop = async (e) => {
+    e.preventDefault();
+    wrap.classList.remove("dropping");
+    for (const f of [...(e.dataTransfer.files || [])]) {
+      if (!f.type.startsWith("image/")) continue;
+      try {
+        state.board.styleRefs.push(await API.uploadRef(state.slug, f));
+      } catch (err) {
+        toast(`Upload failed: ${err.message}`, "error");
+      }
+    }
+    markDirty();
+    await saveNow();
+    render();
+  };
+
+  // clip settings (project-level)
+  const resSel = $("#projResolution");
+  if (resSel.dataset.built !== "1" || resSel.options.length !== allResolutions().length) {
+    resSel.innerHTML = "";
+    allResolutions().forEach((r) => {
+      const o = el("option", null, r.replace("x", " × "));
+      o.value = r;
+      resSel.appendChild(o);
+    });
+    resSel.dataset.built = "1";
+  }
+  resSel.value = projectResolution();
+
+  const modelSel = $("#defModel");
+  if (modelSel.dataset.built !== "1") {
+    state.models.forEach((m) => {
+      const o = el("option", null, m.available ? m.label : `${m.label} — unavailable`);
+      o.value = m.id;
+      modelSel.appendChild(o);
+    });
+    modelSel.dataset.built = "1";
+  }
+  modelSel.value = state.board.defaults.model || "fl2va";
+
+  const stepsInput = $("#defSteps");
+  if (document.activeElement !== stepsInput) {
+    stepsInput.value = state.board.defaults.steps || 8;
+  }
 
   const q = $("#queueList");
   q.innerHTML = "";
@@ -463,8 +505,8 @@ function renderStrip() {
       el(
         "div",
         "shot-sub",
-        `${raw.resolution}` +
-          (cap && cap.kind === "image" ? " · still" : ` · ${raw.frames}f`) +
+        `${projectResolution()}` +
+          (cap && cap.kind === "image" ? " · still" : ` · ${fmtDur(raw.frames)}`) +
           ` · ${raw.steps} steps`
       )
     );
@@ -705,31 +747,31 @@ function renderEditor() {
   );
 
   const isImage = cap && cap.kind === "image";
-  const row = el("div", isImage ? "field-row" : "field-row-3");
-  row.appendChild(
-    field(
-      "Resolution",
-      select(
-        (cap ? cap.resolutions : [raw.resolution]).map((r) => [r, r.replace("x", " × ")]),
-        raw.resolution,
-        (v) => {
-          raw.resolution = v;
-          markDirty();
-          renderStrip();
-        }
-      )
-    )
-  );
+  const row = el("div", "field-row");
   if (!isImage) {
+    // A duration picker rather than a frames box. Clip length is not free —
+    // H3 only accepts 17n+5 frames and will not decode below 39 — so offering
+    // every integer just invites a value that gets silently snapped. People
+    // think in seconds anyway; the frame count stays visible so nothing is
+    // hidden.
+    const options = validLengths(cap);
+    const exact = options.some(([f]) => f === raw.frames);
+    if (!exact) options.push([raw.frames, `${fmtDur(raw.frames)} (${raw.frames}f, custom)`]);
+    options.sort((a, b) => a[0] - b[0]);
+
     row.appendChild(
       field(
-        "Frames",
-        input("number", raw.frames, (v) => {
-          raw.frames = Number(v);
-          markDirty();
-          renderEditor();
-          renderStrip();
-        }),
+        "Duration",
+        select(
+          options.map(([f, label]) => [String(f), label]),
+          String(raw.frames),
+          (v) => {
+            raw.frames = Number(v);
+            markDirty();
+            renderEditor();   // safe: a select commits on change, not per key
+            renderStrip();
+          }
+        ),
         null,
         frameHint(raw.frames, cap)
       )
@@ -756,17 +798,69 @@ function renderEditor() {
   );
   row2.appendChild(
     field(
-      "Duration",
-      readOnly(isImage ? "still image" : `${(raw.frames / 24).toFixed(2)}s @ 24fps`)
+      "Length",
+      readOnly(isImage ? "still image" : `${raw.frames} frames @ 24fps`)
     )
   );
   params.appendChild(row2);
 
+  const projRes = projectResolution();
+  if (cap && cap.resolutions.length && !cap.resolutions.includes(projRes)) {
+    params.appendChild(
+      el(
+        "div",
+        "inline-warn",
+        `⚠ the project resolution ${projRes} is not one this model lists ` +
+          `(${cap.resolutions.join(", ")}) — change it in Clip settings`
+      )
+    );
+  }
   if (cap && !cap.available) {
-    const warn = el("div", "inline-warn", `⚠ ${cap.unavailableReason}`);
-    params.appendChild(warn);
+    params.appendChild(el("div", "inline-warn", `⚠ ${cap.unavailableReason}`));
   }
   host.appendChild(params);
+}
+
+/** The one resolution every shot renders at — a storyboard makes one video. */
+function projectResolution() {
+  return (state.board && state.board.defaults && state.board.defaults.resolution)
+    || "960x544";
+}
+
+/** Every resolution any available model offers, for the project-level picker. */
+function allResolutions() {
+  const seen = [];
+  state.models.forEach((m) => {
+    if (!m.available) return;
+    m.resolutions.forEach((r) => {
+      if (!seen.includes(r)) seen.push(r);
+    });
+  });
+  return seen.length ? seen : ["960x544"];
+}
+
+/** Legal clip lengths for a model, as [frames, label] up to ~10s. */
+function validLengths(cap) {
+  const out = [];
+  if (!cap) return out;
+  const r = cap.frameRule;
+  if (r.kind !== "affine") {
+    for (const f of [24, 48, 72, 96, 120, 144, 192, 240]) {
+      if (f >= r.minimum) out.push([f, `${fmtDur(f)} (${f}f)`]);
+    }
+    return out;
+  }
+  for (let n = 0; n < 40; n += 1) {
+    const f = r.step * n + r.offset;
+    if (f < r.minimum) continue;
+    if (f > 250) break;
+    out.push([f, `${fmtDur(f)} (${f}f)`]);
+  }
+  return out;
+}
+
+function fmtDur(frames, fps = 24) {
+  return `${(frames / fps).toFixed(1)}s`;
 }
 
 function frameHint(frames, cap) {
@@ -1023,30 +1117,114 @@ function refSlot(label, shot, key) {
     slot.appendChild(x);
   } else {
     const l = el("div", "ref-slot-label");
-    l.append(el("strong", null, label), el("span", null, "click to upload"));
+    l.append(el("strong", null, label), el("span", null, "click to choose · or drop an image"));
     slot.appendChild(l);
     slot.addEventListener("click", () => pickRef(shot, key));
+    slot.ondragover = (e) => {
+      e.preventDefault();
+      slot.classList.add("dropping");
+    };
+    slot.ondragleave = () => slot.classList.remove("dropping");
+    slot.ondrop = async (e) => {
+      e.preventDefault();
+      slot.classList.remove("dropping");
+      const f = [...(e.dataTransfer.files || [])].find((x) => x.type.startsWith("image/"));
+      if (!f) return;
+      try {
+        shot[key] = await API.uploadRef(state.slug, f);
+        markDirty();
+        await saveNow();
+        render();
+      } catch (err) {
+        toast(`Upload failed: ${err.message}`, "error");
+      }
+    };
   }
   return slot;
 }
 
-function pickRef(shot, key) {
-  const inp = el("input");
-  inp.type = "file";
-  inp.accept = "image/png,image/jpeg,image/webp";
-  inp.addEventListener("change", async () => {
-    const f = inp.files[0];
-    if (!f) return;
-    try {
-      shot[key] = await API.uploadRef(state.slug, f);
-      markDirty();
-      await saveNow();
-      render();
-    } catch (err) {
-      toast(`Upload failed: ${err.message}`, "error");
-    }
+/**
+ * Choose an image: pick one already in the workspace, or upload a new one.
+ * Picking matters because references usually already exist on disk — having
+ * only an upload button means re-uploading a file that is right there.
+ */
+async function chooseImage(title) {
+  const modal = $("#picker");
+  const grid = $("#pickerGrid");
+  $("#pickerTitle").textContent = title;
+  grid.innerHTML = "";
+  grid.appendChild(el("div", "empty-state", "loading…"));
+  modal.hidden = false;
+
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      grid.innerHTML = "";
+      resolve(value);
+    };
+
+    $("#pickerClose").onclick = () => finish(null);
+    modal.onclick = (e) => {
+      if (e.target === modal) finish(null);
+    };
+    $("#pickerUpload").onclick = () => {
+      const inp = el("input");
+      inp.type = "file";
+      inp.accept = "image/png,image/jpeg,image/webp";
+      inp.onchange = async () => {
+        const f = inp.files[0];
+        if (!f) return;
+        try {
+          finish(await API.uploadRef(state.slug, f));
+        } catch (err) {
+          toast(`Upload failed: ${err.message}`, "error");
+          finish(null);
+        }
+      };
+      inp.click();
+    };
+
+    API.library()
+      .then(({ images }) => {
+        grid.innerHTML = "";
+        if (!images.length) {
+          grid.appendChild(
+            el("div", "empty-state", "No images in the workspace yet — upload one.")
+          );
+          return;
+        }
+        images.forEach((img) => {
+          const card = el("div", "pick");
+          const im = el("img");
+          im.src = img.url;
+          im.loading = "lazy";
+          im.alt = img.label;
+          card.appendChild(im);
+          const meta = el("div", "pick-meta");
+          meta.appendChild(el("div", "pick-name", img.label));
+          meta.appendChild(el("div", "pick-project", img.project));
+          card.appendChild(meta);
+          card.onclick = () =>
+            finish({ kind: "upload", label: img.label, path: img.path, url: img.url });
+          grid.appendChild(card);
+        });
+      })
+      .catch((err) => {
+        grid.innerHTML = "";
+        grid.appendChild(el("div", "empty-state", `Could not list images: ${err.message}`));
+      });
   });
-  inp.click();
+}
+
+async function pickRef(shot, key) {
+  const chosen = await chooseImage(
+    key === "startRef" ? "Choose a start frame" : "Choose an end frame"
+  );
+  if (!chosen) return;
+  shot[key] = chosen;
+  markDirty();
+  await saveNow();
+  render();
 }
 
 document.addEventListener("DOMContentLoaded", boot);

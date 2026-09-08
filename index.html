@@ -56,7 +56,29 @@
           <span class="hint">— project-wide</span>
         </div>
         <div class="style-refs" id="styleRefs"></div>
-        <input type="file" id="styleRefFile" accept="image/png,image/jpeg,image/webp" multiple hidden>
+      </section>
+
+      <section>
+        <div class="section-label">
+          Clip settings
+          <span class="hint">— applies to every shot</span>
+        </div>
+        <div class="field">
+          <label>Resolution</label>
+          <select id="projResolution"></select>
+        </div>
+        <div class="field">
+          <label>Frame rate</label>
+          <div class="readonly">24 fps — fixed by the models</div>
+        </div>
+        <div class="field">
+          <label>Default model <span class="hint-inline">for new shots</span></label>
+          <select id="defModel"></select>
+        </div>
+        <div class="field">
+          <label>Default steps <span class="hint-inline">8 draft · 16 good</span></label>
+          <input type="number" id="defSteps" value="8">
+        </div>
       </section>
 
       <section>
@@ -87,6 +109,22 @@
       </div>
     </main>
 
+  </div>
+
+  <div id="picker" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <span id="pickerTitle">Choose an image</span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-sm" id="pickerUpload">Upload new…</button>
+        <button class="btn btn-ghost btn-sm" id="pickerClose">Close</button>
+      </div>
+      <div class="modal-body" id="pickerGrid"></div>
+      <div class="modal-foot">
+        Images already in the workspace. Per-frame folders are excluded — use
+        “chain from previous shot” for that.
+      </div>
+    </div>
   </div>
 
   <div id="toast" class="toast" hidden></div>

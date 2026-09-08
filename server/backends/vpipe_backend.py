@@ -216,7 +216,16 @@ class VpipeBackend(Backend):
         if not cap.available:
             raise ValueError(cap.unavailable_reason or f"{model} is not available")
 
-        width, height = _wh(shot.get("resolution") or cap.resolutions[0])
+        # Resolution is a project setting, not a per-shot one: a storyboard
+        # produces one video, and mixing frame sizes between shots would just
+        # mean rescaling them all back together later. A shot-level value is
+        # still honoured as a fallback for boards written before the move.
+        res = (
+            (project.get("defaults") or {}).get("resolution")
+            or shot.get("resolution")
+            or cap.resolutions[0]
+        )
+        width, height = _wh(res)
         prompt = _resolved_prompt(shot, project)
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
