@@ -1097,3 +1097,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   padding: 1px 6px;
   border-radius: var(--radius-sm);
 }
+
+/* The image picker can be opened from inside the cast editor, so it has to
+   sit above it. Equal z-index plus later DOM order put it behind, which made
+   choosing a character portrait look like a dead click. */
+#castEditor { z-index: 100; }
+#picker     { z-index: 120; }

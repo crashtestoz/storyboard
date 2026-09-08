@@ -640,41 +640,51 @@ async function editCharacter(existing) {
           host.appendChild(l);
         }
         const x = el("button", "clear-ref", "✕");
+        x.title = "Remove";
         x.onclick = (e) => {
           e.stopPropagation();
           obj[key] = null;
           paint();
         };
         host.appendChild(x);
+        // clicking the filled slot replaces it, rather than forcing a
+        // clear-then-add round trip
+        host.onclick = () => pickMedia(obj, key, kind);
+        host.title = "Click to replace";
       } else {
         const l = el("div", "ref-slot-label");
         l.append(el("strong", null, label), el("span", null, "optional — click to add"));
         host.appendChild(l);
-        host.onclick = async () => {
-          if (kind === "image") {
-            const chosen = await chooseImage(`Choose an image for ${draft.name || "this character"}`);
-            if (chosen) {
-              obj[key] = chosen;
-              paint();
-            }
-            return;
-          }
-          const inp = el("input");
-          inp.type = "file";
-          inp.accept = "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
-          inp.onchange = async () => {
-            const f = inp.files[0];
-            if (!f) return;
-            try {
-              obj[key] = await API.uploadRef(state.slug, f);
-              paint();
-            } catch (err) {
-              toast(`Upload failed: ${err.message}`, "error");
-            }
-          };
-          inp.click();
-        };
+        host.onclick = () => pickMedia(obj, key, kind);
       }
+    }
+
+    async function pickMedia(obj, key, kind) {
+      if (kind === "image") {
+        const chosen = await chooseImage(
+          `Choose an image for ${$("#castName").value.trim() || "this character"}`
+        );
+        if (chosen) {
+          obj[key] = chosen;
+          paint();
+        }
+        return;
+      }
+      const inp = el("input");
+      inp.type = "file";
+      inp.accept =
+        "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
+      inp.onchange = async () => {
+        const f = inp.files[0];
+        if (!f) return;
+        try {
+          obj[key] = await API.uploadRef(state.slug, f);
+          paint();
+        } catch (err) {
+          toast(`Upload failed: ${err.message}`, "error");
+        }
+      };
+      inp.click();
     }
   });
 }
@@ -1575,8 +1585,17 @@ async function chooseImage(title) {
           meta.appendChild(el("div", "pick-name", img.label));
           meta.appendChild(el("div", "pick-project", img.project));
           card.appendChild(meta);
-          card.onclick = () =>
-            finish({ kind: "upload", label: img.label, path: img.path, url: img.url });
+          card.onclick = async () => {
+            // copy it into this project rather than pointing at another
+            // project's folder, which would break if that project went away
+            try {
+              const ref = await API.adoptRef(state.slug, img.path);
+              finish({ kind: "upload", ...ref });
+            } catch (err) {
+              toast(`Could not use that image: ${err.message}`, "error");
+              finish(null);
+            }
+          };
           grid.appendChild(card);
         });
       })

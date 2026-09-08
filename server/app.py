@@ -13,7 +13,8 @@ Routes
 ``PUT  /api/boards/<slug>``     save one board
 ``DELETE /api/boards/<slug>``   remove the board file (keeps rendered media)
 ``GET  /api/boards/<slug>/export``   download the board as JSON
-``POST /api/boards/<slug>/refs``     upload a reference image (raw body)
+``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
+``POST /api/boards/<slug>/refs/adopt``  copy an existing workspace file in
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
@@ -227,6 +228,14 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/refs", path)
         if m:
             return self._upload_ref(m.group(1))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/refs/adopt", path)
+        if m:
+            payload = self._read_json()
+            rel = payload.get("path")
+            if not rel:
+                raise ValueError("path is required")
+            return self._send_json(ctx.store.adopt(m.group(1), rel), 201)
 
         if path == "/api/render":
             payload = self._read_json()

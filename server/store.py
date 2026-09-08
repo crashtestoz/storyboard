@@ -237,6 +237,42 @@ class Store:
         else:
             shutil.rmtree(d)
 
+    def adopt(self, slug: str, rel_path: str) -> dict[str, Any]:
+        """Copy an existing workspace file into this project's ``refs/``.
+
+        Picking an image from another project would otherwise leave this board
+        pointing into that project's folder: deleting the other project breaks
+        this one, and an exported board refers to a file its own folder does
+        not contain. Copying keeps the promise the layout is built on — a
+        project folder holds everything that project needs.
+        """
+        src = (self.workspace / rel_path).resolve()
+        # never let a crafted path reach outside the workspace
+        src.relative_to(self.workspace.resolve())
+        if not src.is_file():
+            raise FileNotFoundError(f"no such file: {rel_path}")
+
+        refs = self.refs_dir(slug)
+        refs.mkdir(parents=True, exist_ok=True)
+        dest = refs / src.name
+        if dest.resolve() == src:
+            # already this project's own ref — nothing to copy
+            pass
+        else:
+            n = 2
+            while dest.exists() and dest.stat().st_size != src.stat().st_size:
+                dest = refs / f"{src.stem}-{n}{src.suffix}"
+                n += 1
+            if not dest.exists():
+                shutil.copy2(src, dest)
+
+        rel = dest.relative_to(self.workspace)
+        return {
+            "path": str(rel).replace("\\", "/"),
+            "url": "/media/" + str(rel).replace("\\", "/"),
+            "label": dest.name,
+        }
+
     # -- import / export -------------------------------------------------- #
 
     def export(self, slug: str) -> str:

@@ -51,6 +51,11 @@ const API = {
 
   library: () => req("GET", "/api/library"),
 
+  // copy an existing workspace image into this board's refs/ so the project
+  // folder stays self-contained
+  adoptRef: (slug, path) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
+
   render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
   stop: () => req("POST", "/api/stop"),
   status: () => req("GET", "/api/status"),
