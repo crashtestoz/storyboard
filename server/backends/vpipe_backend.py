@@ -82,7 +82,10 @@ SILENT_FAILURE_PATTERNS = [
     (r"the vision tower produced nothing", "reference encoding produced nothing"),
     (r"encode failed", "an encode step failed"),
     (r"could not be found|not found in the model registry", "a model was missing"),
-    (r"refused", "a stage refused the request"),
+    # Narrow on purpose: a bare "refused" also appears in the benign
+    # wired-pool warning ("the box refused to wire 0 MB"), which is graceful
+    # degradation, not failure.
+    (r"refused the request|refuses at|refusing to run", "a stage refused the request"),
 ]
 
 # warnings that look alarming and are not failures
@@ -615,7 +618,16 @@ class VpipeBackend(Backend):
     # ------------------------------------------------------------------ #
 
     def extra_checks(self, spec: JobSpec, result: RunResult) -> Iterable[Check]:
-        joined = "\n".join(text for _lvl, text in result.log)
+        # A line already classified as benign is excluded from the
+        # silent-failure scan, rather than only being counted separately.
+        # Without this the two lists do not interact and a known-harmless
+        # warning can still fail the run: "wired pool: the box refused to
+        # wire 0 MB" is graceful degradation, and it tripped a pattern
+        # looking for a refusal.
+        def benign(text: str) -> bool:
+            return any(re.search(pat, text, re.I) for pat in BENIGN_PATTERNS)
+
+        joined = "\n".join(text for _lvl, text in result.log if not benign(text))
 
         hits: list[str] = []
         for pattern, meaning in SILENT_FAILURE_PATTERNS:
@@ -640,16 +652,14 @@ class VpipeBackend(Backend):
                 else "no denoise progress ever reported",
             )
 
-        benign = [
-            text
-            for lvl, text in result.log
-            if lvl == "WARN" and any(re.search(p, text, re.I) for p in BENIGN_PATTERNS)
+        benign_lines = [
+            text for lvl, text in result.log if lvl == "WARN" and benign(text)
         ]
-        if benign:
+        if benign_lines:
             yield Check(
                 "warnings classified",
                 None,
-                f"{len(benign)} benign warning(s) ignored (e.g. wired pool)",
+                f"{len(benign_lines)} benign warning(s) ignored (e.g. wired pool)",
             )
 
 
