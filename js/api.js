@@ -49,6 +49,8 @@ const API = {
       "X-Filename": file.name,
     }),
 
+  library: () => req("GET", "/api/library"),
+
   render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
   stop: () => req("POST", "/api/stop"),
   status: () => req("GET", "/api/status"),

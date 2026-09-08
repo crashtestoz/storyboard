@@ -131,6 +131,45 @@ class Store:
         out.sort(key=lambda b: b["updatedAt"], reverse=True)
         return out
 
+    def library(self, limit: int = 300) -> list[dict[str, Any]]:
+        """Images already in the workspace, for picking without re-uploading.
+
+        Covers uploaded refs, loose images dropped into a project folder by
+        hand, and rendered stills. Per-frame directories are skipped
+        deliberately: a handful of clips is thousands of PNGs, and chaining to
+        a previous shot's last frame is already a dedicated control rather
+        than something you hunt for in a grid.
+        """
+        exts = {".png", ".jpg", ".jpeg", ".webp"}
+        out: list[dict[str, Any]] = []
+        if not self.root.exists():
+            return out
+        for path in sorted(self.root.rglob("*")):
+            if len(out) >= limit:
+                break
+            if not path.is_file() or path.suffix.lower() not in exts:
+                continue
+            # Any per-frame directory, however it is named — "frames",
+            # "frames-h3", "frames-ref" all exist in practice, and each holds
+            # a whole clip's worth of PNGs that would bury everything else.
+            parts = path.relative_to(self.root).parts
+            if any(part.startswith("frames") for part in parts[:-1]):
+                continue
+            rel = path.relative_to(self.workspace)
+            project = path.relative_to(self.root).parts[0]
+            out.append(
+                {
+                    "path": str(rel).replace("\\", "/"),
+                    "url": "/media/" + str(rel).replace("\\", "/"),
+                    "label": path.name,
+                    "project": project,
+                    "bytes": path.stat().st_size,
+                    "modifiedAt": path.stat().st_mtime,
+                }
+            )
+        out.sort(key=lambda i: i["modifiedAt"], reverse=True)
+        return out
+
     # -- read / write ---------------------------------------------------- #
 
     def load(self, slug: str) -> dict[str, Any]:
