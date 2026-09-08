@@ -231,13 +231,49 @@ yet (no output files exist) — nothing partial to corrupt — which the
 orchestrator can already tell from the same output-manifest check used for
 success detection.
 
-## MVP scope
+## MVP scope — built
 
-1. Generator for the three templates above (already have working examples
-   of all three from tonight's Falcon project to build the templates from).
-2. Serial queue + progress parsing.
-3. Storyboard strip + per-shot editor, chaining via "last frame of shot N."
-4. Direct file-serving preview.
+1. Generator for the shot templates. **Done** — fl2va, fl2va with anchors,
+   ref2va, and a Krea-2 still.
+2. Serial queue + progress parsing. **Done**, including the validation
+   contract below and per-shot run logs persisted next to the outputs.
+3. Storyboard strip + per-shot editor, chaining via "last frame of shot N".
+   **Done and verified**: a chained shot's opening frame matches its
+   predecessor's closing frame.
+4. Direct file-serving preview. **Done.**
+
+Added since, from use rather than from the plan:
+
+5. **A cast.** Characters with a required name and description and optional
+   reference image and voice clip; a shot casts who appears in it. Portraits
+   and voices become Ref2VA references, within that model's real limits.
+6. **Sound in two layers** — a project bed and per-shot accents, appended
+   after the visual description because that is where H3 expects sound.
+7. **Dialogue via a pluggable speech engine** (`server/tts/`), mixed over the
+   finished clip rather than asked of the video model, which does not produce
+   intelligible speech.
+8. **Draft mode** — half size, 6 steps, same length and seed, 3.7-8.3x faster.
+9. **Aspect ratios** with the sizes each model's docs cite marked as such.
+
+## What use taught us that the plan did not
+
+Three things only showed up once the thing existed:
+
+*   **Every real failure exits 0.** This was the design's central bet and it
+    held: the validation contract has caught a run that wrote nothing, a run
+    that finished in 5% of its expected time, and a malformed-reference run
+    that never reached denoise — all of which reported success.
+*   **A UI that renders is not a UI that works.** Several faults were
+    invisible to the server and to a syntax check: handlers silently removed
+    by an over-broad edit, a modal that threw before unhiding itself, a field
+    that rebuilt itself on every keystroke and so accepted only the first
+    character. Screenshotting the actual page found each one. An audit
+    comparing every id in the markup against the ids the script references now
+    guards the first class.
+*   **Constraints are worth encoding, not documenting.** H3's `17n+5` frame
+    rule and its 39-frame decode floor became a duration picker rather than a
+    warning, and the models' 16-pixel multiple became the only sizes on offer.
+    A rule the UI cannot violate beats a rule the user has to remember.
 
 ## Stretch / open questions
 

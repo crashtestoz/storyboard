@@ -48,6 +48,9 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "prompt": "",
         "soundNote": "",
         "characterIds": [],
+        "dialogue": "",           # the spoken line, synthesised separately
+        "dialogueVoice": "",      # engine voice id, or "" for the default
+        "dubUrl": None,           # the clip with speech muxed over it
         "startRef": None,
         "endRef": None,
         "model": d.get("model", "fl2va"),
@@ -98,6 +101,7 @@ def default_board(name: str) -> dict[str, Any]:
             "frames": 124,
             "steps": 8,
             "draft": False,
+            "tts": "none",
         },
         "shots": [],
         "createdAt": time.time(),
@@ -295,6 +299,7 @@ class Store:
             shot.update(
                 status="draft", progress=0, runtimeSeconds=None,
                 outputs=[], validation=None, thumb=None, logUrl=None,
+                dubUrl=None,
             )
         slug = slugify(board["name"])
         base, n = slug, 2
@@ -328,6 +333,7 @@ class Store:
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
         defaults.setdefault("draft", False)
+        defaults.setdefault("tts", "none")
 
         for ch in board.get("characters") or []:
             ch.setdefault("id", new_id("c"))
@@ -347,6 +353,9 @@ class Store:
             shot.setdefault("prompt", "")
             shot.setdefault("soundNote", "")
             shot.setdefault("characterIds", [])
+            shot.setdefault("dialogue", "")
+            shot.setdefault("dialogueVoice", "")
+            shot.setdefault("dubUrl", None)
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("model", defaults["model"])

@@ -12,6 +12,7 @@ from .app import Context, build_server
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .store import Store
+from .tts import TTS_IDS, build_tts
 
 UI_ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,6 +56,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--comfyui-url", default=os.environ.get("SBV_COMFYUI", "http://127.0.0.1:8188")
     )
+    p.add_argument(
+        "--tts",
+        choices=TTS_IDS,
+        default=os.environ.get("SBV_TTS", "vpipe-moss"),
+        help="default speech engine for new boards (each board may override it)",
+    )
+    p.add_argument(
+        "--tts-url",
+        default=os.environ.get("SBV_TTS_URL", ""),
+        help="MCC base URL for the mcc-qwen3 engine, e.g. http://mcc-host:8000",
+    )
     return p.parse_args(argv)
 
 
@@ -79,9 +91,18 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         comfyui_url=args.comfyui_url,
     )
+    # Every engine is constructed, none loads anything until asked, so a board
+    # can switch between them at runtime instead of needing a restart.
+    tts_engines = {
+        kind: build_tts(kind, vpipe_binary=args.vpipe.expanduser(),
+                        workspace=workspace, mcc_url=args.tts_url)
+        for kind in TTS_IDS
+    }
+
     store = Store(workspace=workspace)
     orch = Orchestrator(backend=backend, store=store, workspace=workspace)
-    ctx = Context(UI_ROOT, workspace, store, backend, orch)
+    ctx = Context(UI_ROOT, workspace, store, backend, orch,
+                  tts_engines=tts_engines, default_tts=args.tts)
 
     try:
         httpd = build_server(bind, args.port, ctx)
@@ -115,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"             [{mark}] {c.id}{note}")
     else:
         print(f"  WARNING    backend not usable: {message}")
+    print("")
+    print(f"  speech     default {args.tts}")
+    for kind, eng in tts_engines.items():
+        if kind == "none":
+            continue
+        tok, tmsg = eng.health()
+        print(f"             [{'ok  ' if tok else '--  '}] {kind}"
+              + ("" if tok else f"  ({tmsg.splitlines()[0][:88]})"))
     print("")
     print("  Ctrl-C to stop.")
     print("")

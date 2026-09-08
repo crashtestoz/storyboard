@@ -15,6 +15,7 @@ Routes
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing workspace file in
+``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
@@ -34,8 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from .backends.base import Backend
+from .dubbing import dub_shot
 from .orchestrator import Orchestrator
 from .store import Store, default_shot
+from .tts.base import TTSEngine
 
 MAX_UPLOAD = 32 * 1024 * 1024
 ALLOWED_UPLOAD_TYPES = {
@@ -60,12 +63,21 @@ class Context:
     """Shared, immutable-ish wiring handed to every request."""
 
     def __init__(self, ui_root: Path, workspace: Path, store: Store,
-                 backend: Backend, orch: Orchestrator):
+                 backend: Backend, orch: Orchestrator,
+                 tts_engines: dict[str, TTSEngine] | None = None,
+                 default_tts: str = "none"):
         self.ui_root = ui_root.resolve()
         self.workspace = workspace.resolve()
         self.store = store
         self.backend = backend
         self.orch = orch
+        self.tts_engines = tts_engines or {}
+        self.default_tts = default_tts
+
+    def tts(self, kind: str | None) -> TTSEngine:
+        return self.tts_engines.get(kind or self.default_tts) or self.tts_engines.get(
+            "none"
+        )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -160,6 +172,20 @@ class Handler(BaseHTTPRequestHandler):
                                 "healthy": ok, "message": msg},
                     "workspace": str(ctx.workspace),
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
+                    "tts": {
+                        "default": ctx.default_tts,
+                        "engines": [
+                            {
+                                "id": kind,
+                                "label": eng.label,
+                                "healthy": eng.health()[0],
+                                "message": eng.health()[1],
+                                "supportsCloning": eng.supports_cloning,
+                                "voices": [v.to_json() for v in eng.voices()],
+                            }
+                            for kind, eng in ctx.tts_engines.items()
+                        ],
+                    },
                 }
             )
 
@@ -237,6 +263,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("path is required")
             return self._send_json(ctx.store.adopt(m.group(1), rel), 201)
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/dub", path)
+        if m:
+            return self._dub(m.group(1), m.group(2))
+
         if path == "/api/render":
             payload = self._read_json()
             slug = payload.get("slug")
@@ -248,6 +278,59 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(ctx.orch.stop())
 
         return self._err(404, "unknown endpoint")
+
+    def _dub(self, slug: str, shot_id: str) -> None:
+        """Speak a shot's dialogue and mux it over the rendered clip."""
+        ctx = self.ctx
+        board = ctx.store.load(slug)
+        shots = board.get("shots") or []
+        idx = next((i for i, s in enumerate(shots) if s["id"] == shot_id), None)
+        if idx is None:
+            raise FileNotFoundError("no such shot")
+        shot = shots[idx]
+
+        engine = ctx.tts((board.get("defaults") or {}).get("tts"))
+        shot_dir = ctx.workspace / ctx.store.shot_rel_dir(slug, idx + 1)
+
+        # A character's recorded voice is the natural reference for cloning.
+        reference = None
+        if engine.supports_cloning:
+            cast = {c["id"]: c for c in (board.get("characters") or [])}
+            for cid in shot.get("characterIds") or []:
+                voice = (cast.get(cid) or {}).get("voice")
+                if voice and voice.get("path"):
+                    candidate = ctx.workspace / voice["path"]
+                    if candidate.exists():
+                        reference = candidate
+                        break
+
+        result = dub_shot(
+            engine,
+            clip=shot_dir / "clip.mp4",
+            shot_dir=shot_dir,
+            text=shot.get("dialogue") or "",
+            voice=shot.get("dialogueVoice") or None,
+            reference=reference,
+        )
+
+        if not result.ok:
+            return self._send_json(
+                {"error": result.error, "log": result.log,
+                 "engine": engine.id}, 409
+            )
+
+        rel = result.video.relative_to(ctx.workspace)
+        shot["dubUrl"] = "/media/" + str(rel).replace("\\", "/")
+        ctx.store.save(slug, board)
+        return self._send_json(
+            {
+                "dubUrl": shot["dubUrl"],
+                "engine": engine.id,
+                "voice": result.speech.voice if result.speech else "",
+                "seconds": round(result.speech.seconds, 2) if result.speech else 0,
+                "warning": result.warning,
+            }
+        )
 
     def _upload_ref(self, slug: str) -> None:
         """Raw-body image upload; the filename comes from a header.
