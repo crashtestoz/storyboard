@@ -62,6 +62,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "validation": None,
         "thumb": None,
         "logUrl": None,
+        "renderedAs": None,   # "draft" | "final"
     }
 
 
@@ -96,6 +97,7 @@ def default_board(name: str) -> dict[str, Any]:
             "resolution": "960x544",
             "frames": 124,
             "steps": 8,
+            "draft": False,
         },
         "shots": [],
         "createdAt": time.time(),
@@ -289,6 +291,7 @@ class Store:
         defaults.setdefault("resolution", "960x544")
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
+        defaults.setdefault("draft", False)
 
         for ch in board.get("characters") or []:
             ch.setdefault("id", new_id("c"))
@@ -322,4 +325,5 @@ class Store:
             shot.setdefault("validation", None)
             shot.setdefault("thumb", None)
             shot.setdefault("logUrl", None)
+            shot.setdefault("renderedAs", None)
         return board

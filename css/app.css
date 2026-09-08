@@ -1083,3 +1083,17 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 .cast-pick img { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+
+/* --- draft marker -------------------------------------------------------- */
+.draft-badge {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  background: var(--warn);
+  color: #1a1204;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}

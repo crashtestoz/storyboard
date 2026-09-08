@@ -277,6 +277,8 @@ class Orchestrator:
             validation=run.validation,
             thumb=self._pick_thumb(spec),
             logUrl=log_url,
+            # so a draft is never mistaken for a finished shot later
+            renderedAs="draft" if spec.payload.get("draft") else "final",
         )
         self.store.save(slug, board)
 
