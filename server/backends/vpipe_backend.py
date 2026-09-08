@@ -785,21 +785,34 @@ def _overall(phase_pct: dict[str, float]) -> float:
     Phases run in order, so reaching a later one means every earlier one is
     done — that is what keeps the bar from jumping backwards when vpipe moves
     from 'denoise' to 'vae decode' and restarts its own count at 0%.
+
+    Only phases this run *actually has* are counted. Not every pipeline has
+    every phase: a plain text-to-video run never encodes references, so
+    crediting that phase's weight would start the bar at 10% before any work
+    had happened. The weights are renormalised over the phases in play.
     """
     if not phase_pct:
         return 0.0
 
-    known = [p for p in PHASE_ORDER if p in phase_pct]
-    if not known:
+    seen = [p for p in PHASE_ORDER if p in phase_pct]
+    if not seen:
         # a phase we do not model (e.g. 'quantize') — report it directly
         return round(min(99.0, max(phase_pct.values())), 1)
 
-    furthest = max(PHASE_ORDER.index(p) for p in known)
+    furthest = max(PHASE_ORDER.index(p) for p in seen)
+    # phases that count: those we have seen, plus any still to come
+    counted = [
+        p for i, p in enumerate(PHASE_ORDER) if p in phase_pct or i > furthest
+    ]
+    denom = sum(PHASE_WEIGHTS.get(p, 0.0) for p in counted) or 1.0
+
     total = 0.0
     for i, phase in enumerate(PHASE_ORDER):
+        if phase not in counted:
+            continue
         weight = PHASE_WEIGHTS.get(phase, 0.0)
         if i < furthest:
             total += weight                                   # finished
         elif i == furthest:
             total += weight * phase_pct[phase] / 100.0        # in progress
-    return round(min(99.0, total * 100.0), 1)
+    return round(min(99.0, total / denom * 100.0), 1)

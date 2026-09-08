@@ -59,6 +59,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "outputs": [],
         "validation": None,
         "thumb": None,
+        "logUrl": None,
     }
 
 
@@ -194,7 +195,7 @@ class Store:
         for shot in board["shots"]:
             shot.update(
                 status="draft", progress=0, runtimeSeconds=None,
-                outputs=[], validation=None, thumb=None,
+                outputs=[], validation=None, thumb=None, logUrl=None,
             )
         slug = slugify(board["name"])
         base, n = slug, 2
@@ -248,4 +249,5 @@ class Store:
             shot.setdefault("outputs", [])
             shot.setdefault("validation", None)
             shot.setdefault("thumb", None)
+            shot.setdefault("logUrl", None)
         return board

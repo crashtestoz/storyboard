@@ -254,6 +254,12 @@ class Orchestrator:
             self.store.save(slug, board)
             return
 
+        # Persist the log next to the outputs before validating, so a run that
+        # failed overnight can still be diagnosed after a restart — the whole
+        # point of the validation checks is answering "why" hours later, and
+        # in-memory logs do not survive that.
+        log_url = self._write_log(paths.abs_dir, run, spec, result)
+
         validation = self.backend.validate(spec, result)
         run.validation = validation.to_json()
         run.status = validation.verdict
@@ -270,6 +276,7 @@ class Orchestrator:
             outputs=run.outputs,
             validation=run.validation,
             thumb=self._pick_thumb(spec),
+            logUrl=log_url,
         )
         self.store.save(slug, board)
 
@@ -309,6 +316,25 @@ class Orchestrator:
             # last frame of the upstream clip
             ref["resolved"] = str(frames[-1].relative_to(self.workspace))
         return None
+
+    def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
+        """Dump this run's stdout plus a short header to <shot>/run.log."""
+        try:
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            dest = shot_dir / "run.log"
+            head = [
+                f"# shot      {run.shot_id}",
+                f"# summary   {run.summary}",
+                f"# exit      {result.exit_code}",
+                f"# seconds   {round(result.seconds, 1)}",
+                f"# expected  ~{round(spec.expected_seconds)}s",
+                "",
+            ]
+            body = [f"[{lvl}] {text}" for lvl, text in result.log]
+            dest.write_text("\n".join(head + body) + "\n")
+            return self._as_url(dest)
+        except OSError:
+            return None
 
     def _pick_thumb(self, spec) -> str | None:
         # a still's own output, else the middle frame of the clip (most
