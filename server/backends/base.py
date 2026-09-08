@@ -100,7 +100,11 @@ class ModelCapability:
     max_style_refs: int = 0
     supports_audio: bool = False
     frame_rule: FrameRule = field(default_factory=FrameRule)
+    # everything the UI may offer, and the subset the model's own docs cite.
+    # The distinction matters: an untested aspect usually works but is not a
+    # promise, and saying so is better than presenting all sizes as equal.
     resolutions: list[str] = field(default_factory=list)
+    tested_resolutions: list[str] = field(default_factory=list)
     default_steps: int = 8
     # set False when the weights are not present on this machine yet
     available: bool = True
@@ -118,6 +122,7 @@ class ModelCapability:
             "supportsAudio": self.supports_audio,
             "frameRule": self.frame_rule.to_json(),
             "resolutions": self.resolutions,
+            "testedResolutions": self.tested_resolutions,
             "defaultSteps": self.default_steps,
             "available": self.available,
             "unavailableReason": self.unavailable_reason,

@@ -58,8 +58,21 @@ H3_FRAME_RULE = FrameRule(
          "(1.6s @ 24fps) is the shortest clip that decodes at all.",
 )
 
-H3_RESOLUTIONS = ["960x544", "832x480", "1344x768"]
-KREA_RESOLUTIONS = ["1024x1024", "960x544", "1344x768"]
+# Every dimension here is a multiple of 16, which these models require.
+# Grouped by aspect so the UI can offer a ratio rather than a pixel string.
+# 640x368 is the closest valid 16:9 (640x360 is not a multiple of 16).
+ASPECT_TABLE: dict[str, list[str]] = {
+    "16:9": ["1344x768", "960x544", "832x480", "640x368"],
+    "4:3":  ["1024x768", "960x720", "768x576", "640x480"],
+    "1:1":  ["1024x1024", "768x768", "640x640"],
+    "9:16": ["768x1344", "544x960", "480x832"],
+}
+ALL_RESOLUTIONS = [r for group in ASPECT_TABLE.values() for r in group]
+
+# The sizes each model's own documentation actually cites. Anything else in
+# ALL_RESOLUTIONS is offered but untested.
+H3_TESTED = ["960x544", "832x480", "1344x768"]
+KREA_TESTED = ["1024x1024"]
 
 # stdout patterns that mean "this run failed even though it will exit 0"
 SILENT_FAILURE_PATTERNS = [
@@ -158,7 +171,8 @@ class VpipeBackend(Backend):
                 supports_style_refs=False,
                 supports_audio=True,
                 frame_rule=H3_FRAME_RULE,
-                resolutions=H3_RESOLUTIONS,
+                resolutions=ALL_RESOLUTIONS,
+                tested_resolutions=H3_TESTED,
                 default_steps=8,
                 available=fl2va,
                 unavailable_reason=""
@@ -177,7 +191,8 @@ class VpipeBackend(Backend):
                 max_style_refs=9,
                 supports_audio=True,
                 frame_rule=H3_FRAME_RULE,
-                resolutions=H3_RESOLUTIONS,
+                resolutions=ALL_RESOLUTIONS,
+                tested_resolutions=H3_TESTED,
                 default_steps=8,
                 available=ref2va,
                 unavailable_reason=""
@@ -193,7 +208,8 @@ class VpipeBackend(Backend):
                 supports_style_refs=False,
                 supports_audio=False,
                 frame_rule=FrameRule(kind="any", minimum=1),
-                resolutions=KREA_RESOLUTIONS,
+                resolutions=ALL_RESOLUTIONS,
+                tested_resolutions=KREA_TESTED,
                 default_steps=8,
                 available=krea,
                 unavailable_reason=""
@@ -226,9 +242,13 @@ class VpipeBackend(Backend):
             or cap.resolutions[0]
         )
         width, height = _wh(res)
+        draft = bool((project.get("defaults") or {}).get("draft"))
         prompt = _resolved_prompt(shot, project, with_audio=cap.supports_audio)
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
+
+        if draft:
+            width, height, steps = _draft_geometry(width, height, steps)
 
         if cap.kind == "image":
             spec, outputs = self._still_spec(shot, paths, prompt, width, height, steps, seed)
@@ -263,11 +283,13 @@ class VpipeBackend(Backend):
                 "cwd": str(self.workspace),
                 "model": model,
                 "frames": frames,
+                "draft": draft,
             },
             summary=(
                 f"{cap.label.split('—')[0].strip()} · {width}x{height}"
                 + (f" · {frames}f" if cap.kind == "video" else "")
                 + f" · {steps} steps"
+                + (" · DRAFT" if draft else "")
             ),
         )
 
@@ -757,6 +779,29 @@ def _outputs(paths: ShotPaths) -> list[Path]:
 # ---------------------------------------------------------------------------
 # misc helpers
 # ---------------------------------------------------------------------------
+
+def _draft_geometry(w: int, h: int, steps: int) -> tuple[int, int, int]:
+    """Shrink a request so a draft answers "does the shot work" quickly.
+
+    What is safe to cut, and what is not:
+
+    *   **Pixels** — the big lever. Denoise cost is proportional to frame area,
+        so halving each dimension is ~4x less work. Rounded to the multiple of
+        16 these models require, and floored so a draft stays legible.
+    *   **Steps** — cut to 6. Below 8 is nominally the Turbo LoRA's territory
+        rather than the raw model's, but for judging whether a camera move and
+        a composition work, slightly noisier output is the correct trade.
+    *   **Frames — NOT cut.** The whole point of a draft here is checking
+        motion, and a shorter clip is a different motion. Length is preserved.
+    *   **Seed — NOT changed** (handled by the caller). Same seed keeps the
+        draft indicative of the final; it will not be identical, because
+        changing the resolution changes the latent geometry, but the framing
+        and the move carry over.
+    """
+    dw = max(320, (w // 2) // 16 * 16)
+    dh = max(192, (h // 2) // 16 * 16)
+    return dw, dh, max(4, min(steps, 6))
+
 
 def _wh(res: str) -> tuple[int, int]:
     try:

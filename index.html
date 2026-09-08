@@ -83,10 +83,17 @@
           Clip settings
           <span class="hint">— applies to every shot</span>
         </div>
-        <div class="field">
-          <label>Resolution</label>
-          <select id="projResolution"></select>
+        <div class="field-row">
+          <div class="field">
+            <label>Aspect</label>
+            <select id="projAspect"></select>
+          </div>
+          <div class="field">
+            <label>Frame size</label>
+            <select id="projResolution"></select>
+          </div>
         </div>
+        <div class="field" id="resNoteField"></div>
         <div class="field">
           <label>Frame rate</label>
           <div class="readonly">24 fps — fixed by the models</div>
@@ -99,6 +106,19 @@
           <label>Default steps <span class="hint-inline">8 draft · 16 good</span></label>
           <input type="number" id="defSteps" value="8">
         </div>
+      </section>
+
+      <section>
+        <div class="section-label">
+          Draft mode
+          <span class="hint">— fast, rough, same motion</span>
+        </div>
+        <label class="toggle" id="draftToggleWrap">
+          <input type="checkbox" id="draftToggle">
+          <span class="toggle-track"></span>
+          <span>Render drafts</span>
+        </label>
+        <div class="cast-note" id="draftNote" style="margin-top:var(--sp-2)"></div>
       </section>
 
       <section>

@@ -421,18 +421,57 @@ function renderRail() {
     render();
   };
 
-  // clip settings (project-level)
+  // clip settings (project-level): aspect first, then a size within it
+  const groups = resolutionsByAspect();
+  const current = projectResolution();
+  const currentAspect = aspectOf(current);
+
+  const aspSel = $("#projAspect");
+  aspSel.innerHTML = "";
+  Object.keys(groups).forEach((a) => {
+    const o = el("option", null, a);
+    o.value = a;
+    if (a === currentAspect) o.selected = true;
+    aspSel.appendChild(o);
+  });
+
   const resSel = $("#projResolution");
-  if (resSel.dataset.built !== "1" || resSel.options.length !== allResolutions().length) {
-    resSel.innerHTML = "";
-    allResolutions().forEach((r) => {
-      const o = el("option", null, r.replace("x", " × "));
-      o.value = r;
-      resSel.appendChild(o);
-    });
-    resSel.dataset.built = "1";
+  resSel.innerHTML = "";
+  (groups[currentAspect] || []).forEach((r) => {
+    const tested = isTestedResolution(r);
+    const o = el("option", null, r.replace("x", " × ") + (tested ? "" : "  (untested)"));
+    o.value = r;
+    if (r === current) o.selected = true;
+    resSel.appendChild(o);
+  });
+
+  // Say plainly when a size is outside what the model's docs cite. It will
+  // usually work; it is just not a promise, and the cost scales with pixels.
+  const noteHost = $("#resNoteField");
+  noteHost.innerHTML = "";
+  if (!isTestedResolution(current)) {
+    noteHost.appendChild(
+      el(
+        "div",
+        "field-warn",
+        `⚠ ${current} is not a size this model's docs cite — usually fine, but ` +
+          `untested, and cost scales with pixel count`
+      )
+    );
   }
-  resSel.value = projectResolution();
+
+  // draft mode
+  const dt = $("#draftToggle");
+  const draftOn = !!state.board.defaults.draft;
+  dt.checked = draftOn;
+  const [cw, ch] = current.split("x").map(Number);
+  const dw = Math.max(320, Math.floor(cw / 2 / 16) * 16);
+  const dh = Math.max(192, Math.floor(ch / 2 / 16) * 16);
+  $("#draftNote").textContent = draftOn
+    ? `Rendering at ${dw}×${dh} and 6 steps — roughly 4x faster. Clip length ` +
+      `and seed are unchanged, so the camera move is the one you will get.`
+    : `Drafts render at half size (${dw}×${dh}) and 6 steps to check framing ` +
+      `and motion quickly. Length and seed stay the same.`;
 
   const modelSel = $("#defModel");
   if (modelSel.dataset.built !== "1") {
@@ -667,6 +706,9 @@ function renderStrip() {
       thumb.appendChild(el("div", "shot-thumb-empty", "not rendered"));
     }
     thumb.appendChild(el("span", "shot-index", String(i + 1).padStart(2, "0")));
+    if (raw.renderedAs === "draft") {
+      thumb.appendChild(el("span", "draft-badge", "DRAFT"));
+    }
     if (raw.startRef && raw.startRef.kind === "chain") {
       const b = el("span", "chain-badge");
       b.append(el("span", null, "⛓"), el("span", null, "chained"));
@@ -1076,11 +1118,52 @@ function allResolutions() {
   const seen = [];
   state.models.forEach((m) => {
     if (!m.available) return;
-    m.resolutions.forEach((r) => {
+    (m.resolutions || []).forEach((r) => {
       if (!seen.includes(r)) seen.push(r);
     });
   });
   return seen.length ? seen : ["960x544"];
+}
+
+/** Nearest common ratio name for a WxH string. */
+function aspectOf(res) {
+  const [w, h] = res.split("x").map(Number);
+  if (!w || !h) return "other";
+  const r = w / h;
+  const named = [
+    ["16:9", 16 / 9],
+    ["4:3", 4 / 3],
+    ["1:1", 1],
+    ["9:16", 9 / 16],
+    ["3:4", 3 / 4],
+  ];
+  let best = "other";
+  let bestErr = 0.06;   // within ~6% counts as that ratio
+  named.forEach(([name, target]) => {
+    const err = Math.abs(r - target) / target;
+    if (err < bestErr) {
+      bestErr = err;
+      best = name;
+    }
+  });
+  return best;
+}
+
+/** Aspect -> resolutions, from what the models actually offer. */
+function resolutionsByAspect() {
+  const groups = {};
+  allResolutions().forEach((r) => {
+    const a = aspectOf(r);
+    (groups[a] = groups[a] || []).push(r);
+  });
+  return groups;
+}
+
+/** Is this size one the selected model's own docs cite? */
+function isTestedResolution(res) {
+  const vids = state.models.filter((m) => m.available && m.kind === "video");
+  if (!vids.length) return true;
+  return vids.some((m) => (m.testedResolutions || []).includes(res));
 }
 
 /** Legal clip lengths for a model, as [frames, label] up to ~10s. */
@@ -1215,6 +1298,8 @@ function renderPreview() {
     ["Status", STATUS_LABELS[shot.status] || shot.status],
     ["Model", (modelCap(raw.model) || {}).label || raw.model],
     ["Runtime", dur(shot.runtimeSeconds)],
+    ["Rendered", raw.renderedAs === "draft" ? "draft (half size, 6 steps)"
+                 : raw.renderedAs === "final" ? "final" : "—"],
     ["Outputs", (shot.outputs || []).length
       ? (shot.outputs || []).map((u) => u.split("/").pop()).join(", ")
       : "—"],
