@@ -270,6 +270,46 @@ function wireChrome() {
     updateResolvedPreview();
   });
 
+  $("#addCharacter").addEventListener("click", () => editCharacter(null));
+
+  $("#projAspect").addEventListener("change", (e) => {
+    // keep the closest size when the ratio changes, rather than resetting
+    const opts = resolutionsByAspect()[e.target.value] || [];
+    if (!opts.length) return;
+    const [cw] = projectResolution().split("x").map(Number);
+    const closest = opts.reduce((best, r) =>
+      Math.abs(Number(r.split("x")[0]) - cw) <
+      Math.abs(Number(best.split("x")[0]) - cw)
+        ? r
+        : best
+    );
+    state.board.defaults.resolution = closest;
+    markDirty();
+    render();
+  });
+
+  $("#projResolution").addEventListener("change", (e) => {
+    state.board.defaults.resolution = e.target.value;
+    markDirty();
+    render();
+  });
+
+  $("#draftToggle").addEventListener("change", (e) => {
+    state.board.defaults.draft = e.target.checked;
+    markDirty();
+    render();
+  });
+
+  $("#defModel").addEventListener("change", (e) => {
+    state.board.defaults.model = e.target.value;
+    markDirty();
+  });
+
+  $("#defSteps").addEventListener("input", (e) => {
+    state.board.defaults.steps = Number(e.target.value);
+    markDirty();
+  });
+
   window.addEventListener("beforeunload", (e) => {
     if (state.dirty) {
       e.preventDefault();
@@ -560,7 +600,9 @@ async function editCharacter(existing) {
     ? JSON.parse(JSON.stringify(existing))
     : { id: null, name: "", description: "", image: null, voice: null };
 
-  $("#castEditorTitle").textContent = isNew ? "New character" : `Edit ${draft.name || "character"}`;
+  $("#castEditorTitle").textContent = isNew
+    ? "New character"
+    : `Edit ${draft.name || "character"}`;
   $("#castName").value = draft.name || "";
   $("#castDesc").value = draft.description || "";
   $("#castNote").textContent =
@@ -568,12 +610,86 @@ async function editCharacter(existing) {
     "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
     "reference lists only the description is used.";
 
+  // NOTE: these are declared in this scope, not inside the Promise below.
+  // A function declaration is only hoisted within its own function scope, so
+  // defining them in the executor made paint() throw a ReferenceError before
+  // the modal was ever unhidden — the dialog simply never appeared.
+  const paint = () => {
+    mediaSlot($("#castImage"), draft, "image", "Image", "image");
+    mediaSlot($("#castVoice"), draft, "voice", "Voice clip", "audio");
+  };
+
+  function mediaSlot(host, obj, key, label, kind) {
+    host.innerHTML = "";
+    host.className = "ref-slot";
+    host.onclick = () => pickMedia(obj, key, kind);
+    const cur = obj[key];
+    if (cur) {
+      host.classList.add("filled");
+      host.title = "Click to replace";
+      if (kind === "image") {
+        const img = el("img");
+        img.src = cur.url || cur.path;
+        host.appendChild(img);
+      } else {
+        const l = el("div", "ref-slot-label");
+        l.append(
+          el("strong", null, "♪ " + (cur.label || "voice")),
+          el("span", null, "attached")
+        );
+        host.appendChild(l);
+      }
+      const x = el("button", "clear-ref", "✕");
+      x.title = "Remove";
+      x.onclick = (e) => {
+        e.stopPropagation();
+        obj[key] = null;
+        paint();
+      };
+      host.appendChild(x);
+    } else {
+      const l = el("div", "ref-slot-label");
+      l.append(el("strong", null, label), el("span", null, "optional — click to add"));
+      host.appendChild(l);
+    }
+  }
+
+  async function pickMedia(obj, key, kind) {
+    if (kind === "image") {
+      const chosen = await chooseImage(
+        `Choose an image for ${$("#castName").value.trim() || "this character"}`
+      );
+      if (chosen) {
+        obj[key] = chosen;
+        paint();
+      }
+      return;
+    }
+    const inp = el("input");
+    inp.type = "file";
+    inp.accept =
+      "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      if (!f) return;
+      try {
+        obj[key] = await API.uploadRef(state.slug, f);
+        paint();
+      } catch (err) {
+        toast(`Upload failed: ${err.message}`, "error");
+      }
+    };
+    inp.click();
+  }
+
   const foot = $("#castFoot");
   foot.innerHTML = "";
   if (!isNew) {
-    const del = el("button", "btn btn-ghost btn-sm btn-danger", "Delete character");
+    const del = el("button", "btn btn-sm btn-danger", "Delete character");
     del.onclick = async () => {
-      state.board.characters = (state.board.characters || []).filter((c) => c.id !== draft.id);
+      state.board.characters = (state.board.characters || []).filter(
+        (c) => c.id !== draft.id
+      );
       shots().forEach((sh) => {
         sh.characterIds = (sh.characterIds || []).filter((id) => id !== draft.id);
       });
@@ -583,15 +699,15 @@ async function editCharacter(existing) {
       render();
     };
     foot.appendChild(del);
+  } else {
+    foot.appendChild(
+      el("span", null, "Name and description are required; image and voice are optional.")
+    );
   }
 
-  const paint = () => {
-    mediaSlot($("#castImage"), draft, "image", "Image", "image");
-    mediaSlot($("#castVoice"), draft, "voice", "Voice clip", "audio");
-  };
   paint();
-
   modal.hidden = false;
+  $("#castName").focus();
 
   return new Promise((resolve) => {
     const close = () => {
@@ -622,70 +738,6 @@ async function editCharacter(existing) {
       await saveNow();
       render();
     };
-
-    // slot behaviour lives here so it can repaint after an upload
-    function mediaSlot(host, obj, key, label, kind) {
-      host.innerHTML = "";
-      host.className = "ref-slot";
-      const cur = obj[key];
-      if (cur) {
-        host.classList.add("filled");
-        if (kind === "image") {
-          const img = el("img");
-          img.src = cur.url || cur.path;
-          host.appendChild(img);
-        } else {
-          const l = el("div", "ref-slot-label");
-          l.append(el("strong", null, "♪ " + (cur.label || "voice")), el("span", null, "attached"));
-          host.appendChild(l);
-        }
-        const x = el("button", "clear-ref", "✕");
-        x.title = "Remove";
-        x.onclick = (e) => {
-          e.stopPropagation();
-          obj[key] = null;
-          paint();
-        };
-        host.appendChild(x);
-        // clicking the filled slot replaces it, rather than forcing a
-        // clear-then-add round trip
-        host.onclick = () => pickMedia(obj, key, kind);
-        host.title = "Click to replace";
-      } else {
-        const l = el("div", "ref-slot-label");
-        l.append(el("strong", null, label), el("span", null, "optional — click to add"));
-        host.appendChild(l);
-        host.onclick = () => pickMedia(obj, key, kind);
-      }
-    }
-
-    async function pickMedia(obj, key, kind) {
-      if (kind === "image") {
-        const chosen = await chooseImage(
-          `Choose an image for ${$("#castName").value.trim() || "this character"}`
-        );
-        if (chosen) {
-          obj[key] = chosen;
-          paint();
-        }
-        return;
-      }
-      const inp = el("input");
-      inp.type = "file";
-      inp.accept =
-        "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
-      inp.onchange = async () => {
-        const f = inp.files[0];
-        if (!f) return;
-        try {
-          obj[key] = await API.uploadRef(state.slug, f);
-          paint();
-        } catch (err) {
-          toast(`Upload failed: ${err.message}`, "error");
-        }
-      };
-      inp.click();
-    }
   });
 }
 
