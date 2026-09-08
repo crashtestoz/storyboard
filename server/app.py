@@ -38,9 +38,19 @@ from .store import Store, default_shot
 
 MAX_UPLOAD = 32 * 1024 * 1024
 ALLOWED_UPLOAD_TYPES = {
+    # images: style references, frame anchors, character portraits
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
+    # audio: character voice clips, which become Ref2VA soundtrack references
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/flac": ".flac",
+    "audio/ogg": ".ogg",
 }
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -241,14 +251,14 @@ class Handler(BaseHTTPRequestHandler):
         ext = ALLOWED_UPLOAD_TYPES.get(ctype)
         if ext is None:
             raise ValueError(
-                f"unsupported image type {ctype!r} "
+                f"unsupported type {ctype!r} "
                 f"(allowed: {', '.join(sorted(ALLOWED_UPLOAD_TYPES))})"
             )
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             raise ValueError("empty upload")
         if length > MAX_UPLOAD:
-            raise ValueError("image too large (32 MB limit)")
+            raise ValueError("file too large (32 MB limit)")
 
         raw_name = self.headers.get("X-Filename") or f"ref{ext}"
         stem = SAFE_NAME.sub("_", Path(raw_name).stem)[:48] or "ref"

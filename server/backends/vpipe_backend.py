@@ -226,7 +226,7 @@ class VpipeBackend(Backend):
             or cap.resolutions[0]
         )
         width, height = _wh(res)
-        prompt = _resolved_prompt(shot, project)
+        prompt = _resolved_prompt(shot, project, with_audio=cap.supports_audio)
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
 
@@ -344,16 +344,40 @@ class VpipeBackend(Backend):
 
     def _ref2va_spec(self, shot, project, paths, prompt, w, h, frames, steps, seed):
         """Reference-conditioned video via video-ref-encoder's file list."""
-        refs: list[str] = []
-        for r in (project.get("styleRefs") or [])[:9]:
+        # Ref2VA's own limits: 9 images, 3 soundtracks, 12 references total,
+        # and audio can never be the only kind. Character portraits come first
+        # because identity is what a reference list is for; style references
+        # fill whatever is left.
+        images: list[str] = []
+        sounds: list[str] = []
+
+        for ch in _shot_characters(shot, project):
+            img = _ref_source(ch.get("image"), paths)
+            if img and img not in images and len(images) < 9:
+                images.append(img)
+            voice = _ref_source(ch.get("voice"), paths)
+            if voice and voice not in sounds and len(sounds) < 3:
+                sounds.append(voice)
+
+        for r in project.get("styleRefs") or []:
             src = _ref_source(r, paths)
-            if src:
-                refs.append(src)
-        # a shot-level start reference is meaningless to Ref2VA as an anchor,
-        # but is still useful as one more subject reference.
+            if src and src not in images and len(images) < 9:
+                images.append(src)
+
+        # A start reference cannot anchor a Ref2VA clip — that partition packs
+        # references instead of keyframes — but it is still a usable subject
+        # reference, so it is kept rather than silently dropped.
         own = _ref_source(shot.get("startRef"), paths)
-        if own and own not in refs and len(refs) < 9:
-            refs.append(own)
+        if own and own not in images and len(images) < 9:
+            images.append(own)
+
+        # "audio can never be the only kind": a voice clip with no picture
+        # alongside it is not a request Ref2VA accepts, so drop the sound
+        # rather than have the encoder refuse the whole thing.
+        if sounds and not images:
+            sounds = []
+
+        refs = (images + sounds)[:12]
 
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-Ref2VA-8bit"),
@@ -742,15 +766,63 @@ def _wh(res: str) -> tuple[int, int]:
         return 960, 544
 
 
-def _resolved_prompt(shot: dict, project: dict) -> str:
-    """Two-tier prompt: project scene description, then this shot's direction.
+def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
+    """Four parts, in the order MiniMax H3's own examples use.
 
-    The scene description carries subject and style (true of every shot); the
-    shot prompt carries action, camera and mood (true of this one only).
+    1. the project scene description — subject and style, every shot
+    1b. the cast this shot uses — "Name: description", so the shot prompt can
+        refer to them by name
+    2. this shot's prompt — action, camera and mood, this shot only
+    3. the project soundscape — the constant ambient bed, every shot
+    4. this shot's sound note — the accents specific to this clip
+
+    All the sound sits at the end, bed before accents, because that is the
+    shape H3's shipped examples take ("... the brushwork shimmers as the
+    camera closes in. Gentle lapping water, a soft breeze through pines,
+    distant birdsong.") and because the model generates the soundtrack in the
+    same denoise loop as the picture rather than dubbing it on afterwards —
+    so the sound description is conditioning, not metadata.
+
+    Both sound parts are dropped for a model with no audio (a still), where
+    they would only compete with the visual description.
     """
-    scene = (project.get("sceneDescription") or "").strip()
-    own = (shot.get("prompt") or "").strip()
-    return f"{scene} {own}".strip() if scene else own
+    parts = [(project.get("sceneDescription") or "").strip()]
+
+    # Characters appearing in this shot, named so the shot prompt can refer to
+    # them ("Kira ducks behind the crate"). Only the ones this shot casts —
+    # describing the whole cast every time would dilute the conditioning.
+    for ch in _shot_characters(shot, project):
+        name = (ch.get("name") or "").strip()
+        desc = (ch.get("description") or "").strip()
+        if name and desc:
+            parts.append(f"{name}: {desc}")
+        elif desc:
+            parts.append(desc)
+
+    parts.append((shot.get("prompt") or "").strip())
+
+    if with_audio:
+        parts.append((project.get("soundscape") or "").strip())
+        parts.append((shot.get("soundNote") or "").strip())
+    return " ".join(_sentence(p) for p in parts if p)
+
+
+def _sentence(text: str) -> str:
+    """End a fragment so the pieces do not run together when joined.
+
+    Without this, "Kira: a wiry pilot" followed by "Kira leans out" reads as
+    one run-on clause, which is worse conditioning than two clear ones.
+    """
+    text = text.strip()
+    return text if text[-1:] in ".!?;:," else text + "."
+
+
+def _shot_characters(shot: dict, project: dict) -> list[dict]:
+    """The cast members this shot uses, in the board's cast order."""
+    wanted = set(shot.get("characterIds") or [])
+    if not wanted:
+        return []
+    return [c for c in (project.get("characters") or []) if c.get("id") in wanted]
 
 
 def _ref_source(ref: Any, paths: ShotPaths) -> str | None:

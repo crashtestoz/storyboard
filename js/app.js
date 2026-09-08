@@ -261,7 +261,13 @@ function wireChrome() {
   $("#sceneDescription").addEventListener("input", (e) => {
     state.board.sceneDescription = e.target.value;
     markDirty();
-    renderEditor();
+    updateResolvedPreview();
+  });
+
+  $("#soundscape").addEventListener("input", (e) => {
+    state.board.soundscape = e.target.value;
+    markDirty();
+    updateResolvedPreview();
   });
 
   window.addEventListener("beforeunload", (e) => {
@@ -356,6 +362,8 @@ function render() {
 function renderRail() {
   const sd = $("#sceneDescription");
   if (document.activeElement !== sd) sd.value = state.board.sceneDescription || "";
+  const snd = $("#soundscape");
+  if (document.activeElement !== snd) snd.value = state.board.soundscape || "";
 
   const wrap = $("#styleRefs");
   wrap.innerHTML = "";
@@ -442,6 +450,8 @@ function renderRail() {
     stepsInput.value = state.board.defaults.steps || 8;
   }
 
+  renderCast();
+
   const q = $("#queueList");
   q.innerHTML = "";
   shots().forEach((raw, i) => {
@@ -461,6 +471,172 @@ function renderRail() {
       render();
     });
     q.appendChild(row);
+  });
+}
+
+/* --- cast ---------------------------------------------------------------- */
+
+function renderCast() {
+  const host = $("#castList");
+  host.innerHTML = "";
+  const cast = state.board.characters || [];
+  if (!cast.length) {
+    host.appendChild(
+      el("div", "cast-note", "No characters yet. Add one to describe someone who should look and sound the same every time they appear.")
+    );
+    return;
+  }
+  cast.forEach((ch) => {
+    const row = el("div", "cast-row");
+    const av = el("div", "cast-avatar");
+    if (ch.image && (ch.image.url || ch.image.path)) {
+      const img = el("img");
+      img.src = ch.image.url || ch.image.path;
+      av.appendChild(img);
+    } else {
+      av.textContent = (ch.name || "?").slice(0, 1).toUpperCase();
+    }
+    row.appendChild(av);
+
+    const body = el("div", "cast-body");
+    body.appendChild(el("div", "cast-name", ch.name || "(unnamed)"));
+    body.appendChild(el("div", "cast-desc", ch.description || "no description"));
+    row.appendChild(body);
+
+    const badges = el("div", "cast-badges");
+    if (ch.image) badges.appendChild(el("span", "cast-badge", "img"));
+    if (ch.voice) badges.appendChild(el("span", "cast-badge", "voice"));
+    row.appendChild(badges);
+
+    row.onclick = () => editCharacter(ch);
+    host.appendChild(row);
+  });
+}
+
+/** Modal editor. Name and description are required; media is optional. */
+async function editCharacter(existing) {
+  const modal = $("#castEditor");
+  const isNew = !existing;
+  const draft = existing
+    ? JSON.parse(JSON.stringify(existing))
+    : { id: null, name: "", description: "", image: null, voice: null };
+
+  $("#castEditorTitle").textContent = isNew ? "New character" : `Edit ${draft.name || "character"}`;
+  $("#castName").value = draft.name || "";
+  $("#castDesc").value = draft.description || "";
+  $("#castNote").textContent =
+    "The image and voice become reference inputs on models that accept them " +
+    "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
+    "reference lists only the description is used.";
+
+  const foot = $("#castFoot");
+  foot.innerHTML = "";
+  if (!isNew) {
+    const del = el("button", "btn btn-ghost btn-sm btn-danger", "Delete character");
+    del.onclick = async () => {
+      state.board.characters = (state.board.characters || []).filter((c) => c.id !== draft.id);
+      shots().forEach((sh) => {
+        sh.characterIds = (sh.characterIds || []).filter((id) => id !== draft.id);
+      });
+      modal.hidden = true;
+      markDirty();
+      await saveNow();
+      render();
+    };
+    foot.appendChild(del);
+  }
+
+  const paint = () => {
+    mediaSlot($("#castImage"), draft, "image", "Image", "image");
+    mediaSlot($("#castVoice"), draft, "voice", "Voice clip", "audio");
+  };
+  paint();
+
+  modal.hidden = false;
+
+  return new Promise((resolve) => {
+    const close = () => {
+      modal.hidden = true;
+      resolve();
+    };
+    $("#castCancel").onclick = close;
+    modal.onclick = (e) => {
+      if (e.target === modal) close();
+    };
+    $("#castSave").onclick = async () => {
+      draft.name = $("#castName").value.trim();
+      draft.description = $("#castDesc").value.trim();
+      if (!draft.name || !draft.description) {
+        toast("A character needs both a name and a description.", "error");
+        return;
+      }
+      state.board.characters = state.board.characters || [];
+      if (draft.id) {
+        const i = state.board.characters.findIndex((c) => c.id === draft.id);
+        state.board.characters[i] = draft;
+      } else {
+        draft.id = "c" + Math.random().toString(36).slice(2, 10);
+        state.board.characters.push(draft);
+      }
+      close();
+      markDirty();
+      await saveNow();
+      render();
+    };
+
+    // slot behaviour lives here so it can repaint after an upload
+    function mediaSlot(host, obj, key, label, kind) {
+      host.innerHTML = "";
+      host.className = "ref-slot";
+      const cur = obj[key];
+      if (cur) {
+        host.classList.add("filled");
+        if (kind === "image") {
+          const img = el("img");
+          img.src = cur.url || cur.path;
+          host.appendChild(img);
+        } else {
+          const l = el("div", "ref-slot-label");
+          l.append(el("strong", null, "♪ " + (cur.label || "voice")), el("span", null, "attached"));
+          host.appendChild(l);
+        }
+        const x = el("button", "clear-ref", "✕");
+        x.onclick = (e) => {
+          e.stopPropagation();
+          obj[key] = null;
+          paint();
+        };
+        host.appendChild(x);
+      } else {
+        const l = el("div", "ref-slot-label");
+        l.append(el("strong", null, label), el("span", null, "optional — click to add"));
+        host.appendChild(l);
+        host.onclick = async () => {
+          if (kind === "image") {
+            const chosen = await chooseImage(`Choose an image for ${draft.name || "this character"}`);
+            if (chosen) {
+              obj[key] = chosen;
+              paint();
+            }
+            return;
+          }
+          const inp = el("input");
+          inp.type = "file";
+          inp.accept = "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
+          inp.onchange = async () => {
+            const f = inp.files[0];
+            if (!f) return;
+            try {
+              obj[key] = await API.uploadRef(state.slug, f);
+              paint();
+            } catch (err) {
+              toast(`Upload failed: ${err.message}`, "error");
+            }
+          };
+          inp.click();
+        };
+      }
+    }
   });
 }
 
@@ -646,21 +822,89 @@ function renderEditor() {
   ta.addEventListener("input", () => {
     raw.prompt = ta.value;
     markDirty();
-    updateResolved();
+    updateResolvedPreview();
   });
   panel.appendChild(
     field("Shot prompt", ta, "action / camera / mood only")
   );
 
-  const resolved = el("div", "resolved mono");
-  panel.appendChild(field("Resolved prompt sent to the backend", resolved));
-  function updateResolved() {
-    const scene = (state.board.sceneDescription || "").trim();
-    const own = (raw.prompt || "").trim();
-    resolved.textContent = scene ? `${scene} ${own}`.trim() : own || "(empty)";
+  if (!cap || cap.supportsAudio) {
+    const sa = el("textarea");
+    sa.rows = 2;
+    sa.value = raw.soundNote || "";
+    sa.placeholder =
+      "Sound accents for THIS clip — what happens sonically here.\n" +
+      "The project background sound is already applied to every shot.";
+    sa.addEventListener("input", () => {
+      raw.soundNote = sa.value;
+      markDirty();
+      updateResolvedPreview();
+    });
+    panel.appendChild(field("Sound accents", sa, "this clip only"));
   }
-  updateResolved();
+
+  const resolved = el("div", "resolved mono");
+  resolved.id = "resolvedPrompt";
+  panel.appendChild(
+    field(
+      "Resolved prompt sent to the backend",
+      resolved,
+      cap && cap.supportsAudio
+        ? "scene · shot · sound bed · accents"
+        : "scene · shot"
+    )
+  );
+  resolved.textContent = resolvedPromptText(raw);
   host.appendChild(panel);
+
+  // which cast members appear in this shot
+  const cast = state.board.characters || [];
+  if (cast.length) {
+    const castPanel = el("div", "panel");
+    castPanel.style.marginTop = "var(--sp-3)";
+    const cl = el("div", "section-label", "Characters in this shot");
+    cl.appendChild(el("span", "hint", "— refer to them by name in the prompt"));
+    castPanel.appendChild(cl);
+
+    const picks = el("div", "cast-picks");
+    cast.forEach((ch) => {
+      const on = (raw.characterIds || []).includes(ch.id);
+      const pill = el("div", "cast-pick");
+      pill.dataset.on = String(on);
+      if (ch.image && (ch.image.url || ch.image.path)) {
+        const img = el("img");
+        img.src = ch.image.url || ch.image.path;
+        pill.appendChild(img);
+      }
+      pill.appendChild(el("span", null, ch.name || "(unnamed)"));
+      pill.onclick = () => {
+        const ids = new Set(raw.characterIds || []);
+        if (ids.has(ch.id)) ids.delete(ch.id);
+        else ids.add(ch.id);
+        raw.characterIds = [...ids];
+        markDirty();
+        renderEditor();
+      };
+      picks.appendChild(pill);
+    });
+    castPanel.appendChild(picks);
+
+    // Honest about what actually reaches the model on this shot's model.
+    const chosen = cast.filter((c) => (raw.characterIds || []).includes(c.id));
+    const withMedia = chosen.filter((c) => c.image || c.voice);
+    if (chosen.length && withMedia.length && cap && !cap.supportsStyleRefs) {
+      castPanel.appendChild(
+        el(
+          "div",
+          "inline-warn",
+          `⚠ ${withMedia.length} of these have a reference image or voice, but ` +
+            `this model takes no reference list — only their descriptions will ` +
+            `be used. Switch the shot to Ref2VA to use the media.`
+        )
+      );
+    }
+    host.appendChild(castPanel);
+  }
 
   // anchors — only if the model supports them
   if (cap && (cap.supportsStartAnchor || cap.supportsEndAnchor)) {
@@ -861,6 +1105,48 @@ function validLengths(cap) {
 
 function fmtDur(frames, fps = 24) {
   return `${(frames / fps).toFixed(1)}s`;
+}
+
+/**
+ * Mirror of the backend's prompt assembly: scene, then this shot, then the
+ * soundscape as a trailing clause — and no soundscape at all for a model with
+ * no audio, where it would only compete with the visual description.
+ */
+function updateResolvedPreview() {
+  // Only touches the DOM if the node is actually in the document — during a
+  // render the element still lives in a detached subtree, which is why the
+  // text is set directly there instead of through this function.
+  const box = $("#resolvedPrompt");
+  const raw = selectedShot();
+  if (box && raw) box.textContent = resolvedPromptText(raw);
+}
+
+/** Exactly what the backend will assemble, so the preview cannot drift. */
+function resolvedPromptText(raw) {
+  const cap = modelCap(raw.model);
+  const parts = [(state.board.sceneDescription || "").trim()];
+
+  (state.board.characters || [])
+    .filter((c) => (raw.characterIds || []).includes(c.id))
+    .forEach((c) => {
+      const n = (c.name || "").trim();
+      const d = (c.description || "").trim();
+      if (d) parts.push(n ? `${n}: ${d}` : d);
+    });
+
+  parts.push((raw.prompt || "").trim());
+
+  if (!cap || cap.supportsAudio) {
+    parts.push((state.board.soundscape || "").trim());   // constant bed
+    parts.push((raw.soundNote || "").trim());            // this clip's accents
+  }
+  // match the backend's sentence-joining so the preview is what actually goes
+  return (
+    parts
+      .filter(Boolean)
+      .map((t) => (".!?;:,".includes(t.slice(-1)) ? t : t + "."))
+      .join(" ") || "(empty)"
+  );
 }
 
 function frameHint(frames, cap) {
