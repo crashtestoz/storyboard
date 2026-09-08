@@ -264,7 +264,6 @@ function wireChrome() {
     renderEditor();
   });
 
-  $("#addStyleRef").addEventListener("click", () => $("#styleRefFile").click());
   $("#styleRefFile").addEventListener("change", async (e) => {
     const files = [...e.target.files];
     e.target.value = "";
@@ -392,7 +391,14 @@ function renderRail() {
     d.appendChild(x);
     wrap.appendChild(d);
   });
-  wrap.appendChild($("#addStyleRef"));
+
+  // Built fresh each render rather than moved: this container is cleared with
+  // innerHTML, so a button living inside it would be destroyed on the first
+  // render and appendChild(null) would throw on the second.
+  const add = el("button", "style-ref-add", "+");
+  add.title = "Upload a reference image";
+  add.addEventListener("click", () => $("#styleRefFile").click());
+  wrap.appendChild(add);
 
   const q = $("#queueList");
   q.innerHTML = "";
@@ -848,7 +854,35 @@ function renderPreview() {
   const box = el("div", "log");
   const lines = shot.log;
   if (!lines || !lines.length) {
-    box.appendChild(el("span", "log-empty", "No run yet."));
+    // No live log — the batch may have finished in an earlier server session,
+    // so fall back to the run.log written next to the outputs.
+    if (raw.logUrl) {
+      box.appendChild(el("span", "log-empty", "loading saved log…"));
+      fetch(raw.logUrl)
+        .then((r) => (r.ok ? r.text() : Promise.reject()))
+        .then((text) => {
+          box.innerHTML = "";
+          text.trimEnd().split("\n").slice(-200).forEach((t) => {
+            const m = t.match(/^\[([A-Z]+)\]\s*(.*)$/);
+            const line = el("div", "log-line");
+            line.dataset.lvl = m ? m[1] : "INFO";
+            if (m) {
+              line.appendChild(el("span", "lvl", `[${m[1]}] `));
+              line.appendChild(el("span", null, m[2]));
+            } else {
+              line.appendChild(el("span", null, t));
+            }
+            box.appendChild(line);
+          });
+          box.scrollTop = box.scrollHeight;
+        })
+        .catch(() => {
+          box.innerHTML = "";
+          box.appendChild(el("span", "log-empty", "No saved log for this run."));
+        });
+    } else {
+      box.appendChild(el("span", "log-empty", "No run yet."));
+    }
   } else {
     lines.slice(-200).forEach(({ level, text }) => {
       const line = el("div", "log-line");

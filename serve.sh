@@ -42,4 +42,4 @@ if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; t
 fi
 
 cd "$ROOT"
-exec "$PY" -m server "$@"
+exec "$PY" -u -m server "$@"
