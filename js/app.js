@@ -19,6 +19,7 @@ const state = {
   boards: [],
   info: null,
   models: [],
+  tts: [],
   selectedId: null,
   status: null,       // last /api/status payload
   poll: null,
@@ -141,6 +142,7 @@ async function boot() {
   try {
     state.info = await API.info();
     state.models = state.info.models || [];
+    state.tts = (state.info.tts && state.info.tts.engines) || [];
   } catch (err) {
     toast(`Cannot reach the server: ${err.message}`, "error");
     return;
@@ -303,6 +305,12 @@ function wireChrome() {
   $("#defModel").addEventListener("change", (e) => {
     state.board.defaults.model = e.target.value;
     markDirty();
+  });
+
+  $("#ttsEngine").addEventListener("change", (e) => {
+    state.board.defaults.tts = e.target.value;
+    markDirty();
+    render();
   });
 
   $("#defSteps").addEventListener("input", (e) => {
@@ -523,6 +531,22 @@ function renderRail() {
     modelSel.dataset.built = "1";
   }
   modelSel.value = state.board.defaults.model || "fl2va";
+
+  const ttsSel = $("#ttsEngine");
+  if (ttsSel.dataset.built !== "1") {
+    state.tts.forEach((e) => {
+      const o = el("option", null, e.healthy ? e.label : `${e.label} — unavailable`);
+      o.value = e.id;
+      ttsSel.appendChild(o);
+    });
+    ttsSel.dataset.built = "1";
+  }
+  const chosenTts = state.board.defaults.tts || "none";
+  ttsSel.value = chosenTts;
+  const eng = state.tts.find((e) => e.id === chosenTts);
+  const noteBox = $("#ttsNote");
+  noteBox.textContent = eng && !eng.healthy ? eng.message : "";
+  noteBox.className = eng && !eng.healthy ? "field-warn" : "field-note";
 
   const stepsInput = $("#defSteps");
   if (document.activeElement !== stepsInput) {
@@ -873,6 +897,7 @@ function renderEditor() {
   const shot = view(raw);
   const cap = modelCap(raw.model);
   const idx = shotIndex(raw.id);
+  let panelDubRow = null;
 
   const head = el("div", "editor-head");
   const h = el("div", "section-label", `Shot ${idx + 1}`);
@@ -881,6 +906,35 @@ function renderEditor() {
   const sp = el("div");
   sp.style.flex = "1";
   head.appendChild(sp);
+
+  if ((raw.dialogue || "").trim()) {
+    const dubRow = el("div");
+    dubRow.style.cssText = "display:flex;gap:var(--sp-2);align-items:center;margin-top:var(--sp-2)";
+    const engNow = state.tts.find((e) => e.id === (state.board.defaults.tts || "none"));
+    const dubBtn = el("button", "btn btn-sm", raw.dubUrl ? "Re-dub" : "Speak this line");
+    dubBtn.disabled = !engNow || !engNow.healthy;
+    dubBtn.title = engNow && !engNow.healthy ? engNow.message : "Synthesise and mux";
+    dubBtn.onclick = async () => {
+      dubBtn.disabled = true;
+      dubBtn.textContent = "speaking…";
+      try {
+        const r = await API.dub(state.slug, raw.id);
+        raw.dubUrl = r.dubUrl;
+        if (r.warning) toast(r.warning, "warn");
+        else toast(`Dubbed with ${r.engine} (${r.seconds}s of speech).`);
+        render();
+      } catch (err) {
+        toast(`Dub failed: ${err.message}`, "error");
+        render();
+      }
+    };
+    dubRow.appendChild(dubBtn);
+    if (raw.dubUrl) dubRow.appendChild(el("span", "field-note", "dubbed version available"));
+    if (engNow && !engNow.healthy) {
+      dubRow.appendChild(el("span", "field-warn", "speech engine unavailable"));
+    }
+    panelDubRow = dubRow;
+  }
 
   const one = el("button", "btn btn-sm", "Render this shot");
   one.disabled = !!(state.status && state.status.busy);
@@ -933,6 +987,19 @@ function renderEditor() {
   );
 
   if (!cap || cap.supportsAudio) {
+    const dlg = el("textarea");
+    dlg.rows = 2;
+    dlg.value = raw.dialogue || "";
+    dlg.placeholder =
+      "A line someone speaks in this clip.\n" +
+      "Synthesised by the speech engine and muxed over the finished clip — " +
+      "the video model itself does not produce intelligible dialogue.";
+    dlg.addEventListener("input", () => {
+      raw.dialogue = dlg.value;
+      markDirty();
+    });
+    panel.appendChild(field("Dialogue", dlg, "spoken separately, then mixed in"));
+
     const sa = el("textarea");
     sa.rows = 2;
     sa.value = raw.soundNote || "";
@@ -959,6 +1026,7 @@ function renderEditor() {
     )
   );
   resolved.textContent = resolvedPromptText(raw);
+  if (panelDubRow) panel.appendChild(panelDubRow);
   host.appendChild(panel);
 
   // which cast members appear in this shot
@@ -1319,7 +1387,7 @@ function renderPreview() {
   host.appendChild(el("div", "section-label", "Output"));
 
   const stage = el("div", "preview-stage");
-  const video = (shot.outputs || []).find((u) => u.endsWith(".mp4"));
+  const video = raw.dubUrl || (shot.outputs || []).find((u) => u.endsWith(".mp4"));
   const image = (shot.outputs || []).find((u) => /\.(jpe?g|png|webp)$/i.test(u));
   if (video) {
     const v = el("video");

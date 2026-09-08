@@ -56,6 +56,9 @@ const API = {
   adoptRef: (slug, path) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
 
+  dub: (slug, shotId) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`, {}),
+
   render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
   stop: () => req("POST", "/api/stop"),
   status: () => req("GET", "/api/status"),
