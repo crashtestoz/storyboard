@@ -42,20 +42,37 @@ from .store import Store, default_shot
 from .tts.base import TTSEngine
 
 MAX_UPLOAD = 32 * 1024 * 1024
-ALLOWED_UPLOAD_TYPES = {
+# Extensions are the reliable signal here: browsers disagree about audio MIME
+# types (Safari says audio/mp3, others audio/mpeg, some send nothing at all or
+# application/octet-stream), and the client is ours. The content type is only
+# used as a hint when the name has no usable extension.
+ALLOWED_EXTENSIONS = {
     # images: style references, frame anchors, character portraits
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    # audio: character voice clips, also usable as Ref2VA soundtrack references
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
+}
+
+# content type -> extension, for the case where the filename has none
+TYPE_TO_EXT = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
-    # audio: character voice clips, which become Ref2VA soundtrack references
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/wave": ".wav",
-    "audio/mpeg": ".mp3",
-    "audio/mp4": ".m4a",
-    "audio/x-m4a": ".m4a",
-    "audio/flac": ".flac",
-    "audio/ogg": ".ogg",
+    "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav",
+    "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/mpeg3": ".mp3",
+    "audio/x-mpeg": ".mp3",
+    "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
+    "audio/flac": ".flac", "audio/x-flac": ".flac",
+    "audio/ogg": ".ogg", "audio/opus": ".opus",
 }
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -380,11 +397,17 @@ class Handler(BaseHTTPRequestHandler):
         bytes directly.
         """
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        ext = ALLOWED_UPLOAD_TYPES.get(ctype)
+        raw_name = self.headers.get("X-Filename") or ""
+        name_ext = Path(raw_name).suffix.lower()
+
+        # the extension decides; the content type only fills in when there is
+        # no usable extension
+        ext = name_ext if name_ext in ALLOWED_EXTENSIONS else TYPE_TO_EXT.get(ctype)
         if ext is None:
             raise ValueError(
-                f"unsupported type {ctype!r} "
-                f"(allowed: {', '.join(sorted(ALLOWED_UPLOAD_TYPES))})"
+                f"unsupported file {raw_name or '(unnamed)'} "
+                f"(type {ctype or 'unknown'}). Accepted: "
+                f"{', '.join(sorted(ALLOWED_EXTENSIONS))}"
             )
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
@@ -392,7 +415,6 @@ class Handler(BaseHTTPRequestHandler):
         if length > MAX_UPLOAD:
             raise ValueError("file too large (32 MB limit)")
 
-        raw_name = self.headers.get("X-Filename") or f"ref{ext}"
         stem = SAFE_NAME.sub("_", Path(raw_name).stem)[:48] or "ref"
 
         refs = self.ctx.store.refs_dir(slug)

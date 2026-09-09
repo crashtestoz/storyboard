@@ -28,6 +28,17 @@ async function req(method, url, body, headers) {
   return data;
 }
 
+const EXT_TYPES = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp",
+  wav: "audio/wav", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
+  flac: "audio/flac", ogg: "audio/ogg", opus: "audio/opus",
+};
+
+function guessType(name) {
+  const ext = (name || "").split(".").pop().toLowerCase();
+  return EXT_TYPES[ext] || "application/octet-stream";
+}
+
 const API = {
   info: () => req("GET", "/api/info"),
 
@@ -43,9 +54,11 @@ const API = {
   addShot: (slug, patch) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots`, patch || {}),
 
+  // Browsers disagree about audio types and sometimes report none at all, so
+  // fall back to one derived from the extension rather than sending "".
   uploadRef: (slug, file) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs`, file, {
-      "Content-Type": file.type,
+      "Content-Type": file.type || guessType(file.name),
       "X-Filename": file.name,
     }),
 
