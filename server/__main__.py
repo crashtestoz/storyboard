@@ -12,7 +12,7 @@ from .app import Context, build_server
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .store import Store
-from .tts import TTS_IDS, build_tts
+from .tts import CONFIG_NAME, load_engines
 
 UI_ROOT = Path(__file__).resolve().parent.parent
 
@@ -58,14 +58,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--tts",
-        choices=TTS_IDS,
-        default=os.environ.get("SBV_TTS", "vpipe-moss"),
-        help="default speech engine for new boards (each board may override it)",
-    )
-    p.add_argument(
-        "--tts-url",
-        default=os.environ.get("SBV_TTS_URL", ""),
-        help="MCC base URL for the mcc-qwen3 engine, e.g. http://mcc-host:8000",
+        default=os.environ.get("SBV_TTS", "none"),
+        help=f"default speech engine id for new boards (see {CONFIG_NAME})",
     )
     return p.parse_args(argv)
 
@@ -91,13 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         comfyui_url=args.comfyui_url,
     )
-    # Every engine is constructed, none loads anything until asked, so a board
-    # can switch between them at runtime instead of needing a restart.
-    tts_engines = {
-        kind: build_tts(kind, vpipe_binary=args.vpipe.expanduser(),
-                        workspace=workspace, mcc_url=args.tts_url)
-        for kind in TTS_IDS
-    }
+    # Engines come from tts-services.json: a service is a name and a URL, so
+    # adding another instance is an edit rather than a code change. None loads
+    # anything until asked, so a board can switch between them at runtime.
+    tts_engines = load_engines(
+        UI_ROOT, vpipe_binary=args.vpipe.expanduser(), workspace=workspace
+    )
 
     store = Store(workspace=workspace)
     orch = Orchestrator(backend=backend, store=store, workspace=workspace)
@@ -137,13 +130,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"  WARNING    backend not usable: {message}")
     print("")
-    print(f"  speech     default {args.tts}")
+    print(f"  speech     from {CONFIG_NAME}, default '{args.tts}'")
     for kind, eng in tts_engines.items():
         if kind == "none":
             continue
         tok, tmsg = eng.health()
         print(f"             [{'ok  ' if tok else '--  '}] {kind}"
-              + ("" if tok else f"  ({tmsg.splitlines()[0][:88]})"))
+              + ("" if tok else f"  ({tmsg.splitlines()[0][:86]})"))
     print("")
     print("  Ctrl-C to stop.")
     print("")

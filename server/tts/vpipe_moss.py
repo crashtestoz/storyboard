@@ -82,6 +82,7 @@ class VpipeMossTTS(TTSEngine):
         *,
         voice: str | None = None,
         reference: Path | None = None,
+        **_: object,
     ) -> SpeechResult:
         ok, msg = self.health()
         if not ok:

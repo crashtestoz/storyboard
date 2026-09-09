@@ -1,0 +1,21 @@
+{
+  "services": [
+    {
+      "id": "vpipe-moss",
+      "label": "MOSS-TTS 8B via vpipe (local, clones a voice)",
+      "kind": "vpipe-moss"
+    },
+    {
+      "id": "qwen3-clone",
+      "label": "Qwen3-TTS voice clone (same server MCC uses)",
+      "kind": "qwen3-clone",
+      "url": "http://127.0.0.1:8790"
+    },
+    {
+      "id": "mcc-sherpa",
+      "label": "MCC sherpa-onnx voice (plain, no cloning)",
+      "kind": "mcc-sherpa",
+      "url": "http://127.0.0.1:3000"
+    }
+  ]
+}

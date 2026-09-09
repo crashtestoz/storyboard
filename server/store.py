@@ -84,6 +84,10 @@ def default_character(name: str = "", description: str = "") -> dict[str, Any]:
         "description": description,
         "image": None,   # {path, url, label}
         "voice": None,   # {path, url, label}
+        # What the reference clip says. Qwen3-TTS's voice cloning conditions on
+        # the transcript as well as the audio, so a clip alone is not enough;
+        # the service can derive this itself via /transcribe.
+        "voiceText": "",
     }
 
 
@@ -341,6 +345,7 @@ class Store:
             ch.setdefault("description", "")
             ch.setdefault("image", None)
             ch.setdefault("voice", None)
+            ch.setdefault("voiceText", "")
 
         shots = board.setdefault("shots", [])
         seen: set[str] = set()

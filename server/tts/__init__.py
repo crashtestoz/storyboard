@@ -1,32 +1,69 @@
-"""Text-to-speech engines.
+"""Speech engines, described by a config file rather than hardcoded.
 
-Selected at startup with ``--tts`` and switchable per board from the UI, so
-the voice stack is a choice rather than a hardcoded dependency:
+A voice model in this network is usually **already running somewhere with an
+owner** — Qwen3-TTS as a FastAPI process next to MCC, MCC's own endpoint
+driving a sherpa-onnx binary from that app's environment. So this project
+links to services by name and URL instead of installing models of its own.
+That keeps one copy of the weights, one lifecycle to maintain, and this
+project's "nothing to install" property.
 
-  * ``mcc-qwen3``  — Qwen3-TTS through MCC's HTTP service. The same voices the
-                     rest of that system uses; needs ``--tts-url``.
-  * ``vpipe-moss`` — MOSS-TTS 8B through vpipe's own text-to-speech stage.
-                     Fully local, no extra service, and can clone a voice from
-                     a character's reference clip.
-  * ``none``       — no speech. Dialogue is written into the storyboard but
-                     nothing is synthesised.
+Services are listed in ``tts-services.json`` at the project root, created with
+sensible defaults on first run and meant to be edited::
+
+    {
+      "services": [
+        {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone (OptiPlex)",
+         "kind": "qwen3-clone", "url": "http://127.0.0.1:8790"},
+        {"id": "mcc-sherpa",  "label": "MCC sherpa-onnx voice",
+         "kind": "mcc-sherpa", "url": "http://127.0.0.1:3000"},
+        {"id": "vpipe-moss",  "label": "MOSS-TTS via vpipe (local)",
+         "kind": "vpipe-moss"}
+      ]
+    }
+
+``kind`` selects the client; ``id`` is what a board stores. Adding another
+instance is a new entry, not a code change. The one local engine
+(``vpipe-moss``) needs no URL.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from .base import SpeechResult, TTSEngine, Voice
-from .mcc_qwen3 import MccQwen3TTS
+from .http_services import MccSherpaTTS, Qwen3CloneTTS
 from .vpipe_moss import VpipeMossTTS
 
 __all__ = [
     "TTSEngine", "Voice", "SpeechResult",
-    "MccQwen3TTS", "VpipeMossTTS", "NullTTS",
-    "build_tts", "TTS_IDS",
+    "NullTTS", "load_engines", "DEFAULT_SERVICES", "CONFIG_NAME",
 ]
 
-TTS_IDS = ("none", "vpipe-moss", "mcc-qwen3")
+CONFIG_NAME = "tts-services.json"
+
+DEFAULT_SERVICES: list[dict[str, Any]] = [
+    {
+        "id": "vpipe-moss",
+        "label": "MOSS-TTS 8B via vpipe (local, clones a voice)",
+        "kind": "vpipe-moss",
+    },
+    {
+        "id": "qwen3-clone",
+        "label": "Qwen3-TTS voice clone (same server MCC uses)",
+        "kind": "qwen3-clone",
+        # MCC's default. It binds 127.0.0.1 on the machine it runs on, so
+        # point this at that host (and rebind or tunnel it) to use it remotely.
+        "url": "http://127.0.0.1:8790",
+    },
+    {
+        "id": "mcc-sherpa",
+        "label": "MCC sherpa-onnx voice (plain, no cloning)",
+        "kind": "mcc-sherpa",
+        "url": "http://127.0.0.1:3000",
+    },
+]
 
 
 class NullTTS(TTSEngine):
@@ -34,18 +71,71 @@ class NullTTS(TTSEngine):
     label = "No speech synthesis"
 
     def health(self) -> tuple[bool, str]:
-        return False, "No TTS engine selected — dialogue will not be spoken."
+        return False, "No speech engine selected — dialogue will not be spoken."
 
-    def synth(self, text, out_path, *, voice=None, reference=None) -> SpeechResult:
-        return SpeechResult(engine=self.id, error="no TTS engine selected")
+    def synth(self, text, out_path, *, voice=None, reference=None, **_) -> SpeechResult:
+        return SpeechResult(engine=self.id, error="no speech engine selected")
 
 
-def build_tts(kind: str, *, vpipe_binary: Path, workspace: Path,
-              mcc_url: str = "") -> TTSEngine:
+def load_config(project_root: Path) -> list[dict[str, Any]]:
+    """Read ``tts-services.json``, writing the defaults if it is absent."""
+    path = Path(project_root) / CONFIG_NAME
+    if not path.exists():
+        try:
+            path.write_text(json.dumps({"services": DEFAULT_SERVICES}, indent=2) + "\n")
+        except OSError:
+            return list(DEFAULT_SERVICES)
+        return list(DEFAULT_SERVICES)
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        # A broken config should not stop the app starting; fall back and say
+        # so through the engine's own health message.
+        return [{"id": "config-error", "label": f"unreadable {CONFIG_NAME}",
+                 "kind": "broken"}]
+    services = doc.get("services")
+    return services if isinstance(services, list) else list(DEFAULT_SERVICES)
+
+
+class BrokenTTS(TTSEngine):
+    def __init__(self, service_id: str, label: str, why: str):
+        self.id = service_id
+        self.label = label
+        self._why = why
+
+    def health(self) -> tuple[bool, str]:
+        return False, self._why
+
+    def synth(self, text, out_path, *, voice=None, reference=None, **_) -> SpeechResult:
+        return SpeechResult(engine=self.id, error=self._why)
+
+
+def build_one(entry: dict[str, Any], *, vpipe_binary: Path,
+              workspace: Path) -> TTSEngine:
+    kind = entry.get("kind") or entry.get("id")
+    sid = str(entry.get("id") or kind or "unnamed")
+    label = str(entry.get("label") or sid)
+    url = str(entry.get("url") or "")
+
     if kind == "vpipe-moss":
-        return VpipeMossTTS(binary=vpipe_binary, workspace=workspace)
-    if kind == "mcc-qwen3":
-        return MccQwen3TTS(base_url=mcc_url)
-    if kind in ("none", "", None):
-        return NullTTS()
-    raise ValueError(f"unknown TTS engine: {kind!r} (expected one of {TTS_IDS})")
+        eng = VpipeMossTTS(binary=vpipe_binary, workspace=workspace)
+        eng.id, eng.label = sid, label
+        return eng
+    if kind == "qwen3-clone":
+        return Qwen3CloneTTS(sid, label, url)
+    if kind == "mcc-sherpa":
+        return MccSherpaTTS(sid, label, url)
+    return BrokenTTS(
+        sid, label,
+        f"unknown service kind {kind!r} in {CONFIG_NAME} "
+        "(expected vpipe-moss, qwen3-clone or mcc-sherpa)",
+    )
+
+
+def load_engines(project_root: Path, *, vpipe_binary: Path,
+                 workspace: Path) -> dict[str, TTSEngine]:
+    engines: dict[str, TTSEngine] = {"none": NullTTS()}
+    for entry in load_config(project_root):
+        eng = build_one(entry, vpipe_binary=vpipe_binary, workspace=workspace)
+        engines[eng.id] = eng
+    return engines

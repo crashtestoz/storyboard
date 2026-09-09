@@ -96,11 +96,28 @@ Render backends (`server/backends/`) and speech engines (`server/tts/`) are
 both pluggable, and each reports its own health so a missing model or an
 unreachable service says so at startup rather than mid-render.
 
-| Speech engine | Notes |
+Speech services are **linked, not installed**. A voice model here is usually
+already running somewhere with an owner, so this project points at it by name
+and URL in `tts-services.json` (created on first run, meant to be edited):
+
+```json
+{"services": [
+  {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone",
+   "kind": "qwen3-clone", "url": "http://optiplex:8790"}
+]}
+```
+
+Adding another instance is an entry, not a code change. `kind` picks the
+client:
+
+| kind | Notes |
 | --- | --- |
-| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Fully local, and can clone a voice from a character's reference clip. Needs the MOSS models fetched (~9 GB). |
-| `mcc-qwen3` | Qwen3-TTS through MCC's HTTP service — the same voices as the rest of that system. Needs `--tts-url`. **The request shape is an assumption**, since the MCC sources were not readable from this repo; adjust `server/tts/mcc_qwen3.py` if it does not match. |
+| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched (~9 GB). |
+| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. Note it binds `127.0.0.1` on its own host, so it must be rebound or tunnelled to reach it from another machine. |
+| `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
 | `none` | Dialogue is stored but not spoken. |
+
+Both HTTP contracts were read from MCC's source, not guessed.
 
 ## Why a run is judged, not just started
 
@@ -125,6 +142,5 @@ predicted subsequent runs within 5%.
   `admin/mcc`.
 - The ComfyUI backend is a scaffold with an integration plan, not an
   implementation.
-- The `mcc-qwen3` endpoint contract is assumed, as above.
 - Board editing is a whole-board save, so two browser tabs on one board are
   last-write-wins.

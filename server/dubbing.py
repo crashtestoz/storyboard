@@ -54,6 +54,7 @@ def dub_shot(
     text: str,
     voice: str | None = None,
     reference: Path | None = None,
+    reference_text: str = "",
     keep_original_audio: bool = True,
 ) -> DubResult:
     """Synthesise *text* and mux it onto *clip*."""
@@ -69,7 +70,10 @@ def dub_shot(
 
     shot_dir.mkdir(parents=True, exist_ok=True)
     speech_path = shot_dir / "dialogue.wav"
-    speech = engine.synth(text, speech_path, voice=voice, reference=reference)
+    # Only the cloning engines take a transcript; the others ignore the kwarg
+    # via **_ in their signature, so this stays one call site.
+    speech = engine.synth(text, speech_path, voice=voice, reference=reference,
+                          reference_text=reference_text)
     if not speech.ok:
         return DubResult(error=speech.error or "speech synthesis failed",
                          speech=speech, log=speech.log)
