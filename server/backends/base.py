@@ -106,6 +106,13 @@ class ModelCapability:
     resolutions: list[str] = field(default_factory=list)
     tested_resolutions: list[str] = field(default_factory=list)
     default_steps: int = 8
+    # Frame size must be a multiple of this, or the backend will round it up
+    # on our behalf. That rounding is the problem: a start-frame anchor is
+    # encoded at the size WE ask for, so if the generate stage quietly moves
+    # to a different one the latent no longer matches and the anchor is
+    # dropped -- a text-to-video clip from a graph that says otherwise. Snap
+    # here instead, so both sides agree by construction.
+    size_align: int = 16
     # set False when the weights are not present on this machine yet
     available: bool = True
     unavailable_reason: str = ""
@@ -124,6 +131,7 @@ class ModelCapability:
             "resolutions": self.resolutions,
             "testedResolutions": self.tested_resolutions,
             "defaultSteps": self.default_steps,
+            "sizeAlign": self.size_align,
             "available": self.available,
             "unavailableReason": self.unavailable_reason,
         }
