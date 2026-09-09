@@ -148,6 +148,19 @@ The runtime baseline is fitted to measured runs on an M4 Pro: 124 frames in
 27m44s, 39 frames in 7m32s, denoise growing as roughly `frames^1.37`. It has
 predicted subsequent runs within 5%.
 
+## Why the poll paints instead of re-rendering
+
+While a render is in flight the queue is polled once a second. That tick
+changes percentages and a phase label, almost never the shape of the page — so
+it updates those in place and rebuilds nothing. Rebuilding was the original
+approach and it cost two visible bugs at once: every image re-decoded and any
+playing `<video>` reloaded (a flicker on the second), and the field you were
+typing in was destroyed and recreated, so editing one shot while another
+rendered dropped the caret every second. A full rebuild now happens only when
+something structural moves — a status transition, a new thumbnail, a new
+output — and carries the caret across when it does.
+`tests/poll-does-not-rebuild.mjs` asserts all of it against the running page.
+
 ## Known gaps
 
 - The theme is a placeholder, not MCC's palette. All colours live in
