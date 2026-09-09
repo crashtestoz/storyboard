@@ -1444,3 +1444,11 @@ textarea.ta-tall {
   flex: 1 1 240px;
   min-width: 200px;
 }
+
+/* A saved log's "# ..." header: context for the run, not a line the engine
+   emitted, so it is set apart rather than stamped with a level. */
+.log-line[data-lvl="META"] {
+  color: var(--text-faint);
+  font-style: italic;
+  opacity: 0.85;
+}

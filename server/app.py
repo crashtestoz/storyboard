@@ -31,6 +31,7 @@ import json
 import mimetypes
 import posixpath
 import re
+import time
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -508,24 +509,57 @@ class Handler(BaseHTTPRequestHandler):
             reference_text=reference_text,
         )
 
-        if not result.ok:
-            return self._send_json(
-                {"error": result.error, "log": result.log,
-                 "engine": engine.id}, 409
-            )
-
         def as_url(p: Path) -> str:
             return "/media/" + str(p.relative_to(ctx.data_dir)).replace("\\", "/")
+
+        # The engine's own account of the run, written next to the audio so it
+        # survives a reload the way run.log does for a render. A voice that
+        # comes back wrong is nearly always the reference clip or its
+        # transcript, and neither is visible from the waveform — so this is
+        # kept whether the run succeeded or failed.
+        speech_log = list(result.log or [])
+        if result.speech and result.speech.log:
+            speech_log = list(result.speech.log)
+        if result.warning:
+            speech_log.append(f"[WARN] {result.warning}")
+        if clone_note:
+            speech_log.append(f"[WARN] {clone_note}")
+        if not result.ok and result.error:
+            speech_log.append(f"[ERROR] {result.error}")
+
+        log_url = None
+        try:
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            log_path = shot_dir / "speech.log"
+            header = [
+                f"# {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"# engine: {engine.id} ({engine.label})",
+                f"# speaker: {(speaker or {}).get('name') or '(none)'}"
+                f"{' — cloned' if reference is not None else ''}",
+            ]
+            log_path.write_text("\n".join(header + speech_log) + "\n")
+            log_url = as_url(log_path)
+        except OSError:
+            pass   # a log we could not write is not worth failing the take for
+
+        if not result.ok:
+            return self._send_json(
+                {"error": result.error, "log": speech_log,
+                 "speechLogUrl": log_url, "engine": engine.id}, 409
+            )
 
         # The spoken line is kept on the shot so it survives a reload and can
         # be played again without re-synthesising.
         shot["dialogueAudioUrl"] = as_url(result.audio) if result.audio else None
         if result.video:
             shot["dubUrl"] = as_url(result.video)
+        shot["speechLogUrl"] = log_url
         ctx.store.save(slug, board)
 
         return self._send_json(
             {
+                "log": speech_log,
+                "speechLogUrl": log_url,
                 "audioUrl": shot["dialogueAudioUrl"],
                 "dubUrl": shot.get("dubUrl") if result.video else None,
                 "muxed": bool(result.video),
