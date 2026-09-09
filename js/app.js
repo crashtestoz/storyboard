@@ -712,6 +712,15 @@ async function editCharacter(existing) {
     inp.click();
   }
 
+  function castError(msg) {
+    // Reported in the dialog as well as the toast: an error about something
+    // you are doing inside a modal should appear inside that modal.
+    const box = $("#castNote");
+    box.textContent = msg;
+    box.className = msg ? "field-warn" : "cast-note";
+    if (msg) toast(msg, "error");
+  }
+
   async function autoTranscribe(obj) {
     const clip = obj.voice && obj.voice.path;
     if (!clip) return;
@@ -726,9 +735,8 @@ async function editCharacter(existing) {
       toast("Transcribed the reference clip — check it reads correctly.");
     } catch (err) {
       field.value = prev;
-      toast(
-        `Could not transcribe: ${err.message}. Type what the clip says instead.`,
-        "warn"
+      castError(
+        `Could not transcribe: ${err.message} — type what the clip says instead.`
       );
     } finally {
       field.disabled = false;
@@ -776,7 +784,7 @@ async function editCharacter(existing) {
       draft.description = $("#castDesc").value.trim();
       draft.voiceText = $("#castVoiceText").value.trim();
       if (!draft.name || !draft.description) {
-        toast("A character needs both a name and a description.", "error");
+        castError("A character needs both a name and a description.");
         return;
       }
       state.board.characters = state.board.characters || [];

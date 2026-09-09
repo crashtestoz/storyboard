@@ -1103,3 +1103,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
    choosing a character portrait look like a dead click. */
 #castEditor { z-index: 100; }
 #picker     { z-index: 120; }
+
+/* The toast is how failures are reported, so it has to sit above anything
+   that can be open when one happens. At z-index 50 it rendered behind the
+   cast editor (100) and an upload error was invisible — the user saw nothing
+   at all rather than a message. */
+.toast { z-index: 200; }
