@@ -1,0 +1,29 @@
+{
+  "id": "prepare-moss-tts",
+  "stages": [
+    {
+      "id": "fetch-lm",
+      "type": "model-fetch",
+      "config": {
+        "model_path": "mlx-community/MOSS-TTS-8B-8bit",
+        "hf_token": "",
+        "base_path": "./models",
+        "skip_existing_files": true,
+        "overwrite_existing": false
+      }
+    },
+    {
+      "id": "fetch-codec",
+      "type": "model-fetch",
+      "iports": [{ "src": "fetch-lm", "oport": 0 }],
+      "config": {
+        "model_path": "OpenMOSS-Team/MOSS-Audio-Tokenizer",
+        "hf_token": "",
+        "base_path": "./models",
+        "skip_existing_files": true,
+        "overwrite_existing": false
+      }
+    }
+  ],
+  "subpipelines": []
+}

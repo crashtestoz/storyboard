@@ -26,6 +26,20 @@ Standard library Python only — nothing to install. Run the script, it prints a
 URL, Ctrl-C stops it. Port 9877 by default so it never collides with
 `vpipe-web-ui` on 9876.
 
+### Fetching the speech models
+
+`vpipe-moss` needs two models in the workspace. Once:
+
+```sh
+cd <workspace>
+<vpipe>/build/apps/vpipe/vpipe --launch setup/prepare-moss-tts.vpipeline
+```
+
+That pulls `mlx-community/MOSS-TTS-8B-8bit` (already 8-bit, no quantize pass)
+and `OpenMOSS-Team/MOSS-Audio-Tokenizer`. The engine reports itself
+unavailable until both are present, and treats a directory containing
+`*.part` as still downloading.
+
 **The workspace matters.** vpipe resolves `models/` and its LMDB model
 registry relative to the directory it is launched from, so `--workspace` must
 be the directory the models were prepared in. The startup banner lists which
@@ -112,7 +126,7 @@ client:
 
 | kind | Notes |
 | --- | --- |
-| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched (~9 GB). |
+| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched — run `setup/prepare-moss-tts.vpipeline` from the workspace (~9 GB, one time). |
 | `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
 | `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
 | `none` | Dialogue is stored but not spoken. |
