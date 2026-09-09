@@ -58,6 +58,16 @@ H3_FRAME_RULE = FrameRule(
          "(1.6s @ 24fps) is the shortest clip that decodes at all.",
 )
 
+# MiniMax H3 tiles at its VAE's 16x spatial stride times the DiT's 2x2 patch,
+# so generate-video rounds any frame size UP to a multiple of 32. Sizes are
+# snapped to it here rather than left to that rounding, because a start-frame
+# anchor is vae-encoded at the size this file asks for: if the generate stage
+# moves to a different one, the anchor latent's [z, n, h/16, w/16] no longer
+# matches, and it is dropped with a warning ("keyframe latent does not
+# match ... generating without an anchor") -- the clip renders as plain
+# text-to-video and the reference image silently does nothing.
+H3_SIZE_ALIGN = 32
+
 # Every dimension here is a multiple of 16, which these models require.
 # Grouped by aspect so the UI can offer a ratio rather than a pixel string.
 # 640x368 is the closest valid 16:9 (640x360 is not a multiple of 16).
@@ -176,6 +186,7 @@ class VpipeBackend(Backend):
                 frame_rule=H3_FRAME_RULE,
                 resolutions=ALL_RESOLUTIONS,
                 tested_resolutions=H3_TESTED,
+                size_align=H3_SIZE_ALIGN,
                 default_steps=8,
                 available=fl2va,
                 unavailable_reason=""
@@ -196,6 +207,7 @@ class VpipeBackend(Backend):
                 frame_rule=H3_FRAME_RULE,
                 resolutions=ALL_RESOLUTIONS,
                 tested_resolutions=H3_TESTED,
+                size_align=H3_SIZE_ALIGN,
                 default_steps=8,
                 available=ref2va,
                 unavailable_reason=""
@@ -251,7 +263,13 @@ class VpipeBackend(Backend):
         seed = int(shot.get("seed") or 0)
 
         if draft:
-            width, height, steps = _draft_geometry(width, height, steps)
+            width, height, steps = _draft_geometry(
+                width, height, steps, cap.size_align
+            )
+        # Full-size too: most of ASPECT_TABLE is a multiple of 32 already, but
+        # 640x368 and 960x720 are not, and an un-snapped size costs the anchor.
+        width = _align_up(width, cap.size_align)
+        height = _align_up(height, cap.size_align)
 
         if cap.kind == "image":
             spec, outputs = self._still_spec(shot, paths, prompt, width, height, steps, seed)
@@ -790,14 +808,26 @@ def _outputs(paths: ShotPaths) -> list[Path]:
 # misc helpers
 # ---------------------------------------------------------------------------
 
-def _draft_geometry(w: int, h: int, steps: int) -> tuple[int, int, int]:
+def _align_up(v: int, align: int) -> int:
+    """Round up to a multiple of `align` — the same direction generate-video
+    rounds, so snapping here is a no-op there rather than a second move."""
+    if align <= 1:
+        return v
+    return ((v + align - 1) // align) * align
+
+
+def _draft_geometry(w: int, h: int, steps: int,
+                    align: int = 16) -> tuple[int, int, int]:
     """Shrink a request so a draft answers "does the shot work" quickly.
 
     What is safe to cut, and what is not:
 
     *   **Pixels** — the big lever. Denoise cost is proportional to frame area,
-        so halving each dimension is ~4x less work. Rounded to the multiple of
-        16 these models require, and floored so a draft stays legible.
+        so halving each dimension is ~4x less work. Rounded UP to `align`, the
+        multiple the model tiles at, and floored so a draft stays legible.
+        Up rather than down because generate-video rounds up: a draft that
+        rounded the other way would be re-rounded there, and a start-frame
+        anchor encoded at this size would stop matching.
     *   **Steps** — cut to 6. Below 8 is nominally the Turbo LoRA's territory
         rather than the raw model's, but for judging whether a camera move and
         a composition work, slightly noisier output is the correct trade.
@@ -808,8 +838,8 @@ def _draft_geometry(w: int, h: int, steps: int) -> tuple[int, int, int]:
         changing the resolution changes the latent geometry, but the framing
         and the move carry over.
     """
-    dw = max(320, (w // 2) // 16 * 16)
-    dh = max(192, (h // 2) // 16 * 16)
+    dw = _align_up(max(320, w // 2), align)
+    dh = _align_up(max(192, h // 2), align)
     return dw, dh, max(4, min(steps, 6))
 
 
