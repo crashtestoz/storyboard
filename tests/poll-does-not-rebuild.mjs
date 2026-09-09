@@ -16,11 +16,11 @@
 //   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 //      --headless=new --remote-debugging-port=9223 --remote-allow-origins='*' \
 //      --user-data-dir=/tmp/cdp http://localhost:9877/ &
-//   node tests/poll-does-not-rebuild.mjs
+//   node tests/poll-does-not-rebuild.mjs        # CDP_PORT=9222 by default
 // Drive the live storyboard page and prove two things about a running render:
 //   1. a poll tick does not rebuild the DOM (no flicker)
 //   2. a poll tick does not steal focus or the caret (editing stays possible)
-const base = "http://127.0.0.1:9223";
+const base = `http://127.0.0.1:${process.env.CDP_PORT || 9222}`;
 const targets = await (await fetch(base + "/json/list")).json();
 const page = targets.find(t => t.type === "page" && t.url.includes("9877"));
 if (!page) { console.log("NO PAGE", targets.map(t=>t.url)); process.exit(1); }

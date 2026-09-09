@@ -98,7 +98,12 @@ its soundtrack in the same denoise loop as the picture and its own examples put
 sound in a trailing clause. Dropped automatically for a still.
 
 **A cast.** Characters have a required name and description, and optional
-reference image and voice clip. A shot casts whoever appears in it and refers
+reference image and voice clip. An attached clip shows its name behind a ♪ and
+a player, so it can be heard without leaving the dialog — and both slots pick
+from what is already in your projects as well as offering an upload. Audio used
+to jump straight to a file dialog, which meant a clip already uploaded into a
+project's `refs/` could never be attached to anyone: you could only upload it a
+second time. A shot casts whoever appears in it and refers
 to them by name in its prompt. On Ref2VA the portrait becomes an image
 reference and the voice clip a soundtrack reference, respecting that model's
 real limits (9 images, 3 soundtracks, 12 total).
@@ -114,6 +119,19 @@ replacing it. This is deliberate: H3 produces a soundtrack, but nothing in its
 documentation claims intelligible lip-synced speech, and dubbing separately
 means a line can be rewritten in seconds without re-rendering half an hour of
 video.
+
+**Open, not import.** The header's **Open** lists every storyboard on disk
+with what each folder actually holds — shot count, how many are rendered, and
+the full path to its `storyboard.json` — and opening one edits that file in
+place. This replaces an Import button that was the wrong verb: picking your own
+board's `storyboard.json` made a *second* project from it, carrying the shot
+list but none of the renders, with its references still pointing back into the
+original folder. Copying a board in from elsewhere is still available in that
+dialog, and now says what it does — a browser hands over a file's contents, not
+its location, so it cannot open one in place.
+
+The rendered count is on every row because two projects can carry the same
+name, and telling them apart is exactly what you need at that moment.
 
 **Renaming a project.** A project's name and its folder move together. The
 folder name is the slug, and the slug is baked into every path the board has

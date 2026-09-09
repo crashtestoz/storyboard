@@ -303,7 +303,12 @@ function wireChrome() {
     if (state.slug) window.location.href = API.exportUrl(state.slug);
   });
 
-  $("#btnImport").addEventListener("click", () => $("#importFile").click());
+  $("#btnOpen").addEventListener("click", openDialog);
+  $("#openClose").addEventListener("click", () => ($("#openDialog").hidden = true));
+  $("#openDialog").addEventListener("click", (e) => {
+    if (e.target === $("#openDialog")) $("#openDialog").hidden = true;
+  });
+  $("#openElsewhere").addEventListener("click", () => $("#importFile").click());
   $("#importFile").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
@@ -311,12 +316,17 @@ function wireChrome() {
     try {
       const board = JSON.parse(await file.text());
       const { slug, board: saved } = await API.importBoard(board, board.name);
-      state.boards.unshift({ slug, name: saved.name, shots: saved.shots.length });
+      state.boards = (await API.listBoards()).boards;
       setBoard(slug, saved);
       renderBoardPicker();
-      toast(`Imported “${saved.name}” — run state was reset.`);
+      $("#openDialog").hidden = true;
+      toast(
+        `Copied in “${saved.name}” as a new project. Renders stay with the ` +
+          `original — this copy has none.`,
+        "warn"
+      );
     } catch (err) {
-      toast(`Import failed: ${err.message}`, "error");
+      toast(`Could not read that board file: ${err.message}`, "error");
     }
   });
 
@@ -406,6 +416,98 @@ function renderBoardPicker() {
     if (b.slug === state.slug) o.selected = true;
     sel.appendChild(o);
   });
+}
+
+/* ==========================================================================
+   Open
+   ========================================================================== */
+
+/* This was "Import", which was the wrong verb and cost a real project: picking
+   your own board's storyboard.json made a *second* project from it, carrying
+   the shot list but none of the renders, while its references still pointed
+   back into the original folder. Opening a board should open it, in place.
+   Copying one in from elsewhere is still available, and now says what it does. */
+async function openDialog() {
+  const host = $("#openList");
+  $("#openDialog").hidden = false;
+  host.innerHTML = "";
+  host.appendChild(el("div", "empty-state", "loading…"));
+  try {
+    state.boards = (await API.listBoards()).boards;
+  } catch (err) {
+    host.innerHTML = "";
+    host.appendChild(el("div", "empty-state", `Could not list storyboards: ${err.message}`));
+    return;
+  }
+  paintOpenList();
+}
+
+function paintOpenList() {
+  const host = $("#openList");
+  host.innerHTML = "";
+  if (!state.boards.length) {
+    host.appendChild(el("div", "empty-state", "No storyboards yet — use New."));
+    return;
+  }
+  // Two projects can carry the same name, so the row has to say what each one
+  // actually holds and where it is.
+  const names = state.boards.reduce((a, b) => ((a[b.name] = (a[b.name] || 0) + 1), a), {});
+
+  state.boards.forEach((b) => {
+    const row = el("div", "open-row");
+    if (b.slug === state.slug) row.classList.add("current");
+
+    const main = el("div", "open-main");
+    const title = el("div", "open-name");
+    title.appendChild(el("span", null, b.name));
+    if (b.slug === state.slug) title.appendChild(el("span", "open-tag", "open now"));
+    if (names[b.name] > 1) {
+      title.appendChild(
+        el("span", b.rendered ? "open-tag" : "open-tag warn",
+           b.rendered ? `${b.rendered} rendered` : "no renders")
+      );
+    }
+    main.appendChild(title);
+    main.appendChild(
+      el("div", "open-meta",
+         `${b.shots} shot${b.shots === 1 ? "" : "s"} · ` +
+         `${b.rendered} rendered · ${relTime(b.updatedAt)}`)
+    );
+    main.appendChild(el("div", "open-path", b.configPath || `projects/${b.slug}/storyboard.json`));
+    row.appendChild(main);
+
+    const act = el("button", "btn btn-sm", b.slug === state.slug ? "Reload" : "Open");
+    act.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      act.disabled = true;
+      act.textContent = "opening…";
+      try {
+        await saveNow();
+        await openBoard(b.slug);
+        renderBoardPicker();
+        $("#openDialog").hidden = true;
+      } catch (err) {
+        toast(`Could not open: ${err.message}`, "error");
+        act.disabled = false;
+        act.textContent = "Open";
+      }
+    });
+    row.appendChild(act);
+    row.addEventListener("click", () => act.click());
+    host.appendChild(row);
+  });
+}
+
+function relTime(ts) {
+  if (!ts) return "unknown";
+  const secs = Math.max(0, Date.now() / 1000 - ts);
+  if (secs < 90) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 /* ==========================================================================
@@ -923,18 +1025,33 @@ async function editCharacter(existing) {
         img.src = cur.url || cur.path;
         host.appendChild(img);
       } else {
+        // An attached clip should be identifiable and audible, not just a
+        // word saying it is there: filenames all look alike, and the whole
+        // point of a reference voice is how it sounds.
+        host.classList.add("ref-slot-audio");
         const l = el("div", "ref-slot-label");
         l.append(
-          el("strong", null, "♪ " + (cur.label || "voice")),
-          el("span", null, "attached")
+          el("strong", null, "♪ " + (cur.label || "voice clip")),
+          el("span", null, "attached — click to change")
         );
         host.appendChild(l);
+        if (cur.url) {
+          const au = el("audio");
+          au.src = cur.url;
+          au.controls = true;
+          au.preload = "none";
+          au.className = "ref-slot-player";
+          // The slot itself opens the picker; the player must not.
+          au.onclick = (e) => e.stopPropagation();
+          host.appendChild(au);
+        }
       }
       const x = el("button", "clear-ref", "✕");
       x.title = "Remove";
       x.onclick = (e) => {
         e.stopPropagation();
         obj[key] = null;
+        if (key === "voice") $("#castTranscribe").disabled = true;
         paint();
       };
       host.appendChild(x);
@@ -945,32 +1062,28 @@ async function editCharacter(existing) {
     }
   }
 
+  /* Both kinds go through the picker, which offers what is already in the
+     project as well as an upload. Audio used to jump straight to a file
+     dialog, which meant a clip already uploaded into refs/ could never be
+     attached — you could only upload it a second time. */
   async function pickMedia(obj, key, kind) {
-    if (kind === "image") {
-      const chosen = await chooseImage(
-        `Choose an image for ${$("#castName").value.trim() || "this character"}`
-      );
-      if (chosen) {
-        obj[key] = chosen;
-        paint();
-      }
-      return;
+    const who = $("#castName").value.trim() || "this character";
+    const chosen = await chooseMedia(
+      kind === "image"
+        ? `Choose an image for ${who}`
+        : `Choose a reference voice for ${who}`,
+      kind
+    );
+    if (!chosen) return;
+    obj[key] = chosen;
+    // A new clip invalidates a transcript of the old one, and the Transcribe
+    // button is only usable once something is attached.
+    if (kind === "audio") {
+      $("#castVoiceText").value = "";
+      draft.voiceText = "";
+      $("#castTranscribe").disabled = false;
     }
-    const inp = el("input");
-    inp.type = "file";
-    inp.accept =
-      "audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg";
-    inp.onchange = async () => {
-      const f = inp.files[0];
-      if (!f) return;
-      try {
-        obj[key] = await API.uploadRef(state.slug, f);
-        paint();
-      } catch (err) {
-        toast(`Upload failed: ${err.message}`, "error");
-      }
-    };
-    inp.click();
+    paint();
   }
 
   function castError(msg) {
@@ -2229,9 +2342,22 @@ function refSlot(label, shot, key) {
  * only an upload button means re-uploading a file that is right there.
  */
 async function chooseImage(title) {
+  return chooseMedia(title, "image");
+}
+
+/* One picker for both kinds. Audio needed the same "already in the project"
+   route images had: without it the only way to attach a voice clip was to
+   upload it again from the filesystem, so a clip already sitting in a
+   project's refs/ could not be linked to a character at all. */
+async function chooseMedia(title, kind) {
+  const isAudio = kind === "audio";
   const modal = $("#picker");
   const grid = $("#pickerGrid");
   $("#pickerTitle").textContent = title;
+  grid.classList.toggle("picker-list", isAudio);
+  $("#pickerFoot").textContent = isAudio
+    ? "Audio already in your projects. Uploading adds it to this project's refs/."
+    : "Images already in your projects. Per-frame folders are excluded — use “chain from previous shot” for that.";
   grid.innerHTML = "";
   grid.appendChild(el("div", "empty-state", "loading…"));
   modal.hidden = false;
@@ -2250,7 +2376,9 @@ async function chooseImage(title) {
     $("#pickerUpload").onclick = () => {
       const inp = el("input");
       inp.type = "file";
-      inp.accept = "image/png,image/jpeg,image/webp";
+      inp.accept = isAudio
+        ? "audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus"
+        : "image/png,image/jpeg,image/webp";
       inp.onchange = async () => {
         const f = inp.files[0];
         if (!f) return;
@@ -2264,26 +2392,45 @@ async function chooseImage(title) {
       inp.click();
     };
 
-    API.library()
-      .then(({ images }) => {
+    API.library(kind)
+      .then(({ items }) => {
         grid.innerHTML = "";
-        if (!images.length) {
+        if (!items.length) {
           grid.appendChild(
-            el("div", "empty-state", "No images in the workspace yet — upload one.")
+            el("div", "empty-state",
+               isAudio
+                 ? "No audio in your projects yet — upload a clip."
+                 : "No images in your projects yet — upload one.")
           );
           return;
         }
-        images.forEach((img) => {
-          const card = el("div", "pick");
-          const im = el("img");
-          im.src = img.url;
-          im.loading = "lazy";
-          im.alt = img.label;
-          card.appendChild(im);
+        items.forEach((img) => {
+          const card = el("div", isAudio ? "pick pick-audio" : "pick");
+          if (isAudio) {
+            const icon = el("div", "pick-audio-icon", "♪");
+            card.appendChild(icon);
+          } else {
+            const im = el("img");
+            im.src = img.url;
+            im.loading = "lazy";
+            im.alt = img.label;
+            card.appendChild(im);
+          }
           const meta = el("div", "pick-meta");
           meta.appendChild(el("div", "pick-name", img.label));
           meta.appendChild(el("div", "pick-project", img.project));
           card.appendChild(meta);
+          if (isAudio) {
+            // Audible before you commit to it: one clip of dialogue sounds
+            // much like another in a filename.
+            const au = el("audio");
+            au.src = img.url;
+            au.controls = true;
+            au.preload = "none";
+            au.className = "pick-audio-player";
+            au.onclick = (e) => e.stopPropagation();
+            card.appendChild(au);
+          }
           card.onclick = async () => {
             // copy it into this project rather than pointing at another
             // project's folder, which would break if that project went away
@@ -2291,7 +2438,7 @@ async function chooseImage(title) {
               const ref = await API.adoptRef(state.slug, img.path);
               finish({ kind: "upload", ...ref });
             } catch (err) {
-              toast(`Could not use that image: ${err.message}`, "error");
+              toast(`Could not use that file: ${err.message}`, "error");
               finish(null);
             }
           };
@@ -2300,7 +2447,9 @@ async function chooseImage(title) {
       })
       .catch((err) => {
         grid.innerHTML = "";
-        grid.appendChild(el("div", "empty-state", `Could not list images: ${err.message}`));
+        grid.appendChild(
+          el("div", "empty-state", `Could not list ${kind} files: ${err.message}`)
+        );
       });
   });
 }

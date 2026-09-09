@@ -72,7 +72,10 @@ const API = {
       "X-Filename": file.name,
     }),
 
-  library: () => req("GET", "/api/library"),
+  // kind is "image" or "audio": a voice clip already uploaded to a project
+  // has to be pickable, or it can never be linked to a character.
+  library: (kind) =>
+    req("GET", `/api/library?kind=${encodeURIComponent(kind || "image")}`),
 
   transcribe: (path, engine) => req("POST", "/api/transcribe", { path, engine }),
 

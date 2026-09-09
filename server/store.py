@@ -197,27 +197,43 @@ class Store:
                 board = json.loads(bp.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
+            shots = board.get("shots") or []
             out.append(
                 {
                     "slug": d.name,
                     "name": board.get("name", d.name),
-                    "shots": len(board.get("shots") or []),
+                    "shots": len(shots),
+                    # What the folder actually holds, so two boards with the
+                    # same name are distinguishable: an imported copy carries
+                    # the shot list but none of the renders, and picking the
+                    # wrong one is how you lose track of your work.
+                    "rendered": sum(1 for sh in shots if sh.get("outputs")),
+                    "configPath": str(bp),
                     "updatedAt": board.get("updatedAt") or bp.stat().st_mtime,
                 }
             )
         out.sort(key=lambda b: b["updatedAt"], reverse=True)
         return out
 
-    def library(self, limit: int = 300) -> list[dict[str, Any]]:
-        """Images already in the projects tree, for picking without re-uploading.
+    #: What the picker can offer, by kind. Audio is here because a voice clip
+    #: already uploaded to a project was otherwise unreachable: the only way to
+    #: attach one was to upload it again from the filesystem, so a clip sitting
+    #: in a project's refs/ could not be linked to a character at all.
+    LIBRARY_EXTS = {
+        "image": {".png", ".jpg", ".jpeg", ".webp"},
+        "audio": {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"},
+    }
 
-        Covers uploaded refs, loose images dropped into a project folder by
+    def library(self, limit: int = 300, kind: str = "image") -> list[dict[str, Any]]:
+        """Files already in the projects tree, for picking without re-uploading.
+
+        Covers uploaded refs, loose files dropped into a project folder by
         hand, and rendered stills. Per-frame directories are skipped
         deliberately: a handful of clips is thousands of PNGs, and chaining to
         a previous shot's last frame is already a dedicated control rather
         than something you hunt for in a grid.
         """
-        exts = {".png", ".jpg", ".jpeg", ".webp"}
+        exts = self.LIBRARY_EXTS.get(kind) or self.LIBRARY_EXTS["image"]
         out: list[dict[str, Any]] = []
         if not self.root.exists():
             return out
@@ -240,6 +256,7 @@ class Store:
                     "url": "/media/" + str(rel).replace("\\", "/"),
                     "label": path.name,
                     "project": project,
+                    "kind": kind,
                     "bytes": path.stat().st_size,
                     "modifiedAt": path.stat().st_mtime,
                 }
