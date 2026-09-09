@@ -108,6 +108,23 @@ class Context:
             "none"
         )
 
+    def transcriber(self, kind: str | None) -> TTSEngine | None:
+        """A healthy engine that can transcribe — the asked-for one if it can.
+
+        Transcription and cloning are separate capabilities. The board's
+        speech engine may clone beautifully and have no speech recognition at
+        all (MOSS does exactly that), and refusing on those grounds was
+        pointless when another configured service could do the job. So this
+        prefers what was asked for and otherwise finds one that works.
+        """
+        wanted = self.tts_engines.get(kind or self.default_tts)
+        if wanted and wanted.supports_transcription and wanted.health()[0]:
+            return wanted
+        for eng in self.tts_engines.values():
+            if eng.supports_transcription and eng.health()[0]:
+                return eng
+        return None
+
     def tts(self, kind: str | None) -> TTSEngine:
         return self.tts_engines.get(kind or self.default_tts) or self.tts_engines.get(
             "none"
@@ -226,6 +243,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "healthy": eng.health()[0],
                                 "message": eng.health()[1],
                                 "supportsCloning": eng.supports_cloning,
+                                "supportsTranscription": eng.supports_transcription,
                                 "voices": [v.to_json() for v in eng.voices()],
                             }
                             for kind, eng in ctx.tts_engines.items()
@@ -408,15 +426,23 @@ class Handler(BaseHTTPRequestHandler):
         if not clip.is_file():
             raise FileNotFoundError(f"no such clip: {rel}")
 
-        engine = self.ctx.tts(engine_id)
-        transcribe = getattr(engine, "transcribe", None)
-        if transcribe is None:
+        engine = self.ctx.transcriber(engine_id)
+        if engine is None:
+            configured = [
+                e.label for e in self.ctx.tts_engines.values()
+                if e.supports_transcription
+            ]
             return self._err(
                 409,
-                f"{engine.label} cannot transcribe — select a voice-cloning "
-                "engine, or type the transcript yourself",
+                "No speech service that can transcribe is available"
+                + (
+                    f" ({', '.join(configured)} can, but is unreachable). "
+                    if configured
+                    else " — none of the configured services offers it. "
+                )
+                + "Type what the clip says instead.",
             )
-        text, err = transcribe(clip)
+        text, err = engine.transcribe(clip)
         if err or not text:
             return self._err(409, err or "transcription returned no text")
         return self._send_json({"text": text, "engine": engine.id})
