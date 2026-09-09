@@ -53,15 +53,16 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
         "id": "qwen3-clone",
         "label": "Qwen3-TTS voice clone (same server a dashboard uses)",
         "kind": "qwen3-clone",
-        # a dashboard's default. It binds 127.0.0.1 on the machine it runs on, so
-        # point this at that host (and rebind or tunnel it) to use it remotely.
-        "url": "http://127.0.0.1:8790",
+        # CPU host, where a dashboard and this server run. Still binds 127.0.0.1
+        # there, so it needs rebinding to 0.0.0.0 (or a tunnel) before this
+        # address answers.
+        "url": "http://localhost:8790",
     },
     {
         "id": "plain-sherpa",
         "label": "a dashboard sherpa-onnx voice (plain, no cloning)",
         "kind": "plain-sherpa",
-        "url": "http://127.0.0.1:3000",
+        "url": "http://localhost:3000",
     },
 ]
 
