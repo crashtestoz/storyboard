@@ -343,6 +343,14 @@ class Store:
             # Only remove the board; generated media can be expensive to
             # recreate, so deleting a board never throws away renders.
             self.board_path(slug).unlink(missing_ok=True)
+            # If nothing was left worth keeping, do not leave an empty shell
+            # of a folder behind either. "Nothing" means literally no files
+            # anywhere under it — anything at all, and the folder stays.
+            try:
+                if not any(p.is_file() for p in d.rglob("*")):
+                    shutil.rmtree(d)
+            except OSError:
+                pass
         else:
             shutil.rmtree(d)
 
