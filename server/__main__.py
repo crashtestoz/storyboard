@@ -12,6 +12,8 @@ from .app import Context, build_server
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .store import Store
+from .llm import CONFIG_NAME as LLM_CONFIG_NAME
+from .llm import load_services as load_llm_services
 from .tts import CONFIG_NAME, load_engines
 
 UI_ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +63,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=os.environ.get("SBV_TTS", "none"),
         help=f"default speech engine id for new boards (see {CONFIG_NAME})",
     )
+    p.add_argument(
+        "--llm",
+        default=os.environ.get("SBV_LLM", "ollama-local"),
+        help=f"default prompt-rewriting model id (see {LLM_CONFIG_NAME})",
+    )
     return p.parse_args(argv)
 
 
@@ -92,12 +99,17 @@ def main(argv: list[str] | None = None) -> int:
         UI_ROOT, vpipe_binary=args.vpipe.expanduser(), workspace=workspace
     )
 
+    # Prompt rewriting, from llm-services.json, on the same linked-not-installed
+    # footing as the speech engines.
+    llm_services = load_llm_services(UI_ROOT)
+
     store = Store(workspace=workspace)
     # Anything left mid-run by a previous process is not running now.
     stranded = store.reconcile_startup()
     orch = Orchestrator(backend=backend, store=store, workspace=workspace)
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
-                  tts_engines=tts_engines, default_tts=args.tts)
+                  tts_engines=tts_engines, default_tts=args.tts,
+                  llm_services=llm_services, default_llm=args.llm)
 
     try:
         httpd = build_server(bind, args.port, ctx)
@@ -139,6 +151,14 @@ def main(argv: list[str] | None = None) -> int:
         tok, tmsg = eng.health()
         print(f"             [{'ok  ' if tok else '--  '}] {kind}"
               + ("" if tok else f"  ({tmsg.splitlines()[0][:86]})"))
+    print("")
+    print(f"  rewriting  from {LLM_CONFIG_NAME}, default '{args.llm}'")
+    for sid, svc in llm_services.items():
+        if sid == "none":
+            continue
+        lok, lmsg = svc.health()
+        print(f"             [{'ok  ' if lok else '--  '}] {sid}"
+              + (f"  ({svc.model})" if lok else f"  ({lmsg.splitlines()[0][:86]})"))
     print("")
     if stranded:
         print(f"  recovered   {len(stranded)} shot(s) left mid-run by a previous "

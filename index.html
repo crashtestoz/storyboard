@@ -135,6 +135,21 @@
       <div class="modal-body settings-body">
         <section>
         <div class="section-label">
+          Project
+          <span class="hint">— the name and the folder move together</span>
+        </div>
+        <div class="field">
+          <label>Project name</label>
+          <div class="rename-row">
+            <input type="text" id="projName" autocomplete="off">
+            <button class="btn btn-sm" id="btnRename" disabled>Rename</button>
+          </div>
+          <div class="field-note" id="projPath"></div>
+        </div>
+        </section>
+
+        <section>
+        <div class="section-label">
           Clip settings
           <span class="hint">— applies to every shot</span>
         </div>
@@ -165,6 +180,11 @@
           <label>Speech engine <span class="hint-inline">for dialogue</span></label>
           <select id="ttsEngine"></select>
           <div class="field-note" id="ttsNote"></div>
+        </div>
+        <div class="field">
+          <label>Prompt rewriting <span class="hint-inline">the 🪄 button</span></label>
+          <select id="llmService"></select>
+          <div class="field-note" id="llmNote"></div>
         </div>
         </section>
 

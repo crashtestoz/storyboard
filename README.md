@@ -94,6 +94,32 @@ documentation claims intelligible lip-synced speech, and dubbing separately
 means a line can be rewritten in seconds without re-rendering half an hour of
 video.
 
+**Renaming a project.** A project's name and its folder move together. The
+folder name is the slug, and the slug is baked into every path the board has
+recorded — thumbnails, run logs, outputs, cast portraits — so renaming the
+display name alone would leave the folder saying something else, and moving the
+folder alone would break all of those. Rename does both and rewrites the paths,
+walking the whole board rather than the fields it happens to know about. It
+refuses while a render is running, since the orchestrator is holding those
+paths.
+
+**Prompt rewriting.** A good MiniMax H3 prompt has a shape — camera move named
+first, subject and action, environment and light with concrete material detail,
+then the sound in one trailing clause. The 🪄 button on a shot prompt hands
+your words to a local language model that knows that shape and asks for a
+restyle. The result is shown as a **proposal with Use this / Discard** — never
+applied on the model's word, because the prompt is your authorship and took
+thought to write. The scene description and the shot's cast go along as
+context marked *do not repeat*, since both are already prepended when the full
+prompt is assembled.
+
+**Tabbed prompt editing.** Shot prompt, dialogue, sound accents and the
+resolved prompt share one tall pane rather than stacking four short boxes.
+Each tab carries a dot when its field has content, so tabbing away never hides
+the fact that a shot has dialogue. The resolved tab shows the assembled prompt
+**segmented and labelled by source** — scene, each cast member, shot, sound
+bed, accents — so it is never ambiguous which clause came from where.
+
 **Draft mode.** Renders at half size and 6 steps — 3.7x to 8.3x faster
 depending on settings — to check framing and camera motion before committing.
 Clip length and seed are left alone, so the move you see is the move you will
@@ -130,6 +156,25 @@ client:
 | `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
 | `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
 | `none` | Dialogue is stored but not spoken. |
+
+Language models for prompt rewriting work the same way, in
+`llm-services.json`:
+
+```json
+{"services": [
+  {"id": "ollama-local", "label": "Ollama (this machine)",
+   "kind": "ollama", "url": "http://localhost:11434",
+   "model": "qwen3.8:27b-mlx"}
+]}
+```
+
+`kind` is `ollama` (native `/api/chat`) or `openai` (anything serving
+`/v1/chat/completions` — llama.cpp, vLLM, LM Studio). Health checks that the
+**configured model is actually pulled**, not merely that the port answers. A
+27B local model takes roughly a minute per rewrite, which is why the button
+shows progress and the result waits for approval. For a service needing a key,
+use `apiKeyEnv` to name an environment variable rather than putting the key in
+this tracked file.
 
 Both HTTP contracts were read from MCC's source, not guessed.
 

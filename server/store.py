@@ -36,6 +36,23 @@ def slugify(name: str) -> str:
     return s[:60] or "untitled"
 
 
+def _rewrite_slug(node: Any, old: str, new: str) -> Any:
+    """Repoint every stored path from one project slug to another.
+
+    Two forms occur: browser URLs (``/media/projects/<slug>/...``) and
+    workspace-relative paths (``projects/<slug>/...``). Both are anchored on
+    ``projects/`` and end at a slash, so a project whose slug is a prefix of
+    another's cannot be caught by accident.
+    """
+    if isinstance(node, str):
+        return node.replace(f"projects/{old}/", f"projects/{new}/")
+    if isinstance(node, list):
+        return [_rewrite_slug(v, old, new) for v in node]
+    if isinstance(node, dict):
+        return {k: _rewrite_slug(v, old, new) for k, v in node.items()}
+    return node
+
+
 def new_id(prefix: str = "s") -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
@@ -106,6 +123,7 @@ def default_board(name: str) -> dict[str, Any]:
             "steps": 8,
             "draft": False,
             "tts": "none",
+            "llm": "",       # "" means: use the server's default service
         },
         "shots": [],
         "createdAt": time.time(),
@@ -233,6 +251,45 @@ class Store:
         board = default_board(name)
         self.save(slug, board)
         return slug, board
+
+    def rename(self, slug: str, new_name: str) -> tuple[str, dict[str, Any]]:
+        """Rename a project: its display name **and** its folder.
+
+        The folder is the slug, and the slug is baked into every path the
+        board has recorded — thumbnails, run logs, outputs, character
+        portraits, style references. So renaming the display name alone would
+        leave the folder on disk saying something else, and moving the folder
+        alone would break every one of those paths. This does both, and
+        rewrites the paths to match.
+
+        The rewrite walks the whole board rather than naming the fields it
+        knows about, because the fields holding paths have grown over time and
+        a rename that silently missed one would cost the user a thumbnail or a
+        cast portrait with nothing to explain why.
+
+        Returns the new slug, which the caller must use from here on.
+        """
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise ValueError("a project needs a name")
+
+        old_slug = slugify(slug)
+        board = self.load(old_slug)          # raises if there is no such board
+
+        new_slug = slugify(new_name)
+        if new_slug != old_slug:
+            base, n = new_slug, 2
+            while self.project_dir(new_slug).exists():
+                new_slug = f"{base}-{n}"
+                n += 1
+
+            # Move first: if this fails, nothing has been changed at all.
+            self.project_dir(old_slug).rename(self.project_dir(new_slug))
+            board = _rewrite_slug(board, old_slug, new_slug)
+
+        board["name"] = new_name
+        board = self.save(new_slug, board)
+        return new_slug, board
 
     def delete(self, slug: str, *, keep_outputs: bool = True) -> None:
         d = self.project_dir(slug)
@@ -367,6 +424,7 @@ class Store:
         defaults.setdefault("steps", 8)
         defaults.setdefault("draft", False)
         defaults.setdefault("tts", "none")
+        defaults.setdefault("llm", "")
 
         for ch in board.get("characters") or []:
             ch.setdefault("id", new_id("c"))

@@ -14,13 +14,13 @@
 // Run:
 //   ./serve.sh &
 //   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-//      --headless=new --remote-debugging-port=9222 --remote-allow-origins='*' \
+//      --headless=new --remote-debugging-port=9223 --remote-allow-origins='*' \
 //      --user-data-dir=/tmp/cdp http://localhost:9877/ &
 //   node tests/poll-does-not-rebuild.mjs
 // Drive the live storyboard page and prove two things about a running render:
 //   1. a poll tick does not rebuild the DOM (no flicker)
 //   2. a poll tick does not steal focus or the caret (editing stays possible)
-const base = "http://127.0.0.1:9222";
+const base = "http://127.0.0.1:9223";
 const targets = await (await fetch(base + "/json/list")).json();
 const page = targets.find(t => t.type === "page" && t.url.includes("9877"));
 if (!page) { console.log("NO PAGE", targets.map(t=>t.url)); process.exit(1); }
@@ -50,11 +50,17 @@ const out = await evalJS(`(async () => {
   const realStatus = API.status;
   API.status = async () => busy();
   state.status = busy();
-  state.sig = structuralSig();          // steady state: nothing structural moves
 
-  // Focus a shot field and put the caret mid-word, as if mid-edit.
+  // Focus a shot field and put the caret mid-word, as if mid-edit. The tab is
+  // set explicitly: a field in a hidden tab pane cannot take focus, so the
+  // test would otherwise depend on whichever tab was last open.
   state.selectedId = sid;
+  state.tab = "prompt";
   render();
+  // Capture the signature only once the page is in the state under test —
+  // otherwise the setup itself counts as a structural change and the first
+  // tick legitimately rebuilds.
+  state.sig = structuralSig();
   const box = document.querySelector('#editor [data-fkey="shot-prompt"]')
            || document.querySelector('#editor textarea');
   box.focus();
