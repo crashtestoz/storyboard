@@ -51,6 +51,8 @@ const API = {
 
   library: () => req("GET", "/api/library"),
 
+  transcribe: (path, engine) => req("POST", "/api/transcribe", { path, engine }),
+
   // copy an existing workspace image into this board's refs/ so the project
   // folder stays self-contained
   adoptRef: (slug, path) =>
