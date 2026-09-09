@@ -1,11 +1,17 @@
-"""Speak a shot's dialogue and lay it over the rendered clip.
+"""Speak a shot's dialogue, and lay it over the clip once there is one.
 
 Kept out of the render path on purpose. Speech is cheap and the video is not,
-so a line can be rewritten and re-dubbed in seconds without touching a clip
+so a line can be rewritten and re-spoken in seconds without touching a clip
 that took half an hour — and a dud take of the voice never costs a re-render.
 
-The result is written alongside the clip as ``clip-dubbed.mp4``; the original
-is left untouched so both remain available for comparison.
+That argument runs the other way too, which is why synthesis and muxing are
+separate here: hearing a line in a character's voice should not require having
+rendered the shot first. Half an hour of video to find out a cloned voice says
+the line wrong is exactly the wrong order. So ``speak_line`` stands alone and
+``dub_shot`` mixes its result over the video when a video exists.
+
+The muxed result is written alongside the clip as ``clip-dubbed.mp4``; the
+original is left untouched so both remain available for comparison.
 """
 
 from __future__ import annotations
@@ -21,13 +27,34 @@ from .tts.base import SpeechResult, TTSEngine
 @dataclass
 class DubResult:
     ok: bool = False
-    video: Path | None = None
+    video: Path | None = None      # None when there was no clip to mux into
     audio: Path | None = None
     speech: SpeechResult | None = None
     error: str = ""
     log: list[str] = field(default_factory=list)
     # set when the line does not fit the clip; the mux still succeeds
     warning: str = ""
+
+
+def speaker_for(shot: dict, board: dict) -> dict | None:
+    """Which cast member says this shot's line.
+
+    An explicit ``speakerId`` wins, and is honoured even for someone not in
+    this shot's cast — a voice over a shot they do not appear in is a real
+    thing to want. Otherwise it comes from the shot's own cast, preferring
+    someone who has a recorded voice: a shot with one character in it should
+    not have to be told who is talking.
+    """
+    cast = {c["id"]: c for c in (board.get("characters") or []) if c.get("id")}
+    in_shot = [cid for cid in (shot.get("characterIds") or []) if cid in cast]
+
+    chosen = shot.get("speakerId") or ""
+    if chosen and chosen in cast:
+        return cast[chosen]
+    for cid in in_shot:
+        if (cast[cid].get("voice") or {}).get("path"):
+            return cast[cid]
+    return cast[in_shot[0]] if in_shot else None
 
 
 def _duration(path: Path) -> float:
@@ -46,6 +73,35 @@ def _duration(path: Path) -> float:
         return 0.0
 
 
+def speak_line(
+    engine: TTSEngine,
+    *,
+    shot_dir: Path,
+    text: str,
+    voice: str | None = None,
+    reference: Path | None = None,
+    reference_text: str = "",
+) -> SpeechResult:
+    """Synthesise *text* to ``dialogue.wav``. No video involved.
+
+    This is what a preview needs: the line, in the right voice, audible now.
+    """
+    text = (text or "").strip()
+    if not text:
+        return SpeechResult(engine=engine.id, error="this shot has no dialogue to speak")
+
+    shot_dir.mkdir(parents=True, exist_ok=True)
+    # Only the cloning engines take a transcript; the others ignore the kwarg
+    # via **_ in their signature, so this stays one call site.
+    return engine.synth(
+        text,
+        shot_dir / "dialogue.wav",
+        voice=voice,
+        reference=reference,
+        reference_text=reference_text,
+    )
+
+
 def dub_shot(
     engine: TTSEngine,
     *,
@@ -57,26 +113,30 @@ def dub_shot(
     reference_text: str = "",
     keep_original_audio: bool = True,
 ) -> DubResult:
-    """Synthesise *text* and mux it onto *clip*."""
-    text = (text or "").strip()
-    if not text:
-        return DubResult(error="this shot has no dialogue to speak")
-    if not clip.exists():
-        return DubResult(error="render the shot before dubbing it")
+    """Synthesise *text*, and mux it onto *clip* if the clip exists.
 
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return DubResult(error="ffmpeg not found on PATH — needed to mux the speech")
-
-    shot_dir.mkdir(parents=True, exist_ok=True)
-    speech_path = shot_dir / "dialogue.wav"
-    # Only the cloning engines take a transcript; the others ignore the kwarg
-    # via **_ in their signature, so this stays one call site.
-    speech = engine.synth(text, speech_path, voice=voice, reference=reference,
-                          reference_text=reference_text)
+    A missing clip is not an error. The speech is the useful artefact on its
+    own — you can hear whether the line and the voice are right — and there is
+    no reason to withhold it until the shot has been rendered.
+    """
+    speech = speak_line(engine, shot_dir=shot_dir, text=text, voice=voice,
+                        reference=reference, reference_text=reference_text)
     if not speech.ok:
         return DubResult(error=speech.error or "speech synthesis failed",
                          speech=speech, log=speech.log)
+    speech_path = speech.path
+
+    if not clip.exists():
+        # Nothing to lay it over yet; the line itself is still the point.
+        return DubResult(ok=True, video=None, audio=speech_path, speech=speech)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return DubResult(
+            ok=True, video=None, audio=speech_path, speech=speech,
+            warning="ffmpeg not found on PATH, so the speech was not mixed "
+                    "onto the clip — the line itself is above",
+        )
 
     out = shot_dir / "clip-dubbed.mp4"
 

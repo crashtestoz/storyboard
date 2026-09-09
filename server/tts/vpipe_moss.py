@@ -138,7 +138,13 @@ class VpipeMossTTS(TTSEngine):
                 "id": "text-to-speech",
                 "type": "text-to-speech",
                 "iports": tts_iports,
-                "config": {"codec_dir": CODEC_MODEL},
+                # hf_dir belongs on THIS stage, not only on model-select: the
+                # stage declares it required and fails its own config check
+                # without it, which makes it inert — and an inert stage means
+                # the pipeline completes in milliseconds, writes nothing, and
+                # exits 0. That looked exactly like a working engine that
+                # produced no audio.
+                "config": {"hf_dir": LM_MODEL, "codec_dir": CODEC_MODEL},
             }
         )
         stages.append(
@@ -146,7 +152,12 @@ class VpipeMossTTS(TTSEngine):
                 "id": "save-audio",
                 "type": "save-audio",
                 "iports": [{"src": "text-to-speech", "oport": 0}],
-                "config": {"output_url": rel_out},
+                # save-audio wants output_path, not output_url (save-video is
+                # the one that takes a URL). With the wrong key the stage
+                # declared its config invalid and skipped itself, so MOSS
+                # generated the speech and then quietly dropped it on the
+                # floor — and vpipe still exited 0.
+                "config": {"output_path": rel_out},
             }
         )
 
@@ -163,15 +174,33 @@ class VpipeMossTTS(TTSEngine):
             text=True,
             timeout=900,
         )
-        log = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        log = [
+            ln
+            for ln in ((proc.stdout or "") + "\n" + (proc.stderr or "")).splitlines()
+            if ln.strip()
+        ]
 
-        if not out_path.exists() or out_path.stat().st_size < 1024:
+        # Freshness, not mere existence. dialogue.wav is written to the same
+        # path every time, so a file left by an earlier take — even one made by
+        # a different engine — satisfies "it exists" and made a run that
+        # produced nothing report the previous take's duration as its own.
+        # vpipe exits 0 when a stage goes inert, so the file is the only
+        # evidence there is, and it has to be evidence of *this* run.
+        fresh = (
+            out_path.exists()
+            and out_path.stat().st_size >= 1024
+            and out_path.stat().st_mtime >= started - 1
+        )
+        if not fresh:
+            stale = out_path.exists() and out_path.stat().st_mtime < started - 1
             return SpeechResult(
                 engine=self.id,
                 voice=voice or "default",
                 log=log[-40:],
                 error=(
-                    f"no audio was written (exit {proc.returncode}). "
+                    f"no audio was written by this run (exit {proc.returncode})"
+                    + (" — the file present is from an earlier take" if stale else "")
+                    + ". "
                     + (_first_problem(log) or "see the log for why")
                 ),
             )

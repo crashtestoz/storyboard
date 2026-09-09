@@ -67,6 +67,8 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "characterIds": [],
         "dialogue": "",           # the spoken line, synthesised separately
         "dialogueVoice": "",      # engine voice id, or "" for the default
+        "speakerId": "",          # which cast member says it; "" = infer
+        "dialogueAudioUrl": None, # the spoken line on its own, for preview
         "dubUrl": None,           # the clip with speech muxed over it
         "startRef": None,
         "endRef": None,
@@ -497,6 +499,8 @@ class Store:
             shot.setdefault("prompt", "")
             shot.setdefault("soundNote", "")
             shot.setdefault("characterIds", [])
+            shot.setdefault("speakerId", "")
+            shot.setdefault("dialogueAudioUrl", None)
             shot.setdefault("dialogue", "")
             shot.setdefault("dialogueVoice", "")
             shot.setdefault("dubUrl", None)
