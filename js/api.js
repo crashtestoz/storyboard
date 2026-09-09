@@ -49,6 +49,16 @@ const API = {
   createBoard: (name) => req("POST", "/api/boards", { name }),
   importBoard: (board, name) => req("POST", "/api/boards", { board, name }),
   deleteBoard: (slug) => req("DELETE", `/api/boards/${encodeURIComponent(slug)}`),
+
+  // A rewrite proposal. `text` is sent explicitly because the user may not
+  // have saved the words they just typed.
+  rewrite: (slug, shotId, text, service) =>
+    req("POST", "/api/rewrite", { slug, shotId, text, service }),
+
+  // Returns the NEW slug: renaming moves the project folder, so the caller
+  // has to stop using the old one.
+  renameBoard: (slug, name) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/rename`, { name }),
   exportUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export`,
 
   addShot: (slug, patch) =>

@@ -23,6 +23,7 @@ const state = {
   selectedId: null,
   status: null,       // last /api/status payload
   poll: null,
+  tab: "prompt",          // which editor tab is open; survives a re-render
   saveTimer: null,
   dirty: false,
   toast: null,
@@ -270,9 +271,23 @@ function wireChrome() {
     renderBoardPicker();
   });
 
-  $("#btnSettings").addEventListener("click", () => {
-    $("#settings").hidden = false;
+  $("#btnSettings").addEventListener("click", openSettings);
+  // The header title is the obvious thing to click when you want to rename.
+  $("#projectTitle").title = "Click to rename this project";
+  $("#projectTitle").addEventListener("click", openSettings);
+  $("#projName").addEventListener("input", () => {
+    const v = $("#projName").value.trim();
+    $("#btnRename").disabled = !v || !state.board || v === state.board.name;
+    paintProjPath();
   });
+  $("#projName").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      renameProject();
+    }
+  });
+  $("#btnRename").addEventListener("click", renameProject);
+
   $("#settingsClose").addEventListener("click", () => {
     $("#settings").hidden = true;
   });
@@ -358,6 +373,11 @@ function wireChrome() {
     markDirty();
   });
 
+  $("#llmService").addEventListener("change", (e) => {
+    state.board.defaults.llm = e.target.value;
+    markDirty();
+    render();
+  });
   $("#ttsEngine").addEventListener("change", (e) => {
     state.board.defaults.tts = e.target.value;
     markDirty();
@@ -386,6 +406,67 @@ function renderBoardPicker() {
     if (b.slug === state.slug) o.selected = true;
     sel.appendChild(o);
   });
+}
+
+/* ==========================================================================
+   Project name
+   ========================================================================== */
+
+/* The name field is filled when the dialog opens rather than on every render,
+   so a repaint mid-render can never overwrite what you are typing. */
+function openSettings() {
+  $("#projName").value = state.board ? state.board.name : "";
+  paintProjPath();
+  $("#btnRename").disabled = true;
+  $("#settings").hidden = false;
+}
+
+/** Mirror of the server's slugify, for previewing the folder a rename lands in. */
+function slugify(name) {
+  const s = (name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s.slice(0, 60) || "untitled";
+}
+
+function paintProjPath() {
+  const typed = $("#projName").value.trim();
+  const current = state.board ? state.board.name : "";
+  const slug = typed && typed !== current ? slugify(typed) : state.slug;
+  const ws = (state.info && state.info.workspace) || "<workspace>";
+  const note = $("#projPath");
+  note.textContent = `${ws}/projects/${slug}/`;
+  note.classList.toggle("field-warn", slug !== state.slug);
+  if (slug !== state.slug) {
+    note.textContent += "   ← the folder moves here";
+  }
+}
+
+async function renameProject() {
+  const name = $("#projName").value.trim();
+  if (!name || !state.board || name === state.board.name) return;
+
+  const btn = $("#btnRename");
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = "renaming…";
+  try {
+    // Any unsaved edits must land first: the rename reloads the board from
+    // disk, and would otherwise discard them.
+    await saveNow();
+    const r = await API.renameBoard(state.slug, name);
+    state.slug = r.slug;
+    state.board = r.board;
+    state.boards = (await API.boards()).boards;
+    state.sig = null;
+    render();
+    paintProjPath();
+    toast(`Renamed to “${r.board.name}”.`);
+  } catch (err) {
+    toast(`Rename failed: ${err.message}`, "error");
+    btn.disabled = false;
+  } finally {
+    btn.textContent = was;
+  }
 }
 
 /* ==========================================================================
@@ -701,6 +782,31 @@ function renderRail() {
   const noteBox = $("#ttsNote");
   noteBox.textContent = eng && !eng.healthy ? eng.message : "";
   noteBox.className = eng && !eng.healthy ? "field-warn" : "field-note";
+
+  const llmSel = $("#llmService");
+  const llmAll = (state.info.llm && state.info.llm.services) || [];
+  if (llmSel.dataset.built !== "1" && llmAll.length) {
+    llmAll.forEach((sv) => {
+      const o = el("option", null,
+        sv.id === "none" ? sv.label
+          : sv.healthy ? `${sv.label} · ${sv.model}`
+          : `${sv.label} — unavailable`);
+      o.value = sv.id;
+      llmSel.appendChild(o);
+    });
+    llmSel.dataset.built = "1";
+  }
+  const chosenLlm =
+    state.board.defaults.llm || (state.info.llm && state.info.llm.default) || "none";
+  llmSel.value = chosenLlm;
+  const sv = llmAll.find((x) => x.id === chosenLlm);
+  const llmNote = $("#llmNote");
+  llmNote.textContent = sv && !sv.healthy
+    ? sv.message
+    : sv && sv.id !== "none"
+    ? "Rewrites are shown for approval before they replace anything."
+    : "";
+  llmNote.className = sv && !sv.healthy ? "field-warn" : "field-note";
 
   const stepsInput = $("#defSteps");
   if (document.activeElement !== stepsInput) {
@@ -1181,24 +1287,76 @@ function renderEditor() {
     }))
   );
 
-  const ta = el("textarea");
-  ta.rows = 5;
-  ta.value = raw.prompt || "";
-  ta.placeholder =
+  /* The four long-form fields share one tall pane instead of stacking four
+     short boxes down the page. Each was 2-5 rows before, which is not enough
+     to see a paragraph you are actually writing. Tabs cost a click but the
+     content markers on each tab keep what is hidden visible. */
+  const tabs = [
+    { id: "prompt", label: "Shot prompt", has: () => (raw.prompt || "").trim() },
+    ...(!cap || cap.supportsAudio
+      ? [
+          { id: "dialogue", label: "Dialogue", has: () => (raw.dialogue || "").trim() },
+          { id: "sound", label: "Sound accents", has: () => (raw.soundNote || "").trim() },
+        ]
+      : []),
+    { id: "resolved", label: "Resolved", has: () => false },
+  ];
+  if (!tabs.some((t) => t.id === state.tab)) state.tab = "prompt";
+
+  const bar = el("div", "tabs");
+  const panes = el("div", "tab-panes");
+
+  const showTab = (id) => {
+    state.tab = id;
+    [...bar.children].forEach((b) => (b.dataset.on = String(b.dataset.tab === id)));
+    [...panes.children].forEach((pn) => (pn.hidden = pn.dataset.tab !== id));
+    if (id === "resolved") paintResolvedInto(resolved, raw);
+  };
+
+  tabs.forEach((t) => {
+    const b = el("button", "tab");
+    b.dataset.tab = t.id;
+    b.appendChild(el("span", null, t.label));
+    // A tab with something in it says so, so tabbing away never hides the
+    // fact that a shot has dialogue or sound notes.
+    if (t.has()) b.appendChild(el("span", "tab-dot"));
+    b.addEventListener("click", () => showTab(t.id));
+    bar.appendChild(b);
+  });
+  panel.appendChild(bar);
+
+  const pane = (id, node) => {
+    const pn = el("div", "tab-pane");
+    pn.dataset.tab = id;
+    pn.appendChild(node);
+    panes.appendChild(pn);
+    return pn;
+  };
+
+  /* --- shot prompt, with the rewrite button ----------------------------- */
+  const ta = el("textarea", "ta-tall");
+  ta.value = raw.prompt || "";  ta.placeholder =
     "What happens in THIS shot — action, camera move, mood.\n" +
     "The scene description is prepended automatically; don't restate the subject.";
   ta.addEventListener("input", () => {
     raw.prompt = ta.value;
     markDirty();
     updateResolvedPreview();
+    syncTabDots();
   });
-  panel.appendChild(
-    field("Shot prompt", ta, "action / camera / mood only")
+
+  const promptPane = el("div");
+  const promptHead = el("div", "pane-head");
+  promptHead.appendChild(
+    el("span", "pane-hint", "action / camera / mood only — not the subject or the style")
   );
+  promptHead.appendChild(el("div", "header-spacer"));
+  promptHead.appendChild(wandButton(raw, ta));
+  promptPane.append(promptHead, ta, el("div", "proposal-slot"));
+  pane("prompt", promptPane);
 
   if (!cap || cap.supportsAudio) {
-    const dlg = el("textarea");
-    dlg.rows = 2;
+    const dlg = el("textarea", "ta-tall");
     dlg.value = raw.dialogue || "";
     dlg.placeholder =
       "A line someone speaks in this clip.\n" +
@@ -1207,11 +1365,17 @@ function renderEditor() {
     dlg.addEventListener("input", () => {
       raw.dialogue = dlg.value;
       markDirty();
+      syncTabDots();
     });
-    panel.appendChild(field("Dialogue", dlg, "spoken separately, then mixed in"));
+    dlg.dataset.fkey = "dialogue";
+    const dp = el("div");
+    dp.append(
+      paneHint("spoken separately, then mixed over the finished clip"),
+      dlg
+    );
+    pane("dialogue", dp);
 
-    const sa = el("textarea");
-    sa.rows = 2;
+    const sa = el("textarea", "ta-tall");
     sa.value = raw.soundNote || "";
     sa.placeholder =
       "Sound accents for THIS clip — what happens sonically here.\n" +
@@ -1220,22 +1384,30 @@ function renderEditor() {
       raw.soundNote = sa.value;
       markDirty();
       updateResolvedPreview();
+      syncTabDots();
     });
-    panel.appendChild(field("Sound accents", sa, "this clip only"));
+    sa.dataset.fkey = "sound-accents";
+    const sp2 = el("div");
+    sp2.append(
+      paneHint("this clip only — the project background sound is already applied"),
+      sa
+    );
+    pane("sound", sp2);
   }
 
-  const resolved = el("div", "resolved mono");
+  /* --- resolved -------------------------------------------------------- */
+  const resolved = el("div", "resolved-pane");
   resolved.id = "resolvedPrompt";
-  panel.appendChild(
-    field(
-      "Resolved prompt sent to the backend",
-      resolved,
-      cap && cap.supportsAudio
-        ? "scene · shot · sound bed · accents"
-        : "scene · shot"
-    )
+  const rp = el("div");
+  rp.append(
+    paneHint("exactly what the backend assembles, in order, from these sources"),
+    resolved
   );
-  resolved.textContent = resolvedPromptText(raw);
+  pane("resolved", rp);
+
+  panel.appendChild(panes);
+  ta.dataset.fkey = "shot-prompt";
+  showTab(state.tab);
   if (panelDubRow) panel.appendChild(panelDubRow);
   host.appendChild(panel);
 
@@ -1539,37 +1711,79 @@ function updateResolvedPreview() {
   // Only touches the DOM if the node is actually in the document — during a
   // render the element still lives in a detached subtree, which is why the
   // text is set directly there instead of through this function.
-  const box = $("#resolvedPrompt");
-  const raw = selectedShot();
-  if (box && raw) box.textContent = resolvedPromptText(raw);
+  if (state.tab === "resolved") paintResolvedPane();
 }
 
-/** Exactly what the backend will assemble, so the preview cannot drift. */
-function resolvedPromptText(raw) {
+/* The assembled prompt, broken into the pieces it came from. Both the joined
+   string and the segmented view are built from this one list, so the preview
+   cannot drift from what is sent — and where each clause came from is on
+   screen, rather than the reader having to guess whether a line about a
+   character came from the scene description or the cast. */
+function resolvedParts(raw) {
   const cap = modelCap(raw.model);
-  const parts = [(state.board.sceneDescription || "").trim()];
+  const out = [];
+  const push = (source, text) => {
+    text = (text || "").trim();
+    if (text) out.push({ source, text });
+  };
 
+  push("scene", state.board.sceneDescription);
+
+  // Only the cast this shot actually uses. A character in the board's cast who
+  // is not cast in this shot contributes nothing.
   (state.board.characters || [])
     .filter((c) => (raw.characterIds || []).includes(c.id))
     .forEach((c) => {
       const n = (c.name || "").trim();
       const d = (c.description || "").trim();
-      if (d) parts.push(n ? `${n}: ${d}` : d);
+      if (d) push(`cast · ${n || "unnamed"}`, n ? `${n}: ${d}` : d);
     });
 
-  parts.push((raw.prompt || "").trim());
+  push("shot", raw.prompt);
 
   if (!cap || cap.supportsAudio) {
-    parts.push((state.board.soundscape || "").trim());   // constant bed
-    parts.push((raw.soundNote || "").trim());            // this clip's accents
+    push("sound bed", state.board.soundscape);   // project-wide
+    push("accents", raw.soundNote);              // this clip only
   }
-  // match the backend's sentence-joining so the preview is what actually goes
-  return (
-    parts
-      .filter(Boolean)
-      .map((t) => (".!?;:,".includes(t.slice(-1)) ? t : t + "."))
-      .join(" ") || "(empty)"
-  );
+  return out;
+}
+
+/** Exactly what the backend will assemble, so the preview cannot drift. */
+function resolvedPromptText(raw) {
+  const joined = resolvedParts(raw)
+    .map(({ text }) => (".!?;:,".includes(text.slice(-1)) ? text : text + "."))
+    .join(" ");
+  return joined || "(empty)";
+}
+
+/* Takes the node rather than looking it up: during renderEditor the pane is
+   still in a detached subtree, so a document query would find nothing and the
+   tab would paint blank. */
+function paintResolvedInto(host, raw) {
+  if (!host || !raw) return;
+  host.innerHTML = "";
+
+  const parts = resolvedParts(raw);
+  if (!parts.length) {
+    host.appendChild(el("div", "empty-state", "Nothing to send yet."));
+    return;
+  }
+  parts.forEach(({ source, text }) => {
+    const seg = el("div", "seg");
+    seg.appendChild(el("span", "seg-source", source));
+    seg.appendChild(el("span", "seg-text", text));
+    host.appendChild(seg);
+  });
+
+  const total = el("div", "seg-total");
+  const words = resolvedPromptText(raw).split(/\s+/).filter(Boolean).length;
+  total.textContent = `${parts.length} parts · ${words} words, joined in this order`;
+  host.appendChild(total);
+}
+
+/** Repaint whatever is already on screen, for live edits after a render. */
+function paintResolvedPane() {
+  paintResolvedInto($("#resolvedPrompt"), selectedShot());
 }
 
 function frameHint(frames, cap) {
@@ -1795,6 +2009,118 @@ function diagnostic(raw, shot) {
   }
   d.appendChild(actions);
   return d;
+}
+
+/* --- prompt rewriting ---------------------------------------------------- */
+
+function paneHint(text) {
+  const h = el("div", "pane-head");
+  h.appendChild(el("span", "pane-hint", text));
+  return h;
+}
+
+/** Refresh the "this tab has content" markers without rebuilding the editor. */
+function syncTabDots() {
+  const raw = selectedShot();
+  if (!raw) return;
+  const has = {
+    prompt: (raw.prompt || "").trim(),
+    dialogue: (raw.dialogue || "").trim(),
+    sound: (raw.soundNote || "").trim(),
+  };
+  document.querySelectorAll("#editor .tab").forEach((b) => {
+    const want = !!has[b.dataset.tab];
+    const dot = b.querySelector(".tab-dot");
+    if (want && !dot) b.appendChild(el("span", "tab-dot"));
+    if (!want && dot) dot.remove();
+  });
+}
+
+/* A rewrite is a proposal, never an edit. The prompt is the user's authorship
+   and it took thought to write, so the model's version appears alongside it
+   with an explicit Use this — replacing the text outright would destroy work
+   with no way back. */
+function wandButton(raw, textarea) {
+  const svc = currentLLM();
+  const btn = el("button", "btn btn-sm wand");
+  btn.append(el("span", "wand-icon", "🪄"), el("span", null, "Rewrite"));
+
+  if (!svc || svc.id === "none") {
+    btn.disabled = true;
+    btn.title =
+      "No language model is configured. Pick one in ⚙ Settings, or add it to " +
+      "llm-services.json.";
+    return btn;
+  }
+  if (!svc.healthy) {
+    btn.disabled = true;
+    btn.title = svc.message || `${svc.label} is not reachable`;
+    return btn;
+  }
+  btn.title =
+    `Restyle this shot prompt for ${modelLabel(raw.model)} using ` +
+    `${svc.label} (${svc.model}). Takes up to a minute on a local model, and ` +
+    `shows you the result before changing anything.`;
+
+  btn.addEventListener("click", async () => {
+    const slot = btn.closest(".tab-pane").querySelector(".proposal-slot");
+    slot.innerHTML = "";
+    btn.disabled = true;
+    btn.classList.add("busy");
+    const label = btn.lastChild;
+    label.textContent = "rewriting…";
+    try {
+      const r = await API.rewrite(state.slug, raw.id, textarea.value);
+      slot.appendChild(proposalBox(r, raw, textarea, slot));
+    } catch (err) {
+      slot.appendChild(el("div", "inline-warn", `⚠ Rewrite failed: ${err.message}`));
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      label.textContent = "Rewrite";
+    }
+  });
+  return btn;
+}
+
+function proposalBox(r, raw, textarea, slot) {
+  const box = el("div", "proposal");
+  const head = el("div", "proposal-head");
+  head.appendChild(el("strong", null, "Proposed rewrite"));
+  head.appendChild(el("span", "hint", `— ${r.service}${r.model ? ` · ${r.model}` : ""}`));
+  box.appendChild(head);
+
+  const body = el("div", "proposal-body mono", r.text);
+  box.appendChild(body);
+
+  const acts = el("div", "proposal-acts");
+  const use = el("button", "btn btn-sm btn-primary", "Use this");
+  use.addEventListener("click", () => {
+    textarea.value = r.text;
+    raw.prompt = r.text;
+    markDirty();
+    updateResolvedPreview();
+    syncTabDots();
+    slot.innerHTML = "";
+    toast("Shot prompt replaced. Undo by editing it back — the old text is above.");
+  });
+  const drop = el("button", "btn btn-sm btn-ghost", "Discard");
+  drop.addEventListener("click", () => (slot.innerHTML = ""));
+  acts.append(use, drop);
+  box.appendChild(acts);
+  return box;
+}
+
+function currentLLM() {
+  const want = (state.board && state.board.defaults && state.board.defaults.llm) ||
+    (state.info.llm && state.info.llm.default);
+  const all = (state.info.llm && state.info.llm.services) || [];
+  return all.find((s) => s.id === want) || all.find((s) => s.id !== "none") || null;
+}
+
+function modelLabel(id) {
+  const c = modelCap(id);
+  return c ? c.label.split("·")[0].trim() : id;
 }
 
 /* --- small controls ------------------------------------------------------ */

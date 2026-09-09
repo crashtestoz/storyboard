@@ -12,6 +12,8 @@ Routes
 ``GET  /api/boards/<slug>``     load one board
 ``PUT  /api/boards/<slug>``     save one board
 ``DELETE /api/boards/<slug>``   remove the board file (keeps rendered media)
+``POST /api/boards/<slug>/rename``   rename ``{name}`` — moves the folder too
+``POST /api/rewrite``          restyle a shot prompt with a local language model
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing workspace file in
@@ -38,6 +40,7 @@ from typing import Any
 from .backends.base import Backend
 from .dubbing import dub_shot
 from .orchestrator import Orchestrator
+from .llm import LLMService, rewrite_prompt
 from .store import Store, default_shot
 from .tts.base import TTSEngine
 
@@ -83,7 +86,9 @@ class Context:
     def __init__(self, ui_root: Path, workspace: Path, store: Store,
                  backend: Backend, orch: Orchestrator,
                  tts_engines: dict[str, TTSEngine] | None = None,
-                 default_tts: str = "none"):
+                 default_tts: str = "none",
+                 llm_services: dict[str, LLMService] | None = None,
+                 default_llm: str = "none"):
         self.ui_root = ui_root.resolve()
         self.workspace = workspace.resolve()
         self.store = store
@@ -91,6 +96,13 @@ class Context:
         self.orch = orch
         self.tts_engines = tts_engines or {}
         self.default_tts = default_tts
+        self.llm_services = llm_services or {}
+        self.default_llm = default_llm
+
+    def llm(self, sid: str | None) -> LLMService:
+        return self.llm_services.get(sid or self.default_llm) or self.llm_services.get(
+            "none"
+        )
 
     def tts(self, kind: str | None) -> TTSEngine:
         return self.tts_engines.get(kind or self.default_tts) or self.tts_engines.get(
@@ -190,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "healthy": ok, "message": msg},
                     "workspace": str(ctx.workspace),
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
+                    "llm": {
+                        "default": ctx.default_llm,
+                        "services": [s.to_json() for s in ctx.llm_services.values()],
+                    },
                     "tts": {
                         "default": ctx.default_tts,
                         "engines": [
@@ -269,6 +285,21 @@ class Handler(BaseHTTPRequestHandler):
             ctx.store.save(slug, board)
             return self._send_json({"slug": slug, "board": board, "shot": shot}, 201)
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/rename", path)
+        if m:
+            payload = self._read_json() or {}
+            # A rename moves the project folder, and the orchestrator is
+            # holding paths into it — so it waits until the queue is idle
+            # rather than pulling the folder out from under a running render.
+            if ctx.orch.busy:
+                return self._send_json(
+                    {"error": "A render is running. Stop it, or wait for it "
+                              "to finish, before renaming the project."},
+                    409,
+                )
+            new_slug, board = ctx.store.rename(m.group(1), payload.get("name") or "")
+            return self._send_json({"slug": new_slug, "board": board})
+
         m = re.fullmatch(r"/api/boards/([^/]+)/refs", path)
         if m:
             return self._upload_ref(m.group(1))
@@ -284,6 +315,43 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/dub", path)
         if m:
             return self._dub(m.group(1), m.group(2))
+
+        if path == "/api/rewrite":
+            payload = self._read_json() or {}
+            slug = payload.get("slug")
+            shot_id = payload.get("shotId")
+            if not slug or not shot_id:
+                raise ValueError("slug and shotId are required")
+
+            board = ctx.store.load(slug)
+            shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+            if shot is None:
+                raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+
+            # The text is taken from the request, not from the stored shot: the
+            # user may not have saved the words they just typed.
+            text = payload.get("text")
+            if text is None:
+                text = shot.get("prompt") or ""
+
+            service = ctx.llm(payload.get("service") or board.get("defaults", {}).get("llm"))
+            cap = next(
+                (c for c in ctx.backend.capabilities() if c.id == shot.get("model")),
+                None,
+            )
+            wanted = set(shot.get("characterIds") or [])
+            cast = [c for c in (board.get("characters") or []) if c.get("id") in wanted]
+
+            proposal = rewrite_prompt(
+                service,
+                text,
+                scene=board.get("sceneDescription") or "",
+                characters=cast,
+                still=bool(cap and cap.kind == "image"),
+            )
+            return self._send_json(
+                {"text": proposal, "service": service.label, "model": service.model}
+            )
 
         if path == "/api/transcribe":
             return self._transcribe()

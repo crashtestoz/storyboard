@@ -1,0 +1,11 @@
+{
+  "services": [
+    {
+      "id": "ollama-local",
+      "label": "Ollama (this machine)",
+      "kind": "ollama",
+      "url": "http://localhost:11434",
+      "model": "qwen3.8:27b-mlx"
+    }
+  ]
+}
