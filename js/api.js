@@ -23,7 +23,12 @@ async function req(method, url, body, headers) {
     }
   }
   if (!res.ok) {
-    throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    // Carry the body: a failed speech run returns the engine's log with it,
+    // and that log is the only thing that explains the failure.
+    err.payload = data;
+    err.status = res.status;
+    throw err;
   }
   return data;
 }

@@ -24,6 +24,10 @@ const state = {
   status: null,       // last /api/status payload
   poll: null,
   tab: "prompt",          // which editor tab is open; survives a re-render
+  // The last speech run per shot, by shot id. Held for the session so the
+  // Speech output pane fills the instant a take finishes, before anything is
+  // re-read from disk.
+  speechLog: {},
   saveTimer: null,
   dirty: false,
   toast: null,
@@ -1433,6 +1437,8 @@ function renderEditor() {
         const sh = live();
         sh.dialogueAudioUrl = r.audioUrl;
         if (r.dubUrl) sh.dubUrl = r.dubUrl;
+        if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
+        if (r.log && r.log.length) state.speechLog[sh.id] = r.log;
         if (r.note) toast(r.note, "warn");
         else if (r.warning) toast(r.warning, "warn");
         else {
@@ -1443,6 +1449,11 @@ function renderEditor() {
         }
         render();
       } catch (err) {
+        // The engine's own log is the useful part of a speech failure, and the
+        // error body carries it — a toast alone would throw it away.
+        if (err.payload && err.payload.log && err.payload.log.length) {
+          state.speechLog[raw.id] = err.payload.log;
+        }
         toast(`Could not speak this line: ${err.message}`, "error");
         render();
       }
@@ -2149,6 +2160,41 @@ function renderPreview() {
   }
   host.appendChild(box);
   box.scrollTop = box.scrollHeight;
+
+  /* Speaking a line is its own run with its own output, and it is where the
+     awkward failures live — a clone conditioned on the wrong transcript, a
+     tail of silence, an engine that generated audio and dropped it. It gets
+     its own block rather than being interleaved with the render log, so which
+     process said what is never in doubt (and so the render poll's append,
+     which tracks a line count, is left alone). */
+  const speech = state.speechLog[raw.id];
+  if (speech || raw.speechLogUrl) {
+    const slbl = el("div", "section-label", "Speech output");
+    slbl.style.marginTop = "var(--sp-3)";
+    slbl.appendChild(el("span", "hint", "— the voice engine's own account"));
+    host.appendChild(slbl);
+
+    const sbox = el("div", "log");
+    if (speech) {
+      speech.slice(-LOG_WINDOW).forEach((t) => sbox.appendChild(logLine(t)));
+    } else {
+      sbox.appendChild(el("span", "log-empty", "loading saved log…"));
+      fetch(raw.speechLogUrl)
+        .then((r) => (r.ok ? r.text() : Promise.reject()))
+        .then((text) => {
+          sbox.innerHTML = "";
+          text.trimEnd().split("\n").slice(-LOG_WINDOW)
+            .forEach((t) => sbox.appendChild(logLine(t)));
+          sbox.scrollTop = sbox.scrollHeight;
+        })
+        .catch(() => {
+          sbox.innerHTML = "";
+          sbox.appendChild(el("span", "log-empty", "No saved speech log."));
+        });
+    }
+    host.appendChild(sbox);
+    sbox.scrollTop = sbox.scrollHeight;
+  }
 }
 
 /* Two shapes reach here: live lines arrive as {level, text} from the
@@ -2160,9 +2206,18 @@ function logLine(entry) {
     level = entry.level || "INFO";
     text = entry.text || "";
   } else {
-    const m = String(entry).match(/^\[([A-Z]+)\]\s*(.*)$/);
+    const raw = String(entry);
+    // A saved log's "# ..." header is metadata, not a log line at INFO; it was
+    // being stamped [INFO] and reading as though the engine had said it.
+    if (raw.startsWith("#")) {
+      const line = el("div", "log-line");
+      line.dataset.lvl = "META";
+      line.appendChild(el("span", null, raw.replace(/^#\s*/, "")));
+      return line;
+    }
+    const m = raw.match(/^\[([A-Z]+)\]\s*(.*)$/);
     level = m ? m[1] : "INFO";
-    text = m ? m[2] : String(entry);
+    text = m ? m[2] : raw;
   }
   const line = el("div", "log-line");
   line.dataset.lvl = level;

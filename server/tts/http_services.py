@@ -40,6 +40,12 @@ TRANSCRIBE_TIMEOUT = 120
 PROBE_TIMEOUT = 4
 
 
+def _clip(text: str, limit: int = 90) -> str:
+    """A quotable one-liner for a log: collapsed, shortened, quoted."""
+    t = " ".join((text or "").split())
+    return f'"{t[:limit]}…"' if len(t) > limit else f'"{t}"'
+
+
 def _post(url: str, payload: dict, timeout: int) -> tuple[bytes, str, str]:
     """(body, content-type, error)."""
     req = urllib.request.Request(
@@ -158,19 +164,39 @@ class Qwen3CloneTTS(TTSEngine):
             )
 
         reference = Path(reference)
+        started = time.time()
+        # Narrated because this ends up in the Backend output pane: a clone
+        # that comes back wrong is nearly always the reference or its
+        # transcript, and neither is visible from the waveform.
+        log: list[str] = [
+            f"[INFO] {self.label}: POST {self.base_url}/synthesize",
+            f"[INFO] reference: {reference.name} "
+            f"({reference.stat().st_size} bytes, "
+            f"{reference.suffix.lstrip('.').lower() or 'wav'})",
+        ]
+
         ref_text = (reference_text or "").strip()
         if not ref_text:
             # The server requires a transcript; ask it to make one rather than
             # failing on a requirement it can satisfy itself.
+            log.append("[INFO] no transcript given — asking the service to make one")
             ref_text, terr = self.transcribe(reference)
             if not ref_text:
+                log.append(f"[ERROR] auto-transcribe failed: {terr or 'no text'}")
                 return SpeechResult(
                     engine=self.id,
+                    log=log,
                     error=(
                         "the reference clip needs a transcript of what it says "
                         + (f"(auto-transcribe failed: {terr})" if terr else "")
                     ),
                 )
+            log.append(f"[INFO] auto-transcribed: {_clip(ref_text)}")
+        else:
+            log.append(f"[INFO] reference text: {_clip(ref_text)}")
+
+        log.append(f"[INFO] speaking {len(text.strip())} chars: {_clip(text)}")
+        log.append(f"[INFO] language={language} speed={speed}")
 
         body, ctype, err = _post(
             self.base_url + "/synthesize",
@@ -186,17 +212,32 @@ class Qwen3CloneTTS(TTSEngine):
             SYNTH_TIMEOUT,
         )
         if err:
-            return SpeechResult(engine=self.id, error=err)
+            log.append(f"[ERROR] {err}")
+            return SpeechResult(engine=self.id, log=log, error=err)
         audio = _audio_from(body, ctype)
         if not audio:
-            return SpeechResult(engine=self.id,
+            log.append(f"[ERROR] response was {ctype or 'untyped'}, "
+                       f"{len(body)} bytes, and held no audio")
+            return SpeechResult(engine=self.id, log=log,
                                 error="the server returned no audio")
+
+        elapsed = time.time() - started
+        log.append(
+            f"[INFO] response: {ctype or 'untyped'}, {len(audio)} bytes "
+            f"in {elapsed:.1f}s"
+        )
 
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(audio)
-        return SpeechResult(path=out_path, seconds=_wav_seconds(out_path),
-                            engine=self.id, voice="clone")
+        seconds = _wav_seconds(out_path)
+        log.append(
+            f"[INFO] wrote {out_path.name} — {seconds:.2f}s of speech "
+            f"({elapsed / seconds:.1f}x realtime)" if seconds
+            else f"[INFO] wrote {out_path.name}"
+        )
+        return SpeechResult(path=out_path, seconds=seconds,
+                            engine=self.id, voice="clone", log=log)
 
 
 class MccSherpaTTS(TTSEngine):

@@ -36,6 +36,70 @@ class DubResult:
     warning: str = ""
 
 
+# Trailing silence is trimmed at this threshold, keeping this much of a margin
+# so a line does not start or end abruptly.
+SILENCE_DB = -45
+KEEP_MARGIN = 0.08
+
+# EBU R128 target. -16 LUFS is the usual spoken-word level; the true-peak
+# ceiling leaves headroom for the mix over the clip's own soundtrack.
+TARGET_LUFS = -16
+TRUE_PEAK_DB = -1.5
+
+
+def polish_speech(path: Path) -> tuple[float, list[str]]:
+    """Trim silence off both ends and bring the level up. Returns (seconds, log).
+
+    Both problems are real and measured, not theoretical. MOSS 8B runs to its
+    token budget emitting silent frames once it has finished the line — one
+    take here was 79.4s long with speech ending at 5.2s — and vpipe's own
+    source notes that its audio head "degenerates into silent loops". Level is
+    the other half: the same take peaked at -23 dBFS, which is far too quiet to
+    sit under a generated soundtrack.
+
+    Only the ends are trimmed. Silence *inside* a line is the pauses between
+    words and sentences, and removing that would make the delivery unnatural.
+    """
+    log: list[str] = []
+    ffmpeg = shutil.which("ffmpeg")
+    before = _duration(path)
+    if not ffmpeg:
+        log.append("[WARN] ffmpeg not on PATH — speech not trimmed or levelled")
+        return before, log
+
+    tmp = path.with_suffix(".polish.wav")
+    # silenceremove only trims the *start*, so the tail is done by reversing,
+    # trimming the new start, and reversing back.
+    trim = (
+        f"silenceremove=start_periods=1:start_threshold={SILENCE_DB}dB"
+        f":start_silence={KEEP_MARGIN}"
+    )
+    filt = (
+        f"{trim},areverse,{trim},areverse,"
+        f"loudnorm=I={TARGET_LUFS}:TP={TRUE_PEAK_DB}:LRA=11"
+    )
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-v", "error", "-y", "-i", str(path),
+         "-af", filt, "-c:a", "pcm_s16le", str(tmp)],
+        capture_output=True, text=True, timeout=180,
+    )
+    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size < 1024:
+        tmp.unlink(missing_ok=True)
+        tail = (proc.stderr or "").strip().splitlines()[-2:]
+        log.append(f"[WARN] could not trim/level the speech: {' '.join(tail)}")
+        return before, log
+
+    tmp.replace(path)
+    after = _duration(path)
+    if before and after and before - after > 0.05:
+        log.append(
+            f"[INFO] trimmed {before - after:.1f}s of silence off the ends "
+            f"({before:.1f}s -> {after:.1f}s)"
+        )
+    log.append(f"[INFO] levelled to {TARGET_LUFS} LUFS, true peak {TRUE_PEAK_DB} dB")
+    return after or before, log
+
+
 def speaker_for(shot: dict, board: dict) -> dict | None:
     """Which cast member says this shot's line.
 
@@ -93,13 +157,24 @@ def speak_line(
     shot_dir.mkdir(parents=True, exist_ok=True)
     # Only the cloning engines take a transcript; the others ignore the kwarg
     # via **_ in their signature, so this stays one call site.
-    return engine.synth(
+    speech = engine.synth(
         text,
         shot_dir / "dialogue.wav",
         voice=voice,
         reference=reference,
         reference_text=reference_text,
     )
+    if not speech.ok:
+        return speech
+
+    # Every engine gets the same treatment, because the failure modes are the
+    # model's rather than the integration's: a tail of silence and a level too
+    # low to sit in a mix. Done here rather than per engine so no engine can
+    # be added later that quietly skips it.
+    seconds, plog = polish_speech(speech.path)
+    speech.seconds = seconds or speech.seconds
+    speech.log = list(speech.log or []) + plog
+    return speech
 
 
 def dub_shot(

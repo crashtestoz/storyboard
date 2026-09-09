@@ -141,6 +141,25 @@ line can be rewritten and re-spoken in seconds without touching a clip that
 took half an hour, and nothing in H3's documentation claims intelligible
 lip-synced speech from written text.
 
+**Every take is trimmed and levelled.** Both of these are model behaviour, not
+integration bugs, and both were measured here rather than assumed. MOSS 8B does
+not stop when it has finished a line — it emits silent frames until it runs out
+of token budget, and one take arrived 79.4 seconds long with the speech ending
+at 5.2s. The same take peaked at −23 dBFS, far too quiet to sit under a
+generated soundtrack. So silence is trimmed off *both ends* (never from the
+middle — those are the pauses between words, and removing them makes the
+delivery unnatural) and the result is normalised to −16 LUFS with a −1.5 dB
+true-peak ceiling. That happens in `speak_line`, so no engine added later can
+quietly skip it. MOSS also gets a text-proportional token budget, which stops
+it spending most of its runtime generating nothing.
+
+**The engine says what it did.** A cloned voice that comes back wrong is nearly
+always the reference clip or its transcript, and neither is visible from a
+waveform. So each take writes a `speech.log` beside the audio — the reference
+used, the transcript (and whether it had to be derived), the text, the
+response, what was trimmed, what the level was set to — shown in a **Speech
+output** pane under the render's own log, and reloadable afterwards.
+
 **Open, not import.** The header's **Open** lists every storyboard on disk
 with what each folder actually holds — shot count, how many are rendered, and
 the full path to its `storyboard.json` — and opening one edits that file in

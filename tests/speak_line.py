@@ -25,7 +25,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from server.dubbing import dub_shot, speak_line, speaker_for   # noqa: E402
+from server.dubbing import (                                   # noqa: E402
+    dub_shot,
+    polish_speech,
+    speak_line,
+    speaker_for,
+)
 from server.tts.base import SpeechResult, TTSEngine            # noqa: E402
 
 failures: list[str] = []
@@ -57,15 +62,85 @@ class StubEngine(TTSEngine):
         if self.fail:
             return SpeechResult(engine=self.id, error=self.fail)
         out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        rate = 24000
-        with wave.open(str(out_path), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(rate)
-            w.writeframes(struct.pack("<h", 0) * int(rate * self.seconds))
+        write_tone(out_path, self.seconds)
         return SpeechResult(path=out_path, seconds=self.seconds,
                             engine=self.id, voice="clone" if reference else "default")
+
+
+def write_tone(path: Path, seconds: float, *, amplitude: float = 0.05,
+               trailing_silence: float = 0.0, rate: int = 24000) -> None:
+    """A quiet tone, optionally followed by silence.
+
+    Deliberately quiet and optionally padded, because that is what the models
+    actually produce: a take here arrived at -23 dBFS with 74 seconds of
+    silence after a 5-second line.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    peak = int(32767 * amplitude)
+    frames = bytearray()
+    for i in range(int(rate * seconds)):
+        # a plain triangle wave — no math import needed, and it has real energy
+        phase = (i % 200) / 200.0
+        v = int(peak * (4 * abs(phase - 0.5) - 1))
+        frames += struct.pack("<h", v)
+    frames += struct.pack("<h", 0) * int(rate * trailing_silence)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+
+
+def peak_dbfs(path: Path) -> float:
+    """Max volume in dBFS via ffmpeg's volumedetect."""
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", str(path), "-af", "volumedetect",
+         "-f", "null", "/dev/null"],
+        capture_output=True, text=True, timeout=60,
+    )
+    for line in (out.stderr or "").splitlines():
+        if "max_volume:" in line:
+            return float(line.split("max_volume:")[1].strip().split()[0])
+    return -999.0
+
+
+def test_polish(tmp: Path) -> None:
+    print("\n-- trimming silence and raising the level --")
+    if not shutil.which("ffmpeg"):
+        print("skip  ffmpeg not on PATH")
+        return
+
+    # the shape of the real complaint: a short line, then a long silent tail
+    f = tmp / "polish" / "tail.wav"
+    write_tone(f, 2.0, amplitude=0.05, trailing_silence=8.0)
+    from server.dubbing import _duration
+    before_secs, before_peak = _duration(f), peak_dbfs(f)
+    secs, log = polish_speech(f)
+    after_peak = peak_dbfs(f)
+
+    check("the silent tail is trimmed", 1.5 < secs < 3.0,
+          f"{before_secs:.1f}s -> {secs:.1f}s")
+    check("the reported duration is the trimmed one", abs(secs - _duration(f)) < 0.05)
+    check("a quiet take is brought up", after_peak > before_peak + 6,
+          f"{before_peak:.1f} dB -> {after_peak:.1f} dB")
+    check("it does not clip", after_peak <= 0.0, f"{after_peak:.1f} dB")
+    check("the trim is reported in the log",
+          any("trimmed" in l for l in log), str(log))
+    check("the level change is reported in the log",
+          any("levelled" in l for l in log), str(log))
+
+    # pauses *inside* a line are the delivery and must survive
+    g = tmp / "polish" / "gap.wav"
+    write_tone(g, 1.0, amplitude=0.05)
+    with wave.open(str(g), "rb") as r:
+        params, body = r.getparams(), r.readframes(r.getnframes())
+    with wave.open(str(g), "wb") as w:
+        w.setparams(params)
+        w.writeframes(body + struct.pack("<h", 0) * 24000 + body)
+    inner_before = _duration(g)
+    inner_secs, _ = polish_speech(g)
+    check("an internal pause is not removed", inner_secs > inner_before - 0.2,
+          f"{inner_before:.1f}s -> {inner_secs:.1f}s")
 
 
 def board_with_cast() -> dict:
@@ -173,6 +248,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="sbv-speak-"))
     try:
         test_speaker_for()
+        test_polish(tmp)
         test_preview_without_render(tmp)
         test_mux_when_clip_exists(tmp)
         test_speak_line_alone(tmp)

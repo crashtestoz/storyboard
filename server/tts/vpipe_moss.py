@@ -30,6 +30,32 @@ from .base import SpeechResult, TTSEngine, Voice
 LM_MODEL = "mlx-community/MOSS-TTS-8B-8bit"
 CODEC_MODEL = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
 
+# One codec frame is 1920 samples at 24 kHz (measured: 29 frames -> 55680
+# samples), so 12.5 frames per second of audio.
+FRAMES_PER_SECOND = 12.5
+# Speech runs around 12 characters a second; the rest is margin.
+CHARS_PER_SECOND = 12.0
+HEADROOM_SECONDS = 5.0
+# The stage's own default. Left as the ceiling for very long lines.
+MAX_NEW_TOKENS_CAP = 1024
+
+
+def _token_budget(text: str) -> int:
+    """A generous per-line generation budget.
+
+    The 8B model does not stop when it has finished the line: it keeps
+    emitting silent frames until it runs out of budget, so with the stage's
+    default of 1024 a five-second line produced a 79-second file and spent
+    most of its 27s generating nothing. (``max_frames`` looks like the lever
+    but is documented v1.5-only and ignored here.)
+
+    The budget is deliberately loose — five seconds of headroom on top of the
+    expected duration — because cutting a word off is far worse than a tail of
+    silence, and the tail is trimmed afterwards anyway.
+    """
+    expected = len(text) / CHARS_PER_SECOND + HEADROOM_SECONDS
+    return max(64, min(MAX_NEW_TOKENS_CAP, int(expected * FRAMES_PER_SECOND)))
+
 
 class VpipeMossTTS(TTSEngine):
     id = "vpipe-moss"
@@ -144,7 +170,11 @@ class VpipeMossTTS(TTSEngine):
                 # the pipeline completes in milliseconds, writes nothing, and
                 # exits 0. That looked exactly like a working engine that
                 # produced no audio.
-                "config": {"hf_dir": LM_MODEL, "codec_dir": CODEC_MODEL},
+                "config": {
+                    "hf_dir": LM_MODEL,
+                    "codec_dir": CODEC_MODEL,
+                    "max_new_tokens": _token_budget(text),
+                },
             }
         )
         stages.append(
@@ -175,6 +205,13 @@ class VpipeMossTTS(TTSEngine):
             timeout=900,
         )
         log = [
+            f"[INFO] {self.label}: {LM_MODEL} via vpipe",
+            f"[INFO] reference: {Path(reference).name}" if reference
+            else "[INFO] no reference clip — the model's own voice",
+            f"[INFO] speaking {len(text)} chars, "
+            f"budget {_token_budget(text)} frames "
+            f"(~{_token_budget(text) / FRAMES_PER_SECOND:.0f}s)",
+        ] + [
             ln
             for ln in ((proc.stdout or "") + "\n" + (proc.stderr or "")).splitlines()
             if ln.strip()
