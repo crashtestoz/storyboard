@@ -294,14 +294,17 @@ class Handler(BaseHTTPRequestHandler):
 
         # A character's recorded voice is the natural reference for cloning.
         reference = None
+        reference_text = ""
         if engine.supports_cloning:
             cast = {c["id"]: c for c in (board.get("characters") or [])}
             for cid in shot.get("characterIds") or []:
-                voice = (cast.get(cid) or {}).get("voice")
+                ch = cast.get(cid) or {}
+                voice = ch.get("voice")
                 if voice and voice.get("path"):
                     candidate = ctx.workspace / voice["path"]
                     if candidate.exists():
                         reference = candidate
+                        reference_text = ch.get("voiceText") or ""
                         break
 
         result = dub_shot(
@@ -311,6 +314,7 @@ class Handler(BaseHTTPRequestHandler):
             text=shot.get("dialogue") or "",
             voice=shot.get("dialogueVoice") or None,
             reference=reference,
+            reference_text=reference_text,
         )
 
         if not result.ok:

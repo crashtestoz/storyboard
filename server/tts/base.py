@@ -74,6 +74,7 @@ class TTSEngine:
         *,
         voice: str | None = None,
         reference: Path | None = None,
+        **kwargs: Any,
     ) -> SpeechResult:
         """Write speech for *text* to *out_path* (a .wav).
 

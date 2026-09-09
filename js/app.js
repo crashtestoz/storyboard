@@ -629,10 +629,13 @@ async function editCharacter(existing) {
     : `Edit ${draft.name || "character"}`;
   $("#castName").value = draft.name || "";
   $("#castDesc").value = draft.description || "";
+  $("#castVoiceText").value = draft.voiceText || "";
   $("#castNote").textContent =
     "The image and voice become reference inputs on models that accept them " +
     "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
-    "reference lists only the description is used.";
+    "reference lists only the description is used. A voice-cloning speech " +
+    "engine also needs the transcript above — leave it blank and the server " +
+    "will transcribe the clip itself.";
 
   // NOTE: these are declared in this scope, not inside the Promise below.
   // A function declaration is only hoisted within its own function scope, so
@@ -745,6 +748,7 @@ async function editCharacter(existing) {
     $("#castSave").onclick = async () => {
       draft.name = $("#castName").value.trim();
       draft.description = $("#castDesc").value.trim();
+      draft.voiceText = $("#castVoiceText").value.trim();
       if (!draft.name || !draft.description) {
         toast("A character needs both a name and a description.", "error");
         return;
