@@ -113,7 +113,7 @@ client:
 | kind | Notes |
 | --- | --- |
 | `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched (~9 GB). |
-| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. Note it binds `127.0.0.1` on its own host, so it must be rebound or tunnelled to reach it from another machine. |
+| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
 | `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
 | `none` | Dialogue is stored but not spoken. |
 

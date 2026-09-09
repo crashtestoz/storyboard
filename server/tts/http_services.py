@@ -88,9 +88,13 @@ class Qwen3CloneTTS(TTSEngine):
         if ok:
             return True, ""
         return False, (
-            f"cannot reach {self.base_url} ({err}). This server binds "
-            "127.0.0.1 by default, so it is only reachable from the machine it "
-            "runs on — rebind it, tunnel it, or run an instance locally."
+            f"cannot reach {self.base_url} ({err}). The Qwen3-TTS server binds "
+            "127.0.0.1, so it only answers on the machine it runs on. To use it "
+            "from here, on that host (OptiPlex) start it with "
+            "--host 0.0.0.0 (uvicorn's default is 127.0.0.1), open port 8790, "
+            "then set this service's url to http://<that-host>:8790 in "
+            "tts-services.json. Alternatively tunnel it "
+            "(ssh -L 8790:127.0.0.1:8790 <host>) and keep the URL as localhost."
         )
 
     def voices(self) -> list[Voice]:
