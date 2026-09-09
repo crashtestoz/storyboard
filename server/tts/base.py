@@ -59,6 +59,12 @@ class TTSEngine:
     # does this engine accept a reference clip to clone a voice from?
     supports_cloning: bool = False
 
+    # can it turn a clip back into text? Cloning and transcription are
+    # separate capabilities and one does not imply the other: MOSS clones a
+    # voice but has no speech recognition, so a UI that offered "transcribe"
+    # on the strength of cloning alone sent people to a dead end.
+    supports_transcription: bool = False
+
     def health(self) -> tuple[bool, str]:
         """(usable, message). Surfaced in the UI so a missing model or an
         unreachable service says so before a render, not after."""

@@ -134,10 +134,25 @@ async function saveNow() {
   clearTimeout(state.saveTimer);
   try {
     $("#saveState").textContent = "saving…";
+    const sent = state.board;
     const { board } = await API.saveBoard(state.slug, state.board);
-    state.board = board;
-    state.dirty = false;
-    $("#saveState").textContent = "saved";
+
+    // Deliberately NOT `state.board = board`. The response is only the board
+    // we just sent, migrated and re-stamped — but assigning it replaces every
+    // shot object, orphaning the references the editor's handlers hold, so the
+    // next keystroke would be written into a detached object and silently
+    // dropped while the indicator still read "saved". It also discarded
+    // anything typed while the request was in flight. Keep our own object and
+    // take only what the server actually decided.
+    if (state.board === sent) {
+      state.board.updatedAt = board.updatedAt;
+      state.dirty = false;
+      $("#saveState").textContent = "saved";
+    } else {
+      // The board was swapped out under us (opened another one, renamed).
+      // That save landed; this one is no longer ours to report on.
+      $("#saveState").textContent = state.dirty ? "unsaved" : "saved";
+    }
   } catch (err) {
     $("#saveState").textContent = "save failed";
     toast(`Could not save: ${err.message}`, "error");
@@ -993,9 +1008,19 @@ async function editCharacter(existing) {
   $("#castName").value = draft.name || "";
   $("#castDesc").value = draft.description || "";
   $("#castVoiceText").value = draft.voiceText || "";
+  /* Cloning and transcription are separate capabilities: the board's speech
+     engine may clone a voice and have no speech recognition at all. So the
+     button reports on whichever configured service can transcribe, not on the
+     selected one. */
+  const transcriber = (state.tts || []).find(
+    (e) => e.supportsTranscription && e.healthy
+  );
   const trBtn = $("#castTranscribe");
   trBtn.onclick = () => autoTranscribe(draft);
-  trBtn.disabled = !(draft.voice && draft.voice.path);
+  trBtn.disabled = !(draft.voice && draft.voice.path) || !transcriber;
+  trBtn.title = !transcriber
+    ? "No configured speech service can transcribe. Type the transcript instead."
+    : `Transcribe with ${transcriber.label}`;
   $("#castNote").textContent =
     "The image and voice become reference inputs on models that accept them " +
     "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
@@ -1081,7 +1106,7 @@ async function editCharacter(existing) {
     if (kind === "audio") {
       $("#castVoiceText").value = "";
       draft.voiceText = "";
-      $("#castTranscribe").disabled = false;
+      $("#castTranscribe").disabled = !transcriber;
     }
     paint();
   }
@@ -1106,7 +1131,10 @@ async function editCharacter(existing) {
       const r = await API.transcribe(clip, state.board.defaults.tts);
       field.value = r.text;
       draft.voiceText = r.text;
-      toast("Transcribed the reference clip — check it reads correctly.");
+      const via = r.engine && r.engine !== state.board.defaults.tts
+        ? ` via ${r.engine}`
+        : "";
+      toast(`Transcribed the reference clip${via} — check it reads correctly.`);
     } catch (err) {
       field.value = prev;
       castError(
@@ -1328,6 +1356,15 @@ function renderEditor() {
   const idx = shotIndex(raw.id);
   let panelDubRow = null;
 
+  /* Handlers below fire long after this function returns, and `raw` is a
+     reference into the board array as it was at build time. Several paths
+     legitimately replace state.board — opening another board, renaming it,
+     reloading it when a render batch finishes — and an edit written through a
+     stale reference lands in an orphaned object and is lost silently, while
+     the indicator still reads "saved". So mutations resolve the shot by id at
+     the moment they happen, not when the editor was built. */
+  const live = () => shotById(raw.id) || raw;
+
   const head = el("div", "editor-head");
   const h = el("div", "section-label", `Shot ${idx + 1}`);
   h.style.margin = "0";
@@ -1348,7 +1385,7 @@ function renderEditor() {
       dubBtn.textContent = "speaking…";
       try {
         const r = await API.dub(state.slug, raw.id);
-        raw.dubUrl = r.dubUrl;
+        live().dubUrl = r.dubUrl;
         if (r.warning) toast(r.warning, "warn");
         else toast(`Dubbed with ${r.engine} (${r.seconds}s of speech).`);
         render();
@@ -1393,7 +1430,7 @@ function renderEditor() {
   const panel = el("div", "panel");
   panel.appendChild(
     field("Shot name", input("text", raw.title, (v) => {
-      raw.title = v;
+      live().title = v;
       markDirty();
       renderStrip();
       renderRail();
@@ -1452,7 +1489,7 @@ function renderEditor() {
     "What happens in THIS shot — action, camera move, mood.\n" +
     "The scene description is prepended automatically; don't restate the subject.";
   ta.addEventListener("input", () => {
-    raw.prompt = ta.value;
+    live().prompt = ta.value;
     markDirty();
     updateResolvedPreview();
     syncTabDots();
@@ -1476,7 +1513,7 @@ function renderEditor() {
       "Synthesised by the speech engine and muxed over the finished clip — " +
       "the video model itself does not produce intelligible dialogue.";
     dlg.addEventListener("input", () => {
-      raw.dialogue = dlg.value;
+      live().dialogue = dlg.value;
       markDirty();
       syncTabDots();
     });
@@ -1494,7 +1531,7 @@ function renderEditor() {
       "Sound accents for THIS clip — what happens sonically here.\n" +
       "The project background sound is already applied to every shot.";
     sa.addEventListener("input", () => {
-      raw.soundNote = sa.value;
+      live().soundNote = sa.value;
       markDirty();
       updateResolvedPreview();
       syncTabDots();
@@ -1548,7 +1585,7 @@ function renderEditor() {
         const ids = new Set(raw.characterIds || []);
         if (ids.has(ch.id)) ids.delete(ch.id);
         else ids.add(ch.id);
-        raw.characterIds = [...ids];
+        live().characterIds = [...ids];
         markDirty();
         renderEditor();
       };
@@ -1597,7 +1634,7 @@ function renderEditor() {
       cb.type = "checkbox";
       cb.checked = !!(raw.startRef && raw.startRef.kind === "chain");
       cb.addEventListener("change", () => {
-        raw.startRef = cb.checked
+        live().startRef = cb.checked
           ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
           : null;
         markDirty();
@@ -1641,14 +1678,15 @@ function renderEditor() {
         ]),
         raw.model,
         (v) => {
-          raw.model = v;
+          const sh = live();
+          sh.model = v;
           const c = modelCap(v);
           if (c) {
-            if (!c.resolutions.includes(raw.resolution))
-              raw.resolution = c.resolutions[0];
-            raw.frames = c.frameRule.minimum > raw.frames
+            if (!c.resolutions.includes(sh.resolution))
+              sh.resolution = c.resolutions[0];
+            sh.frames = c.frameRule.minimum > sh.frames
               ? c.frameRule.minimum
-              : raw.frames;
+              : sh.frames;
           }
           markDirty();
           render();
@@ -1677,7 +1715,7 @@ function renderEditor() {
           options.map(([f, label]) => [String(f), label]),
           String(raw.frames),
           (v) => {
-            raw.frames = Number(v);
+            live().frames = Number(v);
             markDirty();
             renderEditor();   // safe: a select commits on change, not per key
             renderStrip();
@@ -1692,7 +1730,7 @@ function renderEditor() {
     field(
       "Steps",
       input("number", raw.steps, (v) => {
-        raw.steps = Number(v);
+        live().steps = Number(v);
         markDirty();
         renderStrip();
       })
@@ -1703,7 +1741,7 @@ function renderEditor() {
   const row2 = el("div", "field-row");
   row2.appendChild(
     field("Seed", input("number", raw.seed, (v) => {
-      raw.seed = Number(v);
+      live().seed = Number(v);
       markDirty();
     }))
   );
@@ -2114,7 +2152,9 @@ function diagnostic(raw, shot) {
   if (shot.status === "review") {
     const accept = el("button", "btn btn-sm btn-ghost", "Accept anyway");
     accept.addEventListener("click", () => {
-      raw.status = "done";
+      // by id, not through the captured object: state.board may have been
+      // replaced since this button was built
+      (shotById(raw.id) || raw).status = "done";
       markDirty();
       render();
     });
@@ -2210,7 +2250,7 @@ function proposalBox(r, raw, textarea, slot) {
   const use = el("button", "btn btn-sm btn-primary", "Use this");
   use.addEventListener("click", () => {
     textarea.value = r.text;
-    raw.prompt = r.text;
+    (shotById(raw.id) || raw).prompt = r.text;
     markDirty();
     updateResolvedPreview();
     syncTabDots();

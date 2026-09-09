@@ -113,6 +113,15 @@ frame, including "the last frame of the previous shot", which is how a
 sequence reads as continuous. Verified: a chained shot's first frame matches
 its predecessor's last.
 
+**Transcription is its own capability.** Cloning a voice and recognising
+speech are separate, and one does not imply the other — MOSS clones a voice and
+has no speech recognition at all. So engines declare `supports_transcription`,
+the Transcribe button reports on whichever configured service actually has it
+(naming it in the tooltip), and `/api/transcribe` uses the engine you asked for
+when it can and otherwise finds one that can, saying which it used. Refusing on
+the grounds that *the selected* engine cannot transcribe was a dead end when
+another configured service was sitting right there.
+
 **Dialogue.** Spoken lines are synthesised by a selectable speech engine and
 mixed over the finished clip, ducking the generated soundtrack rather than
 replacing it. This is deliberate: H3 produces a soundtrack, but nothing in its
@@ -221,12 +230,20 @@ Both HTTP contracts were read from MCC's source, not guessed.
 
 ```sh
 python3 tests/store_paths.py             # renaming, and an independent data dir
-node tests/poll-does-not-rebuild.mjs     # needs the server and a CDP Chrome, see the file
+node tests/edits-persist.mjs             # every edit reaches the server, not just the first
+node tests/poll-does-not-rebuild.mjs     # the poll must not rebuild a focused subtree
 ```
 
-Both cover the same class of bug: something moves under state that has already
-recorded where it was. Renaming rewrites recorded paths; the poll must not
-rebuild a subtree under a focused input.
+The two `.mjs` ones drive the real page over the DevTools protocol; each file's
+header has the two commands to start the server and a debug Chrome, and both
+take `CDP_PORT` (9222 by default).
+
+All three cover one class of bug: something is replaced underneath state that
+had already recorded where it was. Renaming rewrites the paths a board
+recorded. The poll must not rebuild a subtree holding a focused input. And
+saving must not replace the object graph the editor's handlers point into —
+each was a silent failure, which is why they are pinned rather than
+remembered.
 
 ## Why a run is judged, not just started
 

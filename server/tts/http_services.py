@@ -76,6 +76,8 @@ class Qwen3CloneTTS(TTSEngine):
     """Qwen3-TTS voice cloning, as MCC's /api/tts/clone calls it."""
 
     supports_cloning = True
+    # the same service exposes /transcribe (faster-whisper)
+    supports_transcription = True
 
     def __init__(self, service_id: str, label: str, base_url: str):
         self.id = service_id
