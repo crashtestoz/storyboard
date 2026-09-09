@@ -16,7 +16,7 @@ Routes
 ``POST /api/rewrite``          restyle a shot prompt with a local language model
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
-``POST /api/boards/<slug>/refs/adopt``  copy an existing workspace file in
+``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/render``            start ``{slug, shotIds?}``
@@ -84,13 +84,17 @@ class Context:
     """Shared, immutable-ish wiring handed to every request."""
 
     def __init__(self, ui_root: Path, workspace: Path, store: Store,
-                 backend: Backend, orch: Orchestrator,
+                 backend: Backend, orch: Orchestrator, *,
+                 data_dir: Path | None = None,
                  tts_engines: dict[str, TTSEngine] | None = None,
                  default_tts: str = "none",
                  llm_services: dict[str, LLMService] | None = None,
                  default_llm: str = "none"):
         self.ui_root = ui_root.resolve()
         self.workspace = workspace.resolve()
+        # Where the user's storyboards and uploads live. Defaults to the
+        # workspace, so an existing install is unaffected.
+        self.data_dir = (data_dir or workspace).resolve()
         self.store = store
         self.backend = backend
         self.orch = orch
@@ -201,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                     "backend": {"id": ctx.backend.id, "label": ctx.backend.label,
                                 "healthy": ok, "message": msg},
                     "workspace": str(ctx.workspace),
+                    "dataDir": str(ctx.data_dir),
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
                     "llm": {
                         "default": ctx.default_llm,
@@ -382,8 +387,8 @@ class Handler(BaseHTTPRequestHandler):
         if not rel:
             raise ValueError("path is required")
 
-        clip = (self.ctx.workspace / rel).resolve()
-        clip.relative_to(self.ctx.workspace.resolve())
+        clip = (self.ctx.data_dir / rel).resolve()
+        clip.relative_to(self.ctx.data_dir.resolve())
         if not clip.is_file():
             raise FileNotFoundError(f"no such clip: {rel}")
 
@@ -411,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
         shot = shots[idx]
 
         engine = ctx.tts((board.get("defaults") or {}).get("tts"))
-        shot_dir = ctx.workspace / ctx.store.shot_rel_dir(slug, idx + 1)
+        shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1)
 
         # A character's recorded voice is the natural reference for cloning.
         reference = None
@@ -422,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                 ch = cast.get(cid) or {}
                 voice = ch.get("voice")
                 if voice and voice.get("path"):
-                    candidate = ctx.workspace / voice["path"]
+                    candidate = ctx.data_dir / voice["path"]
                     if candidate.exists():
                         reference = candidate
                         reference_text = ch.get("voiceText") or ""
@@ -444,7 +449,7 @@ class Handler(BaseHTTPRequestHandler):
                  "engine": engine.id}, 409
             )
 
-        rel = result.video.relative_to(ctx.workspace)
+        rel = result.video.relative_to(ctx.data_dir)
         shot["dubUrl"] = "/media/" + str(rel).replace("\\", "/")
         ctx.store.save(slug, board)
         return self._send_json(
@@ -494,10 +499,11 @@ class Handler(BaseHTTPRequestHandler):
             n += 1
         dest.write_bytes(self.rfile.read(length))
 
-        rel = dest.relative_to(self.ctx.workspace)
+        rel = dest.relative_to(self.ctx.data_dir)
         return self._send_json(
             {
-                # path as vpipe will open it (relative to its workspace)
+                # stored relative to the data directory, which keeps a
+                # project folder portable; made absolute at render time
                 "path": str(rel).replace("\\", "/"),
                 # url the browser can display it from
                 "url": "/media/" + str(rel).replace("\\", "/"),
@@ -526,7 +532,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_file(target, cache=False)
 
     def _serve_media(self, rel: str) -> None:
-        target = self._resolve_within(self.ctx.workspace, rel)
+        # Media lives under the data directory, which is not necessarily the
+        # vpipe workspace. The traversal check is anchored on the same root
+        # the paths are relative to, so the two cannot drift apart.
+        target = self._resolve_within(self.ctx.data_dir, rel)
         if target is None or not target.is_file():
             return self._err(404, "not found")
         return self._send_file(target, cache=True)

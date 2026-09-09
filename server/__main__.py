@@ -50,6 +50,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="directory vpipe is launched from (must contain models/)",
     )
     p.add_argument(
+        "--data-dir",
+        type=Path,
+        default=(Path(os.environ["SBV_DATA_DIR"])
+                 if os.environ.get("SBV_DATA_DIR") else None),
+        help="where storyboards and uploads live (default: the workspace)",
+    )
+    p.add_argument(
         "--vpipe",
         type=Path,
         default=Path(os.environ.get("SBV_VPIPE", DEFAULT_VPIPE)),
@@ -86,6 +93,12 @@ def main(argv: list[str] | None = None) -> int:
     bind = "0.0.0.0" if args.lan else args.bind
 
     workspace = args.workspace.expanduser()
+    # Two roots on purpose. The workspace is vpipe's — it resolves models/ and
+    # its model registry relative to it, so it is not ours to choose. The data
+    # directory is where the user's storyboards and uploads live, and defaults
+    # to the workspace so an existing install is untouched.
+    data_dir = (args.data_dir.expanduser() if args.data_dir else workspace)
+    data_dir.mkdir(parents=True, exist_ok=True)
     backend = build_backend(
         args.backend,
         vpipe_binary=args.vpipe.expanduser(),
@@ -103,11 +116,13 @@ def main(argv: list[str] | None = None) -> int:
     # footing as the speech engines.
     llm_services = load_llm_services(UI_ROOT)
 
-    store = Store(workspace=workspace)
+    store = Store(workspace=workspace, data_dir=data_dir)
     # Anything left mid-run by a previous process is not running now.
     stranded = store.reconcile_startup()
-    orch = Orchestrator(backend=backend, store=store, workspace=workspace)
+    orch = Orchestrator(backend=backend, store=store, workspace=workspace,
+                        data_dir=data_dir)
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
+                  data_dir=data_dir,
                   tts_engines=tts_engines, default_tts=args.tts,
                   llm_services=llm_services, default_llm=args.llm)
 
@@ -128,7 +143,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(BANNER)
     print(f"  backend    {backend.id} — {backend.label}")
-    print(f"  workspace  {workspace}")
+    print(f"  workspace  {workspace}   (vpipe's — models and registry)")
+    print(f"  projects   {data_dir / 'projects'}"
+          + ("   (inside the workspace)" if data_dir == workspace else ""))
     print(f"  serving    {shown}")
     if bind == "0.0.0.0":
         print("             (all interfaces — reachable on your LAN)")
@@ -160,6 +177,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"             [{'ok  ' if lok else '--  '}] {sid}"
               + (f"  ({svc.model})" if lok else f"  ({lmsg.splitlines()[0][:86]})"))
     print("")
+    if data_dir != workspace:
+        old = workspace / "projects"
+        if old.is_dir():
+            left = [d.name for d in sorted(old.iterdir())
+                    if (d / "storyboard.json").is_file()]
+            if left:
+                print(f"  NOTE       {len(left)} storyboard(s) are still in the old "
+                      "location and will not be listed:")
+                for name in left[:8]:
+                    print(f"             {old / name}")
+                if len(left) > 8:
+                    print(f"             ... and {len(left) - 8} more")
+                print(f"             Move them when ready:  mv {old}/* "
+                      f"{data_dir / 'projects'}/")
+                print("             (nothing is moved automatically — they are "
+                      "your files)")
+                print("")
     if stranded:
         print(f"  recovered   {len(stranded)} shot(s) left mid-run by a previous "
               "process, now marked interrupted:")

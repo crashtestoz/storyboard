@@ -70,10 +70,14 @@ class ShotRun:
 
 
 class Orchestrator:
-    def __init__(self, backend: Backend, store: Store, workspace: Path):
+    def __init__(self, backend: Backend, store: Store, workspace: Path,
+                 data_dir: Path | None = None):
         self.backend = backend
         self.store = store
         self.workspace = Path(workspace)
+        # The backend runs in the workspace; the shots it reads and writes live
+        # in the data directory. The same place by default, not necessarily.
+        self.data_dir = Path(data_dir) if data_dir else Path(workspace)
 
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -210,8 +214,9 @@ class Orchestrator:
         # ---- prepare ---------------------------------------------------
         paths = ShotPaths(
             workspace=self.workspace,
-            abs_dir=self.workspace / self.store.shot_rel_dir(slug, idx + 1),
+            abs_dir=self.data_dir / self.store.shot_rel_dir(slug, idx + 1),
             rel_dir=self.store.shot_rel_dir(slug, idx + 1),
+            data_dir=self.data_dir,
         )
         try:
             spec = self.backend.prepare(shot, board, paths)
@@ -312,7 +317,7 @@ class Orchestrator:
                 return f"{label} frame chains from a shot that no longer exists"
 
             frames_dir = (
-                self.workspace / self.store.shot_rel_dir(slug, src_idx + 1) / "frames"
+                self.data_dir / self.store.shot_rel_dir(slug, src_idx + 1) / "frames"
             )
             frames = sorted(frames_dir.glob("*.png")) if frames_dir.exists() else []
             if not frames:
@@ -322,7 +327,7 @@ class Orchestrator:
                     f"rendered frames yet"
                 )
             # last frame of the upstream clip
-            ref["resolved"] = str(frames[-1].relative_to(self.workspace))
+            ref["resolved"] = str(frames[-1].relative_to(self.data_dir))
         return None
 
     def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
@@ -358,7 +363,7 @@ class Orchestrator:
 
     def _as_url(self, p: Path) -> str:
         try:
-            rel = Path(p).relative_to(self.workspace)
+            rel = Path(p).relative_to(self.data_dir)
         except ValueError:
             return str(p)
         return "/media/" + str(rel).replace("\\", "/")

@@ -10,14 +10,21 @@
 #   ./serve.sh --lan                # bind all interfaces (e.g. view on a phone)
 #   ./serve.sh --backend comfyui    # scaffold only, not implemented yet
 #   ./serve.sh --workspace DIR      # directory vpipe is launched from
+#   ./serve.sh --data-dir DIR       # where your storyboards live
 #   ./serve.sh --vpipe PATH         # path to the vpipe CLI binary
 #
-# The workspace matters: vpipe resolves models/ and its LMDB model registry
-# relative to the directory it is launched from, so this must be the
-# directory the models were prepared in.
+# Two directories, on purpose:
 #
-# Storyboards are saved under <workspace>/projects/<slug>/storyboard.json,
-# alongside the shots they render, so a project folder is self-contained.
+#   --workspace  vpipe's. It resolves models/ and its LMDB model registry
+#                relative to the directory it is launched from, so this must
+#                be the directory the models were prepared in.
+#
+#   --data-dir   yours. Storyboards and uploaded references are saved under
+#                <data-dir>/projects/<slug>/, alongside the shots they render,
+#                so a project folder is self-contained and can be copied or
+#                zipped on its own. Defaults to the workspace, so an existing
+#                install is unaffected; point it anywhere to keep your work
+#                out of another tool's runtime directory.
 # ==========================================================================
 
 set -euo pipefail
