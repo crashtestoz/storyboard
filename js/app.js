@@ -54,6 +54,43 @@ const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
 
+/* Rebuilding a subtree blows away the caret of anything focused inside it.
+   The poll used to do exactly that once a second, so typing in one shot's
+   fields while another rendered lost a keystroke per tick. Full rebuilds are
+   now rare (see refreshStatus), but they still happen mid-typing — a shot
+   finishing while you write — so they carry the caret across. */
+const LOG_WINDOW = 200;
+
+function focusSnapshot() {
+  const a = document.activeElement;
+  if (!a || a === document.body) return null;
+  const sel =
+    a.id ? "#" + a.id : a.dataset.fkey ? `[data-fkey="${a.dataset.fkey}"]` : null;
+  if (!sel) return null;
+  const snap = { sel };
+  try {
+    snap.start = a.selectionStart;
+    snap.end = a.selectionEnd;
+  } catch {
+    /* selectionStart throws on inputs that have no text selection */
+  }
+  return snap;
+}
+
+function focusRestore(snap) {
+  if (!snap) return;
+  const n = document.querySelector(snap.sel);
+  if (!n || n === document.activeElement) return;
+  n.focus({ preventScroll: true });
+  if (snap.start != null) {
+    try {
+      n.setSelectionRange(snap.start, snap.end);
+    } catch {
+      /* not a text control any more */
+    }
+  }
+}
+
 function chip(status) {
   const c = el("span", "chip", STATUS_LABELS[status] || status);
   c.dataset.status = status;
@@ -233,6 +270,20 @@ function wireChrome() {
     renderBoardPicker();
   });
 
+  $("#btnSettings").addEventListener("click", () => {
+    $("#settings").hidden = false;
+  });
+  $("#settingsClose").addEventListener("click", () => {
+    $("#settings").hidden = true;
+  });
+  // Click the backdrop, or press Escape, to close — same as the other dialogs.
+  $("#settings").addEventListener("click", (e) => {
+    if (e.target === $("#settings")) $("#settings").hidden = true;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#settings").hidden) $("#settings").hidden = true;
+  });
+
   $("#btnExport").addEventListener("click", () => {
     if (state.slug) window.location.href = API.exportUrl(state.slug);
   });
@@ -367,7 +418,19 @@ async function refreshStatus() {
       toast("Render batch finished.");
     }
     if (s.error) toast(s.error, "error");
-    render();
+
+    // A poll tick almost never changes the *shape* of the page — only
+    // percentages, phase text and a progress bar. Rebuilding everything for
+    // that flickered every image and every second (a <video> reloaded and
+    // restarted), so the expensive path runs only when something structural
+    // actually moved: a status transition, a new thumbnail, a new output.
+    const sig = structuralSig();
+    if (sig !== state.sig) {
+      state.sig = sig;
+      render();
+    } else {
+      paintLive();
+    }
   } catch {
     /* transient — next tick will retry */
   }
@@ -377,8 +440,94 @@ async function refreshStatus() {
    Render
    ========================================================================== */
 
+function structuralSig() {
+  const busy = !!(state.status && state.status.busy);
+  return JSON.stringify([
+    busy,
+    state.selectedId,
+    shots().map((raw) => {
+      const v = view(raw);
+      return [
+        raw.id,
+        v.status,
+        raw.thumb || "",
+        raw.dubUrl || "",
+        raw.renderedAs || "",
+        (v.outputs || []).join("|"),
+      ];
+    }),
+  ]);
+}
+
+/* The poll's normal path: update in place, touch no structure, create no
+   elements that already exist. Nothing here clears a container, so nothing
+   flickers and nothing focused is destroyed. */
+function paintLive() {
+  if (!state.board) return;
+  const busy = !!(state.status && state.status.busy);
+  $("#btnRender").disabled = busy || !state.info.backend.healthy;
+  $("#btnStop").disabled = !busy;
+  paintMeta();
+
+  shots().forEach((raw) => {
+    const shot = view(raw);
+    const pct = `${Math.round(shot.progress || 0)}%`;
+
+    const row = document.querySelector(`.queue-row[data-id="${raw.id}"]`);
+    if (row) {
+      const q = row.querySelector(".queue-pct");
+      if (q) q.textContent = pct;
+    }
+
+    const card = document.querySelector(`.shot-card[data-id="${raw.id}"]`);
+    if (card) {
+      const c = card.querySelector(".shot-foot .queue-pct");
+      if (c) c.textContent = pct;
+      const fill = card.querySelector(".progress-fill");
+      if (fill) fill.style.width = `${shot.progress || 0}%`;
+      const ph = card.querySelector(".progress-track + .shot-sub");
+      if (ph && shot.phase) ph.textContent = shot.phase;
+    }
+
+    if (raw.id === state.selectedId) {
+      const pe = document.querySelector(".preview-empty span:not(.big)");
+      if (pe && shot.status === "running") {
+        pe.textContent =
+          `Rendering — ${pct}${shot.phase ? ` (${shot.phase})` : ""}`;
+      }
+      const rt = document.querySelector('#preview .stat-grid dt + dd');
+      if (rt) rt.textContent = STATUS_LABELS[shot.status] || shot.status;
+      paintLog(shot);
+    }
+  });
+}
+
+function paintLog(shot) {
+  const box = $("#preview .log");
+  const lines = shot.log;
+  if (!box || !lines) return;
+  // Only ever append: rewriting the box would fight the user's scroll and
+  // flash a few hundred lines of text once a second.
+  const have = Number(box.dataset.count || 0);
+  if (lines.length <= have) return;
+
+  // The box was showing "No run yet." or a saved log; this run supersedes it.
+  if (!have) box.innerHTML = "";
+
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  lines.slice(have).forEach((e) => box.appendChild(logLine(e)));
+  box.dataset.count = String(lines.length);
+
+  // Hold the same window renderPreview draws, so the two agree.
+  let extra = box.querySelectorAll(".log-line").length - LOG_WINDOW;
+  while (extra-- > 0 && box.firstChild) box.removeChild(box.firstChild);
+
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
 function render() {
   if (!state.board) return;
+  const snap = focusSnapshot();
   renderBoardPicker();
   renderRail();
   renderStrip();
@@ -389,6 +538,11 @@ function render() {
   $("#btnRender").disabled = busy || !state.info.backend.healthy;
   $("#btnStop").disabled = !busy;
 
+  paintMeta();
+  focusRestore(snap);
+}
+
+function paintMeta() {
   const counts = shots().reduce((a, s) => {
     const st = view(s).status;
     a[st] = (a[st] || 0) + 1;
@@ -560,6 +714,7 @@ function renderRail() {
   shots().forEach((raw, i) => {
     const shot = view(raw);
     const row = el("div", "queue-row");
+    row.dataset.id = raw.id;
     if (raw.id === state.selectedId) row.classList.add("selected");
     row.appendChild(el("span", "queue-num", String(i + 1)));
     const dot = el("span", "queue-dot");
@@ -1434,6 +1589,17 @@ function frameHint(frames, cap) {
 
 function renderPreview() {
   const host = $("#preview");
+
+  // Rebuilding a <video> reloads the file and restarts playback, and
+  // rebuilding an <img> re-decodes it — both read as a flash. When the source
+  // has not changed, carry the existing element across instead.
+  const prev = host.querySelector(".preview-stage > video, .preview-stage > img");
+  const prevSrc = prev ? prev.getAttribute("src") : null;
+  const reuse = (want, make) => {
+    if (prev && prevSrc === want) return prev;
+    return make();
+  };
+
   host.innerHTML = "";
   const raw = selectedShot();
   if (!raw) return;
@@ -1445,20 +1611,32 @@ function renderPreview() {
   const video = raw.dubUrl || (shot.outputs || []).find((u) => u.endsWith(".mp4"));
   const image = (shot.outputs || []).find((u) => /\.(jpe?g|png|webp)$/i.test(u));
   if (video) {
-    const v = el("video");
-    v.src = video;
-    v.controls = true;
-    v.loop = true;
-    v.muted = false;
-    stage.appendChild(v);
+    stage.appendChild(
+      reuse(video, () => {
+        const v = el("video");
+        v.src = video;
+        v.controls = true;
+        v.loop = true;
+        v.muted = false;
+        return v;
+      })
+    );
   } else if (image) {
-    const img = el("img");
-    img.src = image;
-    stage.appendChild(img);
+    stage.appendChild(
+      reuse(image, () => {
+        const img = el("img");
+        img.src = image;
+        return img;
+      })
+    );
   } else if (raw.thumb) {
-    const img = el("img");
-    img.src = raw.thumb;
-    stage.appendChild(img);
+    stage.appendChild(
+      reuse(raw.thumb, () => {
+        const img = el("img");
+        img.src = raw.thumb;
+        return img;
+      })
+    );
   } else {
     const ph = el("img", "preview-placeholder");
     ph.src = "assets/shot-placeholder.png";
@@ -1516,18 +1694,8 @@ function renderPreview() {
         .then((r) => (r.ok ? r.text() : Promise.reject()))
         .then((text) => {
           box.innerHTML = "";
-          text.trimEnd().split("\n").slice(-200).forEach((t) => {
-            const m = t.match(/^\[([A-Z]+)\]\s*(.*)$/);
-            const line = el("div", "log-line");
-            line.dataset.lvl = m ? m[1] : "INFO";
-            if (m) {
-              line.appendChild(el("span", "lvl", `[${m[1]}] `));
-              line.appendChild(el("span", null, m[2]));
-            } else {
-              line.appendChild(el("span", null, t));
-            }
-            box.appendChild(line);
-          });
+          text.trimEnd().split("\n").slice(-200)
+            .forEach((t) => box.appendChild(logLine(t)));
           box.scrollTop = box.scrollHeight;
         })
         .catch(() => {
@@ -1538,16 +1706,33 @@ function renderPreview() {
       box.appendChild(el("span", "log-empty", "No run yet."));
     }
   } else {
-    lines.slice(-200).forEach(({ level, text }) => {
-      const line = el("div", "log-line");
-      line.dataset.lvl = level;
-      line.appendChild(el("span", "lvl", `[${level}] `));
-      line.appendChild(el("span", null, text));
-      box.appendChild(line);
-    });
+    lines.slice(-LOG_WINDOW).forEach((e) => box.appendChild(logLine(e)));
+    // paintLog appends from here rather than rebuilding, so it needs to know
+    // how much of the log is already on screen.
+    box.dataset.count = String(lines.length);
   }
   host.appendChild(box);
   box.scrollTop = box.scrollHeight;
+}
+
+/* Two shapes reach here: live lines arrive as {level, text} from the
+   orchestrator, saved run.log lines as raw strings with a bracketed level. */
+function logLine(entry) {
+  let level = "INFO";
+  let text = "";
+  if (entry && typeof entry === "object") {
+    level = entry.level || "INFO";
+    text = entry.text || "";
+  } else {
+    const m = String(entry).match(/^\[([A-Z]+)\]\s*(.*)$/);
+    level = m ? m[1] : "INFO";
+    text = m ? m[2] : String(entry);
+  }
+  const line = el("div", "log-line");
+  line.dataset.lvl = level;
+  line.appendChild(el("span", "lvl", `[${level}] `));
+  line.appendChild(el("span", null, text));
+  return line;
 }
 
 function diagnostic(raw, shot) {
@@ -1621,6 +1806,15 @@ function field(label, control, hint, warn) {
     const s = el("span", "hint-inline", "  " + hint);
     l.appendChild(s);
   }
+  // A stable handle for focusRestore: the editor's controls have no ids, so
+  // the label they sit under names them.
+  const ctl = /^(INPUT|TEXTAREA|SELECT)$/.test(control.tagName)
+    ? control
+    : control.querySelector && control.querySelector("input, textarea, select");
+  if (ctl && !ctl.dataset.fkey) {
+    ctl.dataset.fkey = String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  }
+
   f.append(l, control);
   if (warn) {
     const w = el("div", warn.startsWith("⚠") ? "field-warn" : "field-note", warn);
