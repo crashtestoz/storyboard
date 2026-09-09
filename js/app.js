@@ -25,8 +25,8 @@ const state = {
   poll: null,
   tab: "prompt",          // which editor tab is open; survives a re-render
   // The last speech run per shot, by shot id. Held for the session so the
-  // Speech output pane fills the instant a take finishes, before anything is
-  // re-read from disk.
+  // log window fills the instant a take finishes, before anything is re-read
+  // from disk.
   speechLog: {},
   saveTimer: null,
   dirty: false,
@@ -708,21 +708,26 @@ function paintLog(shot) {
   const box = $("#preview .log");
   const lines = shot.log;
   if (!box || !lines) return;
-  // Only ever append: rewriting the box would fight the user's scroll and
-  // flash a few hundred lines of text once a second.
-  const have = Number(box.dataset.count || 0);
+  // Appends into the render container, not the whole window: the same window
+  // also holds the spoken line's log, and counting those lines as its own
+  // would make it skip real output.
+  const part = box.querySelector('[data-part="render"]') || box;
+
+  // Only ever append: rewriting would fight the user's scroll and flash a few
+  // hundred lines of text once a second.
+  const have = Number(part.dataset.count || 0);
   if (lines.length <= have) return;
 
-  // The box was showing "No run yet." or a saved log; this run supersedes it.
-  if (!have) box.innerHTML = "";
+  // It was showing "No run yet." or a saved log; this run supersedes it.
+  if (!have) part.innerHTML = "";
 
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
-  lines.slice(have).forEach((e) => box.appendChild(logLine(e)));
-  box.dataset.count = String(lines.length);
+  lines.slice(have).forEach((e) => part.appendChild(logLine(e)));
+  part.dataset.count = String(lines.length);
 
   // Hold the same window renderPreview draws, so the two agree.
-  let extra = box.querySelectorAll(".log-line").length - LOG_WINDOW;
-  while (extra-- > 0 && box.firstChild) box.removeChild(box.firstChild);
+  let extra = part.querySelectorAll(".log-line").length - LOG_WINDOW;
+  while (extra-- > 0 && part.firstChild) part.removeChild(part.firstChild);
 
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
@@ -2127,74 +2132,81 @@ function renderPreview() {
   host.appendChild(sp);
 
   const lbl = el("div", "section-label", "Backend output");
-  lbl.appendChild(el("span", "hint", "— parsed by the orchestrator"));
+  lbl.appendChild(el("span", "hint", "— the render, and any spoken line"));
   host.appendChild(lbl);
 
+  /* One window, two producers. They go into separate containers inside it so
+     each can be filled independently — the render log arrives live or as a
+     fetch of run.log, the speech log the same way — while the order on screen
+     stays fixed and the render poll's append (which counts lines) only ever
+     touches its own. */
   const box = el("div", "log");
+  const renderPart = el("div", "log-part");
+  renderPart.dataset.part = "render";
+  const speechPart = el("div", "log-part");
+  speechPart.dataset.part = "speech";
+  box.append(renderPart, speechPart);
+
+  const speech = state.speechLog[raw.id];
+  const haveSpeech = !!(speech || raw.speechLogUrl);
+
   const lines = shot.log;
   if (!lines || !lines.length) {
     // No live log — the batch may have finished in an earlier server session,
     // so fall back to the run.log written next to the outputs.
     if (raw.logUrl) {
-      box.appendChild(el("span", "log-empty", "loading saved log…"));
+      renderPart.appendChild(el("span", "log-empty", "loading saved log…"));
       fetch(raw.logUrl)
         .then((r) => (r.ok ? r.text() : Promise.reject()))
         .then((text) => {
-          box.innerHTML = "";
-          text.trimEnd().split("\n").slice(-200)
-            .forEach((t) => box.appendChild(logLine(t)));
+          renderPart.innerHTML = "";
+          text.trimEnd().split("\n").slice(-LOG_WINDOW)
+            .forEach((t) => renderPart.appendChild(logLine(t)));
           box.scrollTop = box.scrollHeight;
         })
         .catch(() => {
-          box.innerHTML = "";
-          box.appendChild(el("span", "log-empty", "No saved log for this run."));
+          renderPart.innerHTML = "";
+          renderPart.appendChild(el("span", "log-empty", "No saved log for this run."));
         });
+    } else if (!haveSpeech) {
+      renderPart.appendChild(el("span", "log-empty", "No run yet."));
     } else {
-      box.appendChild(el("span", "log-empty", "No run yet."));
+      // Speech but no render: say so quietly rather than "No run yet." above
+      // output that plainly exists.
+      renderPart.appendChild(logLine("# not rendered yet"));
     }
   } else {
-    lines.slice(-LOG_WINDOW).forEach((e) => box.appendChild(logLine(e)));
+    lines.slice(-LOG_WINDOW).forEach((e) => renderPart.appendChild(logLine(e)));
     // paintLog appends from here rather than rebuilding, so it needs to know
     // how much of the log is already on screen.
-    box.dataset.count = String(lines.length);
+    renderPart.dataset.count = String(lines.length);
   }
-  host.appendChild(box);
-  box.scrollTop = box.scrollHeight;
 
-  /* Speaking a line is its own run with its own output, and it is where the
-     awkward failures live — a clone conditioned on the wrong transcript, a
-     tail of silence, an engine that generated audio and dropped it. It gets
-     its own block rather than being interleaved with the render log, so which
-     process said what is never in doubt (and so the render poll's append,
-     which tracks a line count, is left alone). */
-  const speech = state.speechLog[raw.id];
-  if (speech || raw.speechLogUrl) {
-    const slbl = el("div", "section-label", "Speech output");
-    slbl.style.marginTop = "var(--sp-3)";
-    slbl.appendChild(el("span", "hint", "— the voice engine's own account"));
-    host.appendChild(slbl);
-
-    const sbox = el("div", "log");
+  if (haveSpeech) {
     if (speech) {
-      speech.slice(-LOG_WINDOW).forEach((t) => sbox.appendChild(logLine(t)));
+      // A session run has no saved header, so it gets one: which process this
+      // came from should be readable without inferring it from content.
+      speechPart.appendChild(logLine("# spoken line"));
+      speech.slice(-LOG_WINDOW).forEach((t) => speechPart.appendChild(logLine(t)));
     } else {
-      sbox.appendChild(el("span", "log-empty", "loading saved log…"));
+      speechPart.appendChild(el("span", "log-empty", "loading speech log…"));
       fetch(raw.speechLogUrl)
         .then((r) => (r.ok ? r.text() : Promise.reject()))
         .then((text) => {
-          sbox.innerHTML = "";
+          speechPart.innerHTML = "";
           text.trimEnd().split("\n").slice(-LOG_WINDOW)
-            .forEach((t) => sbox.appendChild(logLine(t)));
-          sbox.scrollTop = sbox.scrollHeight;
+            .forEach((t) => speechPart.appendChild(logLine(t)));
+          box.scrollTop = box.scrollHeight;
         })
         .catch(() => {
-          sbox.innerHTML = "";
-          sbox.appendChild(el("span", "log-empty", "No saved speech log."));
+          speechPart.innerHTML = "";
+          speechPart.appendChild(el("span", "log-empty", "No saved speech log."));
         });
     }
-    host.appendChild(sbox);
-    sbox.scrollTop = sbox.scrollHeight;
   }
+
+  host.appendChild(box);
+  box.scrollTop = box.scrollHeight;
 }
 
 /* Two shapes reach here: live lines arrive as {level, text} from the

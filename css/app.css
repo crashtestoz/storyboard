@@ -1459,3 +1459,9 @@ textarea.ta-tall {
   font-style: italic;
   opacity: 0.85;
 }
+
+/* The log window holds the render's output and any spoken line's, in separate
+   containers so each can be filled independently while the order stays fixed.
+   `display: contents` keeps them from affecting layout at all — the lines lay
+   out exactly as if they were direct children. */
+.log-part { display: contents; }

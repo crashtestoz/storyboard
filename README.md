@@ -157,8 +157,11 @@ it spending most of its runtime generating nothing.
 always the reference clip or its transcript, and neither is visible from a
 waveform. So each take writes a `speech.log` beside the audio — the reference
 used, the transcript (and whether it had to be derived), the text, the
-response, what was trimmed, what the level was set to — shown in a **Speech
-output** pane under the render's own log, and reloadable afterwards.
+response, what was trimmed, what the level was set to — and it appears in the
+same **Backend output** window as the render, after it, under its own header.
+One window because they are both "what the machine did on this shot"; separate
+containers inside it so each can be filled independently and the render poll's
+append only ever touches its own lines.
 
 **Open, not import.** The header's **Open** lists every storyboard on disk
 with what each folder actually holds — shot count, how many are rendered, and
