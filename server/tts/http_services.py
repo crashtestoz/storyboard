@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import json
 import urllib.error
+import time
 import urllib.request
 import wave
 from pathlib import Path
@@ -192,12 +193,33 @@ class MccSherpaTTS(TTSEngine):
         self.id = service_id
         self.label = label
         self.base_url = (base_url or "").rstrip("/")
+        self._cached: tuple[float, bool, str] | None = None
 
     def health(self) -> tuple[bool, str]:
+        """Actually try to synthesise, briefly cached.
+
+        Probing only that the host answers is misleading here: MCC's web app
+        replies 200 on / while its speech endpoint returns 503 because
+        sherpa-onnx is not configured on that machine. A green light that
+        fails at the first dub is worse than a red one, so this asks the
+        endpoint itself and repeats the server's own explanation.
+        """
         if not self.base_url:
             return False, "no URL configured for this service"
-        ok, err = _reachable(self.base_url + "/")
-        return (True, "") if ok else (False, f"cannot reach {self.base_url} ({err})")
+
+        now = time.time()
+        if self._cached and now - self._cached[0] < 60:
+            return self._cached[1], self._cached[2]
+
+        body, ctype, err = _post(self.base_url + "/api/tts", {"text": "test"}, 30)
+        if err:
+            ok, msg = False, err
+        elif _audio_from(body, ctype):
+            ok, msg = True, ""
+        else:
+            ok, msg = False, f"{self.base_url}/api/tts returned no audio"
+        self._cached = (now, ok, msg)
+        return ok, msg
 
     def voices(self) -> list[Voice]:
         return [Voice(id="default", label="MCC sherpa-onnx voice", kind="preset")]

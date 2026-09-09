@@ -53,15 +53,16 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
         "id": "qwen3-clone",
         "label": "Qwen3-TTS voice clone (same server MCC uses)",
         "kind": "qwen3-clone",
-        # MCC's default. It binds 127.0.0.1 on the machine it runs on, so
-        # point this at that host (and rebind or tunnel it) to use it remotely.
-        "url": "http://127.0.0.1:8790",
+        # OptiPlex, where MCC and this server run. Still binds 127.0.0.1
+        # there, so it needs rebinding to 0.0.0.0 (or a tunnel) before this
+        # address answers.
+        "url": "http://10.0.0.200:8790",
     },
     {
         "id": "mcc-sherpa",
         "label": "MCC sherpa-onnx voice (plain, no cloning)",
         "kind": "mcc-sherpa",
-        "url": "http://127.0.0.1:3000",
+        "url": "http://10.0.0.200:3000",
     },
 ]
 
