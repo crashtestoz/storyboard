@@ -15,6 +15,7 @@ Routes
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing workspace file in
+``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/stop``              stop the running batch
@@ -267,6 +268,9 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._dub(m.group(1), m.group(2))
 
+        if path == "/api/transcribe":
+            return self._transcribe()
+
         if path == "/api/render":
             payload = self._read_json()
             slug = payload.get("slug")
@@ -278,6 +282,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(ctx.orch.stop())
 
         return self._err(404, "unknown endpoint")
+
+    def _transcribe(self) -> None:
+        """Transcribe a reference clip so the transcript can be reviewed.
+
+        MCC's speech page makes this a visible step — upload, transcribe, then
+        correct the text before it conditions the voice — because a
+        mis-transcription silently degrades the clone. Same here rather than
+        transcribing invisibly at dub time.
+        """
+        payload = self._read_json()
+        rel = payload.get("path")
+        engine_id = payload.get("engine")
+        if not rel:
+            raise ValueError("path is required")
+
+        clip = (self.ctx.workspace / rel).resolve()
+        clip.relative_to(self.ctx.workspace.resolve())
+        if not clip.is_file():
+            raise FileNotFoundError(f"no such clip: {rel}")
+
+        engine = self.ctx.tts(engine_id)
+        transcribe = getattr(engine, "transcribe", None)
+        if transcribe is None:
+            return self._err(
+                409,
+                f"{engine.label} cannot transcribe — select a voice-cloning "
+                "engine, or type the transcript yourself",
+            )
+        text, err = transcribe(clip)
+        if err or not text:
+            return self._err(409, err or "transcription returned no text")
+        return self._send_json({"text": text, "engine": engine.id})
 
     def _dub(self, slug: str, shot_id: str) -> None:
         """Speak a shot's dialogue and mux it over the rendered clip."""

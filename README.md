@@ -19,7 +19,7 @@ Design rationale and the orchestrator contract:
 ./serve.sh --lan                        # reachable on your LAN
 ./serve.sh --port 8080
 ./serve.sh --workspace DIR              # where vpipe is launched from
-./serve.sh --tts mcc-qwen3 --tts-url http://mcc-host:PORT
+./serve.sh --tts qwen3-clone            # default engine id (see tts-services.json)
 ```
 
 Standard library Python only — nothing to install. Run the script, it prints a

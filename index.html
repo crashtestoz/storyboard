@@ -204,7 +204,10 @@
           <label>What the voice clip says
             <span class="hint-inline">needed for cloning — the server can fill it in</span>
           </label>
-          <input type="text" id="castVoiceText" placeholder="transcript of the reference clip">
+          <div style="display:flex;gap:var(--sp-2)">
+            <input type="text" id="castVoiceText" placeholder="transcript of the reference clip">
+            <button class="btn btn-sm" id="castTranscribe" title="Transcribe the attached clip">Transcribe</button>
+          </div>
         </div>
         <div class="cast-note" id="castNote"></div>
       </div>

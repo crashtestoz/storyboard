@@ -630,6 +630,9 @@ async function editCharacter(existing) {
   $("#castName").value = draft.name || "";
   $("#castDesc").value = draft.description || "";
   $("#castVoiceText").value = draft.voiceText || "";
+  const trBtn = $("#castTranscribe");
+  trBtn.onclick = () => autoTranscribe(draft);
+  trBtn.disabled = !(draft.voice && draft.voice.path);
   $("#castNote").textContent =
     "The image and voice become reference inputs on models that accept them " +
     "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
@@ -707,6 +710,29 @@ async function editCharacter(existing) {
       }
     };
     inp.click();
+  }
+
+  async function autoTranscribe(obj) {
+    const clip = obj.voice && obj.voice.path;
+    if (!clip) return;
+    const field = $("#castVoiceText");
+    const prev = field.value;
+    field.value = "transcribing…";
+    field.disabled = true;
+    try {
+      const r = await API.transcribe(clip, state.board.defaults.tts);
+      field.value = r.text;
+      draft.voiceText = r.text;
+      toast("Transcribed the reference clip — check it reads correctly.");
+    } catch (err) {
+      field.value = prev;
+      toast(
+        `Could not transcribe: ${err.message}. Type what the clip says instead.`,
+        "warn"
+      );
+    } finally {
+      field.disabled = false;
+    }
   }
 
   const foot = $("#castFoot");
