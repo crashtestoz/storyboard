@@ -825,8 +825,25 @@ function renderStrip() {
         img.style.opacity = "0.3";
         img.style.filter = "grayscale(1)";
       }
+      // A recorded thumbnail can outlive the file it names — a folder cleaned
+      // out, a project copied without its renders. Fall back rather than
+      // showing a broken image.
+      img.onerror = () => {
+        img.remove();
+        const ph = el("img", "shot-placeholder");
+        ph.src = "assets/shot-placeholder.png";
+        ph.alt = "";
+        thumb.insertBefore(ph, thumb.firstChild);
+      };
       thumb.appendChild(img);
     } else {
+      // A generated placeholder rather than empty space, so an unrendered
+      // card still reads as a shot. Deliberately low contrast: it is a hint
+      // about what is missing, not something competing with real frames.
+      const ph = el("img", "shot-placeholder");
+      ph.src = "assets/shot-placeholder.png";
+      ph.alt = "";
+      thumb.appendChild(ph);
       thumb.appendChild(el("div", "shot-thumb-empty", "not rendered"));
     }
     thumb.appendChild(el("span", "shot-index", String(i + 1).padStart(2, "0")));
@@ -1443,6 +1460,10 @@ function renderPreview() {
     img.src = raw.thumb;
     stage.appendChild(img);
   } else {
+    const ph = el("img", "preview-placeholder");
+    ph.src = "assets/shot-placeholder.png";
+    ph.alt = "";
+    stage.appendChild(ph);
     const e = el("div", "preview-empty");
     e.appendChild(el("span", "big", shot.status === "running" ? "◐" : "▦"));
     e.appendChild(
