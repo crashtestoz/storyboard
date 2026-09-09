@@ -7,9 +7,9 @@
     },
     {
       "id": "qwen3-clone",
-      "label": "Qwen3-TTS voice clone (same server MCC uses)",
+      "label": "Qwen3-TTS voice clone (local, MPS)",
       "kind": "qwen3-clone",
-      "url": "http://10.0.0.200:8790"
+      "url": "http://127.0.0.1:8790"
     },
     {
       "id": "mcc-sherpa",

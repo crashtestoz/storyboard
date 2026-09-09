@@ -83,20 +83,33 @@ class Qwen3CloneTTS(TTSEngine):
         self.base_url = (base_url or "").rstrip("/")
 
     def health(self) -> tuple[bool, str]:
+        """Ask the server's own /health, which reports whether both models are
+        resident — it loads Qwen3-TTS and faster-whisper at startup, and until
+        they are in memory a synth request would simply block."""
         if not self.base_url:
             return False, "no URL configured for this service"
-        ok, err = _reachable(self.base_url + "/")
-        if ok:
-            return True, ""
-        return False, (
-            f"cannot reach {self.base_url} ({err}). The Qwen3-TTS server binds "
-            "127.0.0.1, so it only answers on the machine it runs on. To use it "
-            "from here, on that host (OptiPlex) start it with "
-            "--host 0.0.0.0 (uvicorn's default is 127.0.0.1), open port 8790, "
-            "then set this service's url to http://<that-host>:8790 in "
-            "tts-services.json. Alternatively tunnel it "
-            "(ssh -L 8790:127.0.0.1:8790 <host>) and keep the URL as localhost."
-        )
+        try:
+            with urllib.request.urlopen(self.base_url + "/health",
+                                        timeout=PROBE_TIMEOUT) as r:
+                doc = json.loads(r.read() or b"{}")
+        except Exception as exc:  # noqa: BLE001
+            return False, (
+                f"cannot reach {self.base_url} ({exc}). The Qwen3-TTS server binds "
+                "127.0.0.1, so it only answers on the machine it runs on. To use it "
+                "from here, on that host (OptiPlex) start it with "
+                "--host 0.0.0.0 (uvicorn's default is 127.0.0.1), open port 8790, "
+                "then set this service's url to http://<that-host>:8790 in "
+                "tts-services.json. Alternatively tunnel it "
+                "(ssh -L 8790:127.0.0.1:8790 <host>) and keep the URL as localhost."
+            )
+        if not doc.get("loaded"):
+            return False, f"{self.base_url} is up but the speech model is still loading"
+        if not doc.get("whisperLoaded", True):
+            return False, (
+                f"{self.base_url} is up but the transcription model is still "
+                "loading — auto-fill of the reference transcript will not work yet"
+            )
+        return True, ""
 
     def voices(self) -> list[Voice]:
         # The voice IS the reference clip; there are no presets to list.
