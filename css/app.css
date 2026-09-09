@@ -1425,3 +1425,22 @@ textarea.ta-tall {
 }
 
 #openDialog { z-index: 115; }
+
+/* --- speak this line ------------------------------------------------------ */
+
+.speak-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+
+.speak-row select { width: auto; min-width: 160px; }
+
+/* The whole point is hearing it, so the player gets real width. */
+.speak-player {
+  height: 32px;
+  flex: 1 1 240px;
+  min-width: 200px;
+}

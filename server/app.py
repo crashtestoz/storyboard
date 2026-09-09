@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends.base import Backend
-from .dubbing import dub_shot
+from .dubbing import dub_shot, speaker_for
 from .orchestrator import Orchestrator
 from .llm import LLMService, rewrite_prompt
 from .store import Store, default_shot
@@ -448,7 +448,12 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"text": text, "engine": engine.id})
 
     def _dub(self, slug: str, shot_id: str) -> None:
-        """Speak a shot's dialogue and mux it over the rendered clip."""
+        """Speak a shot's dialogue in its character's voice.
+
+        Also mixes it over the clip when the shot has been rendered — but the
+        speech is returned either way, because hearing whether a cloned voice
+        says the line correctly should not cost half an hour of video first.
+        """
         ctx = self.ctx
         board = ctx.store.load(slug)
         shots = board.get("shots") or []
@@ -457,29 +462,47 @@ class Handler(BaseHTTPRequestHandler):
             raise FileNotFoundError("no such shot")
         shot = shots[idx]
 
+        payload = self._read_json() or {}
+        # The line may not be saved yet — the same reason /api/rewrite takes it.
+        text = payload.get("text")
+        if text is None:
+            text = shot.get("dialogue") or ""
+
         engine = ctx.tts((board.get("defaults") or {}).get("tts"))
         shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1)
 
-        # A character's recorded voice is the natural reference for cloning.
+        # The speaking character's recorded voice is the cloning reference, and
+        # their transcript conditions it alongside the audio.
+        speaker = speaker_for(shot, board)
         reference = None
         reference_text = ""
-        if engine.supports_cloning:
-            cast = {c["id"]: c for c in (board.get("characters") or [])}
-            for cid in shot.get("characterIds") or []:
-                ch = cast.get(cid) or {}
-                voice = ch.get("voice")
-                if voice and voice.get("path"):
-                    candidate = ctx.data_dir / voice["path"]
-                    if candidate.exists():
-                        reference = candidate
-                        reference_text = ch.get("voiceText") or ""
-                        break
+        clone_note = ""
+        if speaker:
+            voice = speaker.get("voice") or {}
+            path = voice.get("path")
+            if not path:
+                clone_note = (
+                    f"{speaker.get('name') or 'that character'} has no reference "
+                    "voice clip, so the engine's own voice was used"
+                )
+            elif not engine.supports_cloning:
+                clone_note = (
+                    f"{engine.label} cannot clone a voice, so "
+                    f"{speaker.get('name') or 'the character'}'s clip was not used"
+                )
+            else:
+                candidate = ctx.data_dir / path
+                if candidate.exists():
+                    reference = candidate
+                    reference_text = speaker.get("voiceText") or ""
+                else:
+                    clone_note = f"the reference clip is missing at {path}"
 
         result = dub_shot(
             engine,
             clip=shot_dir / "clip.mp4",
             shot_dir=shot_dir,
-            text=shot.get("dialogue") or "",
+            text=text,
             voice=shot.get("dialogueVoice") or None,
             reference=reference,
             reference_text=reference_text,
@@ -491,16 +514,29 @@ class Handler(BaseHTTPRequestHandler):
                  "engine": engine.id}, 409
             )
 
-        rel = result.video.relative_to(ctx.data_dir)
-        shot["dubUrl"] = "/media/" + str(rel).replace("\\", "/")
+        def as_url(p: Path) -> str:
+            return "/media/" + str(p.relative_to(ctx.data_dir)).replace("\\", "/")
+
+        # The spoken line is kept on the shot so it survives a reload and can
+        # be played again without re-synthesising.
+        shot["dialogueAudioUrl"] = as_url(result.audio) if result.audio else None
+        if result.video:
+            shot["dubUrl"] = as_url(result.video)
         ctx.store.save(slug, board)
+
         return self._send_json(
             {
-                "dubUrl": shot["dubUrl"],
+                "audioUrl": shot["dialogueAudioUrl"],
+                "dubUrl": shot.get("dubUrl") if result.video else None,
+                "muxed": bool(result.video),
                 "engine": engine.id,
+                "engineLabel": engine.label,
+                "speaker": (speaker or {}).get("name") or "",
+                "cloned": reference is not None,
                 "voice": result.speech.voice if result.speech else "",
                 "seconds": round(result.speech.seconds, 2) if result.speech else 0,
                 "warning": result.warning,
+                "note": clone_note,
             }
         )
 

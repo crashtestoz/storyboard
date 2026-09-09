@@ -84,8 +84,10 @@ const API = {
   adoptRef: (slug, path) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
 
-  dub: (slug, shotId) =>
-    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`, {}),
+  // `text` is sent so an unsaved line can still be previewed.
+  dub: (slug, shotId, text) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`,
+        text === undefined ? {} : { text }),
 
   render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
   stop: () => req("POST", "/api/stop"),

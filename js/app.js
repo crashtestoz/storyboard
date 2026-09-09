@@ -1373,31 +1373,102 @@ function renderEditor() {
   sp.style.flex = "1";
   head.appendChild(sp);
 
+  /* Speaking a line is a preview, not a post-production step: it uses the
+     speaking character's own reference clip and transcript, and it works
+     before the shot has been rendered. Finding out half an hour later that a
+     cloned voice reads the line wrong is exactly the wrong order. */
   if ((raw.dialogue || "").trim()) {
-    const dubRow = el("div");
-    dubRow.style.cssText = "display:flex;gap:var(--sp-2);align-items:center;margin-top:var(--sp-2)";
+    const dubRow = el("div", "speak-row");
     const engNow = state.tts.find((e) => e.id === (state.board.defaults.tts || "none"));
-    const dubBtn = el("button", "btn btn-sm", raw.dubUrl ? "Re-dub" : "Speak this line");
+
+    // who says it — inferred when the shot has one character, chosen when more
+    const castHere = (state.board.characters || []).filter((c) =>
+      (raw.characterIds || []).includes(c.id)
+    );
+    const inferred =
+      castHere.find((c) => c.voice && c.voice.path) || castHere[0] || null;
+    const speaker =
+      castHere.find((c) => c.id === raw.speakerId) || inferred;
+
+    if (castHere.length > 1) {
+      const pick = select(
+        castHere.map((c) => [
+          c.id,
+          c.voice && c.voice.path ? `${c.name} (cloned voice)` : `${c.name} (no clip)`,
+        ]),
+        (speaker && speaker.id) || "",
+        (v) => {
+          live().speakerId = v;
+          markDirty();
+          renderEditor();
+        }
+      );
+      dubRow.append(el("span", "field-note", "spoken by"), pick);
+    } else if (speaker) {
+      dubRow.appendChild(
+        el("span", "field-note",
+           speaker.voice && speaker.voice.path
+             ? `in ${speaker.name}’s cloned voice`
+             : `as ${speaker.name} — no voice clip, so the engine's own voice`)
+      );
+    }
+
+    const canClone = !!(engNow && engNow.supportsCloning);
+    const willClone = !!(speaker && speaker.voice && speaker.voice.path && canClone);
+
+    const dubBtn = el("button", "btn btn-sm", raw.dialogueAudioUrl ? "Speak again" : "Speak this line");
     dubBtn.disabled = !engNow || !engNow.healthy;
-    dubBtn.title = engNow && !engNow.healthy ? engNow.message : "Synthesise and mux";
+    dubBtn.title = !engNow || !engNow.healthy
+      ? (engNow && engNow.message) || "No speech engine selected — see ⚙ Settings"
+      : willClone
+      ? `Synthesise with ${engNow.label}, cloning ${speaker.name}’s voice`
+      : `Synthesise with ${engNow.label}`;
+
     dubBtn.onclick = async () => {
       dubBtn.disabled = true;
       dubBtn.textContent = "speaking…";
       try {
-        const r = await API.dub(state.slug, raw.id);
-        live().dubUrl = r.dubUrl;
-        if (r.warning) toast(r.warning, "warn");
-        else toast(`Dubbed with ${r.engine} (${r.seconds}s of speech).`);
+        // send the line as typed; it may not be saved yet
+        const r = await API.dub(state.slug, raw.id, live().dialogue);
+        const sh = live();
+        sh.dialogueAudioUrl = r.audioUrl;
+        if (r.dubUrl) sh.dubUrl = r.dubUrl;
+        if (r.note) toast(r.note, "warn");
+        else if (r.warning) toast(r.warning, "warn");
+        else {
+          toast(
+            `Spoke ${r.seconds}s in ${r.cloned ? `${r.speaker}’s cloned voice` : "the engine voice"}` +
+              (r.muxed ? " and mixed it over the clip." : " — the clip is not rendered yet, so nothing was mixed.")
+          );
+        }
         render();
       } catch (err) {
-        toast(`Dub failed: ${err.message}`, "error");
+        toast(`Could not speak this line: ${err.message}`, "error");
         render();
       }
     };
     dubRow.appendChild(dubBtn);
-    if (raw.dubUrl) dubRow.appendChild(el("span", "field-note", "dubbed version available"));
+
+    if (speaker && speaker.voice && speaker.voice.path && !canClone) {
+      dubRow.appendChild(
+        el("span", "field-warn",
+           `${engNow ? engNow.label : "this engine"} cannot clone — the clip will not be used`)
+      );
+    }
     if (engNow && !engNow.healthy) {
       dubRow.appendChild(el("span", "field-warn", "speech engine unavailable"));
+    }
+
+    // the spoken line, playable right here
+    if (raw.dialogueAudioUrl) {
+      const au = el("audio", "speak-player");
+      au.src = raw.dialogueAudioUrl;
+      au.controls = true;
+      au.preload = "none";
+      dubRow.appendChild(au);
+    }
+    if (raw.dubUrl) {
+      dubRow.appendChild(el("span", "field-note", "mixed over the clip — see Output"));
     }
     panelDubRow = dubRow;
   }

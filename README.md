@@ -122,12 +122,24 @@ when it can and otherwise finds one that can, saying which it used. Refusing on
 the grounds that *the selected* engine cannot transcribe was a dead end when
 another configured service was sitting right there.
 
-**Dialogue.** Spoken lines are synthesised by a selectable speech engine and
-mixed over the finished clip, ducking the generated soundtrack rather than
-replacing it. This is deliberate: H3 produces a soundtrack, but nothing in its
-documentation claims intelligible lip-synced speech, and dubbing separately
-means a line can be rewritten in seconds without re-rendering half an hour of
-video.
+**Dialogue, in the character's own voice.** *Speak this line* synthesises the
+shot's line using the speaking character's reference clip and transcript, so
+what you hear is their cloned voice, not a generic one. Who speaks is inferred
+when a shot has one character in it and chosen from a list when it has several,
+preferring whoever actually has a clip.
+
+It works **before the shot is rendered**. Synthesis and muxing are separate
+functions for that reason: finding out after half an hour of video that a
+cloned voice reads the line wrong is exactly the wrong order. You get a player
+next to the line immediately; when the clip does exist, the speech is also
+mixed over it, ducking the generated soundtrack rather than replacing it — H3's
+soundtrack is part of what the model made, and dropping it for one line would
+be a downgrade.
+
+Dubbing separately from rendering is deliberate in the other direction too: a
+line can be rewritten and re-spoken in seconds without touching a clip that
+took half an hour, and nothing in H3's documentation claims intelligible
+lip-synced speech from written text.
 
 **Open, not import.** The header's **Open** lists every storyboard on disk
 with what each folder actually holds — shot count, how many are rendered, and
@@ -200,8 +212,8 @@ client:
 
 | kind | Notes |
 | --- | --- |
-| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched — run `setup/prepare-moss-tts.vpipeline` from the workspace (~9 GB, one time). |
-| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
+| `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched — run `setup/prepare-moss-tts.vpipeline` from the workspace (~9 GB, one time). Roughly 27s for a short line on an M4 Pro. |
+| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Around 3x faster than MOSS for a short line, and the transcript conditions the clone. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
 | `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
 | `none` | Dialogue is stored but not spoken. |
 
@@ -230,6 +242,7 @@ Both HTTP contracts were read from MCC's source, not guessed.
 
 ```sh
 python3 tests/store_paths.py             # renaming, and an independent data dir
+python3 tests/speak_line.py              # who speaks, and previewing without a render
 node tests/edits-persist.mjs             # every edit reaches the server, not just the first
 node tests/poll-does-not-rebuild.mjs     # the poll must not rebuild a focused subtree
 ```
