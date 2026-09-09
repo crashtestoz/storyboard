@@ -313,6 +313,35 @@ class Store:
         self.save(slug, board)
         return slug, board
 
+    def reconcile_startup(self) -> list[str]:
+        """Demote run states that cannot still be true.
+
+        A shot left "running" or "queued" when the process exited has no one
+        watching it any more, so it would sit there forever claiming to be in
+        progress. Called once at startup, before any render can be active —
+        doing it in migrate() would corrupt the state of a live run, since the
+        orchestrator re-reads the board between shots.
+        """
+        touched: list[str] = []
+        for entry in self.list_boards():
+            slug = entry["slug"]
+            try:
+                board = self.load(slug)
+            except (OSError, ValueError):
+                continue
+            changed = False
+            for shot in board.get("shots") or []:
+                if shot.get("status") == "running":
+                    shot["status"] = "interrupted"
+                    changed = True
+                    touched.append(f"{slug}/{shot.get('title') or shot['id']}")
+                elif shot.get("status") == "queued":
+                    shot["status"] = "draft"
+                    changed = True
+            if changed:
+                self.save(slug, board)
+        return touched
+
     # -- schema ----------------------------------------------------------- #
 
     def migrate(self, board: dict[str, Any]) -> dict[str, Any]:

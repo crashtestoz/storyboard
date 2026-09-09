@@ -93,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     store = Store(workspace=workspace)
+    # Anything left mid-run by a previous process is not running now.
+    stranded = store.reconcile_startup()
     orch = Orchestrator(backend=backend, store=store, workspace=workspace)
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
                   tts_engines=tts_engines, default_tts=args.tts)
@@ -138,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"             [{'ok  ' if tok else '--  '}] {kind}"
               + ("" if tok else f"  ({tmsg.splitlines()[0][:86]})"))
     print("")
+    if stranded:
+        print(f"  recovered   {len(stranded)} shot(s) left mid-run by a previous "
+              "process, now marked interrupted:")
+        for name in stranded[:5]:
+            print(f"              {name}")
+        print("")
     print("  Ctrl-C to stop.")
     print("")
 
