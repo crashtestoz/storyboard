@@ -1114,14 +1114,20 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 /* Generated locally with mflux (Z-Image-Turbo) and remapped into the panel's
    tonal range, so it hints at a missing frame without competing with the real
    ones beside it. */
-.shot-placeholder {
+.shot-thumb img.shot-placeholder {
+  /* Matched on the class AND the element, because `.shot-thumb img` above is
+     more specific than a lone class and was silently winning — object-fit
+     here had no effect at all until this selector.
+
+     Edge to edge: the placeholder is 640x368 (1.74:1) and a card thumb is
+     close to 16:9, so `cover` fills it with roughly 2% off the sides. The
+     whole little scene still reads, and it fills the frame the way a real
+     first frame would. */
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  /* contain, not cover: this is a whole small scene, and cropping it to the
-     card's aspect leaves you looking at one corner of a cloud. */
-  object-fit: contain;
+  object-fit: cover;
   opacity: 1;
 }
 
@@ -1130,18 +1136,19 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   z-index: 1;
 }
 
-.preview-placeholder {
-  /* Centred at a capped size rather than stretched across the pane: filling a
-     large preview with a line drawing of a hill reads as a broken image, not
-     as "nothing here yet". */
+.preview-stage img.preview-placeholder {
+  /* Same specificity problem as the card: `.preview-stage img` above sets
+     object-fit: contain and outranks a lone class, so this had to match the
+     element too.
+
+     Edge to edge. The placeholder is 640x368 (1.74:1) and the stage is 16:9
+     (1.78:1), so `cover` fills it with about 2% cropped off the sides — the
+     whole scene, filling the frame rather than floating in the middle of it. */
   position: absolute;
   inset: 0;
-  margin: auto;
-  width: auto;
-  height: auto;
-  max-width: min(420px, 62%);
-  max-height: 58%;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   opacity: 1;
 }
 
