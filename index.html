@@ -20,7 +20,7 @@
 
       <select id="boardPicker" class="board-picker" title="Open a storyboard"></select>
       <button class="btn btn-ghost btn-sm" id="btnNewBoard" title="New storyboard">New</button>
-      <button class="btn btn-ghost btn-sm" id="btnImport" title="Import a storyboard JSON">Import</button>
+      <button class="btn btn-ghost btn-sm" id="btnOpen" title="Open a storyboard">Open</button>
       <button class="btn btn-ghost btn-sm" id="btnExport" title="Download this storyboard">Export</button>
       <button class="btn btn-ghost btn-sm" id="btnSettings" title="Project settings">⚙ Settings</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
@@ -118,9 +118,33 @@
         <button class="btn btn-ghost btn-sm" id="pickerClose">Close</button>
       </div>
       <div class="modal-body" id="pickerGrid"></div>
+      <div class="modal-foot" id="pickerFoot"></div>
+    </div>
+  </div>
+
+  <div id="openDialog" class="modal" hidden>
+    <div class="modal-card" style="width:min(760px,100%)">
+      <div class="modal-head">
+        <span>Open a storyboard</span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-ghost btn-sm" id="openClose">Close</button>
+      </div>
+      <div class="modal-body" style="display:block" id="openList"></div>
       <div class="modal-foot">
-        Images already in the workspace. Per-frame folders are excluded — use
-        “chain from previous shot” for that.
+        <div>
+          Each row is one project's <code>storyboard.json</code> — the whole
+          board. Opening one edits that file in place.
+        </div>
+        <div style="margin-top:var(--sp-2)">
+          <button class="btn btn-sm btn-ghost" id="openElsewhere">
+            Copy in a board file from elsewhere…
+          </button>
+          <span class="hint">
+            — makes a new project here. A browser hands over a file's contents,
+            not its location, so this cannot open one in place; renders stay
+            with the original.
+          </span>
+        </div>
       </div>
     </div>
   </div>

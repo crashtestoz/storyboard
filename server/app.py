@@ -157,6 +157,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static(path)
         except BrokenPipeError:
             pass
+        except ValueError as exc:
+            # A bad query parameter is the caller's mistake, not the server's.
+            # do_POST already drew this distinction; GET reported 500 for it.
+            self._err(400, str(exc))
+        except FileNotFoundError as exc:
+            self._err(404, str(exc))
         except Exception as exc:  # noqa: BLE001
             self._err(500, f"{type(exc).__name__}: {exc}")
 
@@ -257,7 +263,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(raw)
 
         if path == "/api/library":
-            return self._send_json({"images": ctx.store.library()})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            kind = (q.get("kind") or ["image"])[0]
+            if kind not in Store.LIBRARY_EXTS:
+                raise ValueError(
+                    f"unknown library kind {kind!r} "
+                    f"(expected {', '.join(sorted(Store.LIBRARY_EXTS))})"
+                )
+            items = ctx.store.library(kind=kind)
+            # "images" is kept alongside "items" so an older cached page keeps
+            # working after a reload lands mid-session.
+            return self._send_json({"items": items, "images": items})
 
         if path == "/api/status":
             return self._send_json(ctx.orch.status())

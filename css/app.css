@@ -1327,3 +1327,101 @@ textarea.ta-tall {
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
+
+/* --- audio in the picker and in a reference slot -------------------------- */
+
+/* Audio has no thumbnail, so it lists rather than tiles. */
+.picker-list {
+  display: flex !important;
+  flex-direction: column;
+  gap: var(--sp-2) !important;
+}
+
+.pick-audio {
+  display: grid;
+  grid-template-columns: 34px 1fr minmax(180px, 240px);
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.pick-audio-icon {
+  font-size: 20px;
+  color: var(--accent);
+  text-align: center;
+}
+
+.pick-audio-player { width: 100%; height: 32px; }
+
+/* A voice slot has to be taller than an image slot: it holds a name and a
+   player rather than a picture. */
+.ref-slot-audio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  justify-content: center;
+  padding: var(--sp-2);
+  height: auto;
+  min-height: 96px;
+}
+
+.ref-slot-player {
+  width: 100%;
+  height: 30px;
+}
+
+/* --- open dialog ---------------------------------------------------------- */
+
+.open-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+
+.open-row + .open-row { margin-top: var(--sp-2); }
+.open-row:hover { border-color: var(--accent); }
+.open-row.current { border-color: var(--accent); }
+
+.open-main { flex: 1; min-width: 0; }
+
+.open-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.open-tag {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, rgba(127, 127, 127, 0.18));
+  color: var(--text-faint);
+}
+
+.open-tag.warn { color: var(--warn, #e0a83a); }
+
+.open-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* The path is the point of the dialog: it says which file you are opening. */
+.open-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  opacity: 0.75;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+#openDialog { z-index: 115; }
