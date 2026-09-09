@@ -151,6 +151,10 @@ class JobSpec:
     expected_frames: int = 0
     # seconds; used for the runtime sanity check. 0 = unknown, skip the check.
     expected_seconds: float = 0.0
+    # wall-clock when the run started. Outputs older than this belong to an
+    # earlier run, which is how a stale file is told from a fresh one WITHOUT
+    # deleting the earlier one first.
+    started_at: float = 0.0
     # backend's own payload (vpipe: spec file + argv; comfyui: workflow graph)
     payload: dict[str, Any] = field(default_factory=dict)
     # human-readable summary shown in the UI
@@ -277,20 +281,34 @@ class Backend:
         )
 
         # 2. output manifest — the strongest signal
+        # A file left by an earlier run must not count for this one. Compared
+        # by modification time rather than by clearing the folder up front,
+        # because deleting first means an interrupted re-render destroys a
+        # perfectly good previous take.
+        cutoff = (spec.started_at or result.started_at or 0) - 2
+
         missing: list[str] = []
         empty: list[str] = []
+        stale: list[str] = []
         for p in spec.expected_outputs:
             if not p.exists():
                 missing.append(p.name)
             elif p.stat().st_size < 1024:
                 empty.append(f"{p.name} ({p.stat().st_size} B)")
-        manifest_ok = not missing and not empty
-        if missing or empty:
+            elif cutoff and p.stat().st_mtime < cutoff:
+                stale.append(p.name)
+        manifest_ok = not missing and not empty and not stale
+        if missing or empty or stale:
             bits = []
             if missing:
                 bits.append("missing: " + ", ".join(missing))
             if empty:
                 bits.append("suspiciously small: " + ", ".join(empty))
+            if stale:
+                bits.append(
+                    "not written by this run (left from an earlier one): "
+                    + ", ".join(stale)
+                )
             detail = "; ".join(bits)
         else:
             detail = ", ".join(
@@ -300,7 +318,13 @@ class Backend:
 
         # 3. frame count
         if spec.frames_dir and spec.expected_frames:
-            got = len(list(spec.frames_dir.glob("*.png"))) if spec.frames_dir.exists() else 0
+            got = 0
+            if spec.frames_dir.exists():
+                got = sum(
+                    1
+                    for f in spec.frames_dir.glob("*.png")
+                    if not cutoff or f.stat().st_mtime >= cutoff
+                )
             frames_ok = got >= spec.expected_frames
             checks.append(
                 Check(
