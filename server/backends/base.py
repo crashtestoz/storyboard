@@ -407,9 +407,14 @@ class ShotPaths:
     for what goes inside a generated pipeline file.
     """
 
-    workspace: Path          # cwd the backend will run in
-    abs_dir: Path            # <workspace>/<rel_dir>
-    rel_dir: str             # e.g. "projects/falcon/shots/02"
+    workspace: Path          # cwd the backend will run in (vpipe's models live here)
+    abs_dir: Path            # <data_dir>/<rel_dir>
+    rel_dir: str             # e.g. "projects/falcon/shots/02", relative to data_dir
+    data_dir: Path | None = None   # where projects live; defaults to workspace
+
+    def __post_init__(self) -> None:
+        if self.data_dir is None:
+            self.data_dir = self.workspace
 
     @property
     def abs_frames(self) -> Path:
@@ -418,6 +423,23 @@ class ShotPaths:
     @property
     def rel_frames(self) -> str:
         return f"{self.rel_dir}/frames"
+
+    # Paths that go *inside* a generated pipeline file are absolute, because
+    # the data directory need not be under the workspace vpipe is launched
+    # from — and vpipe resolves a relative path against its cwd. Absolute
+    # works either way (verified: vpipe writes outside the workspace when no
+    # file_sandbox is declared, which ours are not).
+    @property
+    def pipe_dir(self) -> str:
+        return str(self.abs_dir)
+
+    @property
+    def pipe_frames(self) -> str:
+        return str(self.abs_frames)
+
+    def pipe_path(self, rel: str) -> str:
+        """An absolute path for a data-dir-relative stored path."""
+        return str((self.data_dir / rel).resolve())
 
     def ensure(self) -> None:
         self.abs_dir.mkdir(parents=True, exist_ok=True)

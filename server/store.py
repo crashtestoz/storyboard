@@ -133,13 +133,34 @@ def default_board(name: str) -> dict[str, Any]:
 
 @dataclass
 class Store:
-    """Project folders under ``<workspace>/projects``."""
+    """Project folders under ``<data_dir>/projects``.
+
+    Two roots, deliberately separate:
+
+    ``workspace``
+        Where vpipe is launched from. Not ours — vpipe resolves ``models/``
+        and its LMDB model registry relative to it, so it is dictated by
+        where the models were prepared. Read only, for offering existing
+        renders to pick from.
+
+    ``data_dir``
+        Where the storyboards and their uploads live. Ours entirely, and by
+        default the workspace so nothing moves for an existing install — but
+        it can be anywhere, which is the point: a storyboard and its
+        references are the user's documents and should not have to live inside
+        another tool's runtime directory to be usable.
+    """
 
     workspace: Path
+    data_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.data_dir is None:
+            self.data_dir = self.workspace
 
     @property
     def root(self) -> Path:
-        return self.workspace / "projects"
+        return self.data_dir / "projects"
 
     # -- locations ------------------------------------------------------- #
 
@@ -154,6 +175,12 @@ class Store:
         return self.project_dir(slug) / "refs"
 
     def shot_rel_dir(self, slug: str, index: int) -> str:
+        """A shot's directory, relative to ``data_dir``.
+
+        This is the form stored in a board and served under ``/media/``. It
+        stays relative so a board keeps working when the data directory moves,
+        which is what makes a project folder portable.
+        """
         return f"projects/{slugify(slug)}/shots/{index:02d}"
 
     # -- listing --------------------------------------------------------- #
@@ -182,7 +209,7 @@ class Store:
         return out
 
     def library(self, limit: int = 300) -> list[dict[str, Any]]:
-        """Images already in the workspace, for picking without re-uploading.
+        """Images already in the projects tree, for picking without re-uploading.
 
         Covers uploaded refs, loose images dropped into a project folder by
         hand, and rendered stills. Per-frame directories are skipped
@@ -205,7 +232,7 @@ class Store:
             parts = path.relative_to(self.root).parts
             if any(part.startswith("frames") for part in parts[:-1]):
                 continue
-            rel = path.relative_to(self.workspace)
+            rel = path.relative_to(self.data_dir)
             project = path.relative_to(self.root).parts[0]
             out.append(
                 {
@@ -303,7 +330,7 @@ class Store:
             shutil.rmtree(d)
 
     def adopt(self, slug: str, rel_path: str) -> dict[str, Any]:
-        """Copy an existing workspace file into this project's ``refs/``.
+        """Copy an existing file from the projects tree into this project's ``refs/``.
 
         Picking an image from another project would otherwise leave this board
         pointing into that project's folder: deleting the other project breaks
@@ -311,9 +338,9 @@ class Store:
         not contain. Copying keeps the promise the layout is built on — a
         project folder holds everything that project needs.
         """
-        src = (self.workspace / rel_path).resolve()
-        # never let a crafted path reach outside the workspace
-        src.relative_to(self.workspace.resolve())
+        src = (self.data_dir / rel_path).resolve()
+        # never let a crafted path reach outside the data directory
+        src.relative_to(self.data_dir.resolve())
         if not src.is_file():
             raise FileNotFoundError(f"no such file: {rel_path}")
 
@@ -331,7 +358,7 @@ class Store:
             if not dest.exists():
                 shutil.copy2(src, dest)
 
-        rel = dest.relative_to(self.workspace)
+        rel = dest.relative_to(self.data_dir)
         return {
             "path": str(rel).replace("\\", "/"),
             "url": "/media/" + str(rel).replace("\\", "/"),

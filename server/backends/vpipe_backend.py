@@ -282,7 +282,7 @@ class VpipeBackend(Backend):
             expected_seconds=expected_seconds,
             payload={
                 "spec_path": str(spec_path),
-                "rel_spec": f"{paths.rel_dir}/shot.vpipeline",
+                "rel_spec": f"{paths.pipe_dir}/shot.vpipeline",
                 "cwd": str(self.workspace),
                 "model": model,
                 "frames": frames,
@@ -440,7 +440,7 @@ class VpipeBackend(Backend):
 
     def _still_spec(self, shot, paths, prompt, w, h, steps, seed):
         """Krea-2 Turbo single image."""
-        out_rel = f"{paths.rel_dir}/still.jpeg"
+        out_rel = f"{paths.pipe_dir}/still.jpeg"
         stages = [
             _model_select("krea/Krea-2-Turbo"),
             _text_prompt(prompt),
@@ -747,7 +747,7 @@ def _decode_and_save(paths: ShotPaths, audio: bool) -> list[dict]:
             "type": "save-image",
             "iports": [{"src": "vae-decode", "oport": 0}],
             "config": {
-                "path": f"{paths.rel_frames}/frame-%04d.png",
+                "path": f"{paths.pipe_frames}/frame-%04d.png",
                 "format": "png",
             },
         },
@@ -773,7 +773,7 @@ def _decode_and_save(paths: ShotPaths, audio: bool) -> list[dict]:
             "type": "save-video",
             "iports": save_iports,
             "config": {
-                "output_url": f"{paths.rel_dir}/clip.mp4",
+                "output_url": f"{paths.pipe_dir}/clip.mp4",
                 "enable_video": True,
                 "enable_audio": audio,
             },
@@ -881,14 +881,24 @@ def _shot_characters(shot: dict, project: dict) -> list[dict]:
 
 
 def _ref_source(ref: Any, paths: ShotPaths) -> str | None:
-    """Path a load-image stage can open, relative to the vpipe workspace."""
+    """Absolute path a load-image stage can open.
+
+    Stored reference paths are relative to the data directory, which keeps a
+    board portable. They are made absolute here rather than left relative,
+    because the data directory is not necessarily under the workspace vpipe
+    runs in.
+    """
     if not ref:
         return None
     if isinstance(ref, str):
-        return ref
-    if ref.get("kind") == "chain":
-        return ref.get("resolved") or None
-    return ref.get("path") or ref.get("resolved") or None
+        rel = ref
+    elif ref.get("kind") == "chain":
+        rel = ref.get("resolved") or ""
+    else:
+        rel = ref.get("path") or ref.get("resolved") or ""
+    if not rel:
+        return None
+    return rel if Path(rel).is_absolute() else paths.pipe_path(rel)
 
 
 def _estimate_seconds(w: int, h: int, frames: int, steps: int,

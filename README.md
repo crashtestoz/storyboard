@@ -19,7 +19,9 @@ Design rationale and the orchestrator contract:
 ./serve.sh --lan                        # reachable on your LAN
 ./serve.sh --port 8080
 ./serve.sh --workspace DIR              # where vpipe is launched from
+./serve.sh --data-dir DIR               # where your storyboards live
 ./serve.sh --tts qwen3-clone            # default engine id (see tts-services.json)
+./serve.sh --llm ollama-local           # default rewrite model (see llm-services.json)
 ```
 
 Standard library Python only — nothing to install. Run the script, it prints a
@@ -40,10 +42,29 @@ and `OpenMOSS-Team/MOSS-Audio-Tokenizer`. The engine reports itself
 unavailable until both are present, and treats a directory containing
 `*.part` as still downloading.
 
-**The workspace matters.** vpipe resolves `models/` and its LMDB model
-registry relative to the directory it is launched from, so `--workspace` must
-be the directory the models were prepared in. The startup banner lists which
-models and speech engines it can actually see.
+**Two directories, on purpose.**
+
+`--workspace` is vpipe's. It resolves `models/` and its LMDB model registry
+relative to the directory it is launched from, so this must be the directory
+the models were prepared in — it is not ours to choose.
+
+`--data-dir` is yours: storyboards and uploaded references. It **defaults to
+the workspace**, so an existing install is unaffected, but it can be anywhere,
+which is the point — a storyboard and its reference images are documents, and
+should not have to live inside another tool's runtime directory to be usable.
+Nothing is moved automatically when you point it somewhere new; the startup
+banner names any boards left behind in the old location and prints the `mv` to
+move them, because they are your files.
+
+Paths stored in a board stay relative to the data directory, which is what
+keeps a project folder portable. Paths written *into* a generated pipeline are
+absolute, since the data directory need not sit under the workspace vpipe runs
+in. (Verified: vpipe reads and writes outside its workspace, because the file
+sandbox in `common/session.cc` is opt-in via a `file_sandbox` config key that
+these pipelines do not set.)
+
+The startup banner lists both directories and which models, speech engines and
+rewrite models it can actually see.
 
 ## Where things live
 
@@ -178,6 +199,17 @@ this tracked file.
 
 Both HTTP contracts were read from MCC's source, not guessed.
 
+## Tests
+
+```sh
+python3 tests/store_paths.py             # renaming, and an independent data dir
+node tests/poll-does-not-rebuild.mjs     # needs the server and a CDP Chrome, see the file
+```
+
+Both cover the same class of bug: something moves under state that has already
+recorded where it was. Renaming rewrites recorded paths; the poll must not
+rebuild a subtree under a focused input.
+
 ## Why a run is judged, not just started
 
 Every failure encountered while driving vpipe by hand **exited with code 0**.
@@ -216,3 +248,6 @@ output — and carries the caret across when it does.
   implementation.
 - Board editing is a whole-board save, so two browser tabs on one board are
   last-write-wins.
+- `library()` (the pick-an-existing-image grid) scans the data directory only.
+  Images sitting elsewhere in the vpipe workspace are not offered; upload them
+  or copy them into a project folder.
