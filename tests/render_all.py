@@ -337,6 +337,19 @@ def test_clip_choice(tmp: Path) -> None:
     os.utime(dubbed, (clip.stat().st_mtime + 10,) * 2)
     check("the dubbed clip when it is newer", shot_clip(d) == dubbed,
           "the spoken line belongs in the cut")
+    shot = {
+        "dialogue": "Stay on target.",
+        "dialogueStyle": "urgent whisper",
+        "dialogueSpokenText": "Stay on target.",
+        "dialogueSpokenStyle": "calm",
+    }
+    check("an old voice direction makes the dub stale",
+          shot_clip(d, shot) == clip,
+          "clip-dubbed.mp4 has the wrong delivery")
+    shot["dialogueSpokenStyle"] = "urgent whisper"
+    check("a matching voice direction keeps the dub",
+          shot_clip(d, shot) == dubbed,
+          "clip-dubbed.mp4 matches the current delivery")
 
     os.utime(dubbed, (clip.stat().st_mtime - 10,) * 2)
     check("the plain clip when the dub predates a re-render",

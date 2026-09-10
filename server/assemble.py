@@ -67,7 +67,7 @@ class AssemblyResult:
         }
 
 
-def shot_clip(shot_dir: Path) -> Path | None:
+def shot_clip(shot_dir: Path, shot: dict[str, Any] | None = None) -> Path | None:
     """The clip to put in the cut for this shot, or None if there isn't one."""
     clip = shot_dir / "clip.mp4"
     if not (clip.exists() and clip.stat().st_size > 1024):
@@ -78,6 +78,13 @@ def shot_clip(shot_dir: Path) -> Path | None:
         and dubbed.stat().st_size > 1024
         and dubbed.stat().st_mtime >= clip.stat().st_mtime
     ):
+        if shot is not None:
+            line = (shot.get("dialogue") or "").strip()
+            spoken = (shot.get("dialogueSpokenText") or "").strip()
+            style = (shot.get("dialogueStyle") or "").strip()
+            spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
+            if line and (spoken != line or spoken_style != style):
+                return clip
         return dubbed
     return clip
 
@@ -114,7 +121,7 @@ def final_stale_reason(board: dict[str, Any], project_dir: Path) -> str:
 
     built = out.stat().st_mtime
     for i, shot in enumerate(board.get("shots") or []):
-        clip = shot_clip(project_dir / "shots" / f"{i + 1:02d}")
+        clip = shot_clip(project_dir / "shots" / f"{i + 1:02d}", shot)
         if clip is None:
             continue
         if clip.stat().st_mtime > built:
@@ -124,7 +131,10 @@ def final_stale_reason(board: dict[str, Any], project_dir: Path) -> str:
     have = sum(
         1
         for i in range(len(board.get("shots") or []))
-        if shot_clip(project_dir / "shots" / f"{i + 1:02d}") is not None
+        if shot_clip(
+            project_dir / "shots" / f"{i + 1:02d}",
+            (board.get("shots") or [])[i],
+        ) is not None
     )
     if have != listed:
         return f"assembled from {listed} clip(s); {have} are available now"
@@ -151,15 +161,20 @@ def unmixed_dialogue(board: dict[str, Any], project_dir: Path) -> dict[str, str]
         clip = shot_dir / "clip.mp4"
         if not (speech.exists() and clip.exists()):
             continue
-        if shot_clip(shot_dir) != clip:
+        if shot_clip(shot_dir, shot) != clip:
             continue    # the dubbed clip is current, so the line is in the cut
         spoken = (shot.get("dialogueSpokenText") or "").strip()
-        out[shot["id"]] = (
-            "the line was edited after it was last spoken — speak it again"
-            if spoken and spoken != line
-            else "spoken, but not mixed onto the clip — press “Speak this line” "
-                 "to lay it down"
-        )
+        style = (shot.get("dialogueStyle") or "").strip()
+        spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
+        if spoken and spoken != line:
+            out[shot["id"]] = "the line was edited after it was last spoken — generate it again"
+        elif spoken_style != style:
+            out[shot["id"]] = "the voice direction changed after it was last spoken — generate it again"
+        else:
+            out[shot["id"]] = (
+                "spoken, but not mixed onto the clip — press “Generate” "
+                "to lay it down"
+            )
     return out
 
 

@@ -46,6 +46,14 @@
 
       <section>
         <div class="section-label">
+          Final video
+          <span class="hint">— every shot, in order</span>
+        </div>
+        <div class="final-box" id="finalVideo"></div>
+      </section>
+
+      <section>
+        <div class="section-label">
           Scene description
           <span class="hint">— reused every shot</span>
         </div>
@@ -87,19 +95,13 @@
       </section>
 
       <section>
-        <div class="section-label">
-          Queue
-          <span class="hint">— serial, one at a time</span>
-        </div>
-        <div class="queue-list" id="queueList"></div>
-      </section>
-
-      <section>
-        <div class="section-label">
-          Final video
-          <span class="hint">— every shot, in order</span>
-        </div>
-        <div class="final-box" id="finalVideo"></div>
+        <details class="queue-box" id="queueBox">
+          <summary>
+            <span class="section-label">Queue</span>
+            <span class="queue-summary" id="queueSummary"></span>
+          </summary>
+          <div class="queue-list" id="queueList"></div>
+        </details>
       </section>
 
     </aside>

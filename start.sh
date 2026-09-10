@@ -111,11 +111,12 @@ if [[ "$RESTART" == 1 ]]; then
 
   LOG="$ROOT/server.log"
   if [[ "${#ARGS[@]}" -gt 0 ]]; then
-    nohup "$PY" -u -m server "${ARGS[@]}" >"$LOG" 2>&1 &
+    nohup "$PY" -u -m server "${ARGS[@]}" >"$LOG" 2>&1 < /dev/null &
   else
-    nohup "$PY" -u -m server >"$LOG" 2>&1 &
+    nohup "$PY" -u -m server >"$LOG" 2>&1 < /dev/null &
   fi
   PID="$!"
+  disown "$PID" 2>/dev/null || true
   echo "$PID" > "$ROOT/server.pid"
   sleep 0.5
   if ! kill -0 "$PID" >/dev/null 2>&1; then

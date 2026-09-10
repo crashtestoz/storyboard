@@ -99,11 +99,12 @@ const API = {
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
 
   // `text` is sent so an unsaved line can still be previewed.
-  dub: (slug, shotId, text) =>
+  dub: (slug, shotId, text, style) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`,
-        text === undefined ? {} : { text }),
+        text === undefined ? {} : { text, style: style || "" }),
 
-  render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
+  render: (slug, shotIds, board) =>
+    req("POST", "/api/render", { slug, shotIds, board }),
 
   // Join the rendered clips into one video. A whole-board render does this at
   // the end; this is the same pass on demand, for when nothing needs

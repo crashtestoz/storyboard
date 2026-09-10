@@ -145,6 +145,7 @@ def speak_line(
     voice: str | None = None,
     reference: Path | None = None,
     reference_text: str = "",
+    style: str = "",
 ) -> SpeechResult:
     """Synthesise *text* to ``dialogue.wav``. No video involved.
 
@@ -163,6 +164,7 @@ def speak_line(
         voice=voice,
         reference=reference,
         reference_text=reference_text,
+        style=style,
     )
     if not speech.ok:
         return speech
@@ -186,6 +188,7 @@ def dub_shot(
     voice: str | None = None,
     reference: Path | None = None,
     reference_text: str = "",
+    style: str = "",
     keep_original_audio: bool = True,
 ) -> DubResult:
     """Synthesise *text*, and mux it onto *clip* if the clip exists.
@@ -195,7 +198,8 @@ def dub_shot(
     no reason to withhold it until the shot has been rendered.
     """
     speech = speak_line(engine, shot_dir=shot_dir, text=text, voice=voice,
-                        reference=reference, reference_text=reference_text)
+                        reference=reference, reference_text=reference_text,
+                        style=style)
     if not speech.ok:
         return DubResult(error=speech.error or "speech synthesis failed",
                          speech=speech, log=speech.log)

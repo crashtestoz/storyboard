@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import time
 import urllib.request
@@ -44,6 +45,17 @@ def _clip(text: str, limit: int = 90) -> str:
     """A quotable one-liner for a log: collapsed, shortened, quoted."""
     t = " ".join((text or "").split())
     return f'"{t[:limit]}…"' if len(t) > limit else f'"{t}"'
+
+
+def _qwen_style_instruction(style: str) -> str:
+    style = (style or "").strip()
+    if not style:
+        return ""
+    if "[STYLE / VOICE DIRECTION]" in style or "[TEXT TO SPEAK]" in style:
+        style = re.sub(r"(?is)\[TEXT TO SPEAK\].*$", "", style).strip()
+        style = re.sub(r"(?is)^\[STYLE / VOICE DIRECTION\]\s*", "", style).strip()
+        style = re.sub(r"(?is)\[END\]\s*$", "", style).strip()
+    return style
 
 
 def _post(url: str, payload: dict, timeout: int) -> tuple[bytes, str, str]:
@@ -149,6 +161,7 @@ class Qwen3CloneTTS(TTSEngine):
         reference: Path | None = None,
         reference_text: str | None = None,
         language: str = "en",
+        style: str = "",
         speed: float = 1.0,
     ) -> SpeechResult:
         ok, msg = self.health()
@@ -196,7 +209,12 @@ class Qwen3CloneTTS(TTSEngine):
             log.append(f"[INFO] reference text: {_clip(ref_text)}")
 
         log.append(f"[INFO] speaking {len(text.strip())} chars: {_clip(text)}")
+        style = (style or "").strip()
         log.append(f"[INFO] language={language} speed={speed}")
+        if style:
+            log.append(f"[INFO] style: {_clip(style)}")
+            log.append("[INFO] style sent through Qwen instruct field")
+        request_style = _qwen_style_instruction(style)
 
         body, ctype, err = _post(
             self.base_url + "/synthesize",
@@ -206,7 +224,7 @@ class Qwen3CloneTTS(TTSEngine):
                 "reference_text": ref_text,
                 "text": text.strip(),
                 "language": language,
-                "style": "",
+                "style": request_style,
                 "speed": speed,
             },
             SYNTH_TIMEOUT,

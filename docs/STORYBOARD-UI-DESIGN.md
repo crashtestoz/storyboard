@@ -90,7 +90,8 @@ Project
   └─ Shot[]  (ordered)
        ├─ prompt (text)                — this shot's action/camera/mood only
        ├─ start_ref: upload | "last frame of shot N" | none
-       ├─ end_ref:   upload | none               (optional — anchors both ends)
+       │             FL2VA: frame anchor; Ref2VA: per-shot image reference
+       ├─ end_ref:   upload | none               (FL2VA optional end anchor)
        ├─ model: fl2va | ref2va | krea2-still
        ├─ resolution, frames/duration, steps, seed
        └─ status: draft | queued | running | done | failed
@@ -110,7 +111,8 @@ right template by `model`:
 - `fl2va`, start/end set → same + `load-image → image-resample → vae-encode`
   chain(s) wired to ports 5/6
 - `ref2va` → `video-ref-encoder` template, `references` list built from
-  `style_refs`
+  shot character portraits, project `style_refs`, the shot reference image,
+  and voice clips within Ref2VA's image/audio reference limits
 - `krea2-still` → the still-image template, for fast per-shot previews
   before committing to a full clip
 

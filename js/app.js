@@ -81,6 +81,38 @@ const finalWhy = () => (state.stale && state.stale.final) || "";
    when the shot has no dialogue. */
 const dialogueWhy = (id) =>
   (state.stale && state.stale.dialogue && state.stale.dialogue[id]) || "";
+
+function downloadName(...parts) {
+  return parts
+    .filter(Boolean)
+    .join("-")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "download";
+}
+
+function setSpeakAudioBusy(row, busy) {
+  const au = row.querySelector && row.querySelector(".speak-player");
+  const dl = row.querySelector && row.querySelector(".speak-download");
+  if (au) {
+    if (busy) {
+      au.pause();
+      au.controls = false;
+      au.classList.add("busy");
+      au.setAttribute("aria-disabled", "true");
+    } else {
+      au.controls = true;
+      au.classList.remove("busy");
+      au.removeAttribute("aria-disabled");
+    }
+  }
+  if (dl) {
+    dl.classList.toggle("disabled", !!busy);
+    dl.setAttribute("aria-disabled", busy ? "true" : "false");
+    dl.tabIndex = busy ? -1 : 0;
+  }
+}
 const takeStale = (payload) => {
   if (payload && payload.stale) state.stale = payload.stale;
 };
@@ -332,7 +364,7 @@ function wireChrome() {
   $("#btnRender").addEventListener("click", async () => {
     await saveNow();
     try {
-      state.status = await API.render(state.slug);
+      state.status = await API.render(state.slug, undefined, state.board);
       state.awaitingBatch = true;
       startPolling();
       render();
@@ -1091,9 +1123,25 @@ function renderRail() {
 
   renderCast();
 
+  const queueShots = shots();
+  const queueBusy = !!(state.status && state.status.busy);
+  const running = queueShots.filter((raw) => view(raw).status === "running").length;
+  const queued = queueShots.filter((raw) => view(raw).status === "queued").length;
+  const changed = queueShots.filter((raw) => !!staleWhy(raw.id)).length;
+  const failed = queueShots.filter((raw) =>
+    ["failed", "blocked", "review", "interrupted"].includes(view(raw).status)
+  ).length;
+  const summary = [`${queueShots.length} shot(s)`];
+  if (running) summary.push(`${running} running`);
+  if (queued) summary.push(`${queued} queued`);
+  if (changed) summary.push(`${changed} changed`);
+  if (failed) summary.push(`${failed} need attention`);
+  $("#queueSummary").textContent = summary.join(" · ");
+  if (queueBusy || failed > 0) $("#queueBox").open = true;
+
   const q = $("#queueList");
   q.innerHTML = "";
-  shots().forEach((raw, i) => {
+  queueShots.forEach((raw, i) => {
     const shot = view(raw);
     const row = el("div", "queue-row");
     row.dataset.id = raw.id;
@@ -1740,7 +1788,7 @@ function renderEditor() {
     const canClone = !!(engNow && engNow.supportsCloning);
     const willClone = !!(speaker && speaker.voice && speaker.voice.path && canClone);
 
-    const dubBtn = el("button", "btn btn-sm", raw.dialogueAudioUrl ? "Speak again" : "Speak this line");
+    const dubBtn = el("button", "btn btn-sm", "Generate");
     dubBtn.disabled = !engNow || !engNow.healthy;
     dubBtn.title = !engNow || !engNow.healthy
       ? (engNow && engNow.message) || "No speech engine selected — see ⚙ Settings"
@@ -1750,11 +1798,12 @@ function renderEditor() {
 
     dubBtn.onclick = async () => {
       dubBtn.disabled = true;
-      dubBtn.textContent = "speaking…";
+      dubBtn.textContent = "generating…";
+      setSpeakAudioBusy(dubRow, true);
       try {
         // send the line as typed; it may not be saved yet
-        const r = await API.dub(state.slug, raw.id, live().dialogue);
         const sh = live();
+        const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle);
         sh.dialogueAudioUrl = r.audioUrl;
         if (r.dubUrl) sh.dubUrl = r.dubUrl;
         if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
@@ -1797,6 +1846,11 @@ function renderEditor() {
       au.controls = true;
       au.preload = "none";
       dubRow.appendChild(au);
+      const dl = el("a", "btn btn-sm speak-download", "Download");
+      dl.href = raw.dialogueAudioUrl;
+      dl.download = `${downloadName(state.slug, raw.title || "shot", "dialogue")}.wav`;
+      dl.title = "Download this generated dialogue take";
+      dubRow.appendChild(dl);
     }
     if (raw.dubUrl) {
       dubRow.appendChild(el("span", "field-note", "mixed over the clip — see Output"));
@@ -1809,7 +1863,7 @@ function renderEditor() {
   one.addEventListener("click", async () => {
     await saveNow();
     try {
-      state.status = await API.render(state.slug, [raw.id]);
+      state.status = await API.render(state.slug, [raw.id], state.board);
       state.awaitingBatch = true;
       startPolling();
       render();
@@ -1922,13 +1976,26 @@ function renderEditor() {
       syncTabDots();
     });
     dlg.dataset.fkey = "dialogue";
+    const style = el("textarea", "ta-compact");
+    style.value = raw.dialogueStyle || "";
+    style.placeholder =
+      "Voice direction for the cloned take, not spoken aloud.\n" +
+      "Example: tired, quiet, breathy, slight smile, urgent whisper.\n" +
+      "For Qwen-style TTS you can paste a full [STYLE / VOICE DIRECTION] block.";
+    style.addEventListener("input", () => {
+      live().dialogueStyle = style.value;
+      markDirty();
+    });
+    style.dataset.fkey = "dialogue-style";
     const dp = el("div");
     dp.append(
       paneHint("drives mouth movement; the final voice is mixed in separately"),
-      dlg
+      dlg,
+      paneHint("voice direction — sent to compatible speech engines, not spoken aloud"),
+      style
     );
     // Speaking the line belongs with the line. It used to hang off the panel
-    // below the tab strip, which put a "Speak again" button and an audio
+    // below the tab strip, which put a speech-generation button and an audio
     // player under the Prompt, Sound accents and Resolved tabs as well —
     // controls for something none of those tabs is about.
     if (panelDubRow) {
@@ -2063,20 +2130,32 @@ function renderEditor() {
     }
     host.appendChild(refPanel);
   } else if (cap && cap.supportsStyleRefs) {
-    const note = el("div", "panel");
-    note.style.marginTop = "var(--sp-3)";
-    note.appendChild(el("div", "section-label", "References"));
-    note.appendChild(
+    const refPanel = el("div", "panel");
+    refPanel.style.marginTop = "var(--sp-3)";
+    refPanel.appendChild(el("div", "section-label", "Reference images"));
+
+    const slots = el("div", "ref-slots");
+    slots.appendChild(
+      refSlot(
+        "Shot reference image",
+        raw,
+        "startRef",
+        "Choose a shot reference image"
+      )
+    );
+    refPanel.appendChild(slots);
+
+    refPanel.appendChild(
       el(
         "div",
         "hint-body",
-        `${cap.label.split("—")[0].trim()} conditions on the project's style ` +
-          `references (up to ${cap.maxStyleRefs}) rather than frame anchors — ` +
-          `they carry subject and style across the whole clip, so this model ` +
-          `offers no start/end frame.`
+        `${cap.label.split("—")[0].trim()} uses reference images rather than ` +
+          `start/end frame anchors. Character portraits and project style ` +
+          `references are included automatically; this shot image is added as ` +
+          `an extra subject/style reference for this clip.`
       )
     );
-    host.appendChild(note);
+    host.appendChild(refPanel);
   }
 
   // params
@@ -2769,7 +2848,7 @@ function diagnostic(raw, shot) {
   again.addEventListener("click", async () => {
     await saveNow();
     try {
-      state.status = await API.render(state.slug, [raw.id]);
+      state.status = await API.render(state.slug, [raw.id], state.board);
       state.awaitingBatch = true;
       startPolling();
       render();
@@ -2956,7 +3035,7 @@ function select(options, value, onChange) {
   return s;
 }
 
-function refSlot(label, shot, key) {
+function refSlot(label, shot, key, pickerTitle = null) {
   const ref = shot[key];
   const slot = el("div", "ref-slot");
   if (ref) {
@@ -2982,7 +3061,7 @@ function refSlot(label, shot, key) {
     const l = el("div", "ref-slot-label");
     l.append(el("strong", null, label), el("span", null, "click to choose · or drop an image"));
     slot.appendChild(l);
-    slot.addEventListener("click", () => pickRef(shot, key));
+    slot.addEventListener("click", () => pickRef(shot, key, pickerTitle));
     slot.ondragover = (e) => {
       e.preventDefault();
       slot.classList.add("dropping");
@@ -3210,9 +3289,9 @@ async function chooseMedia(title, kind) {
   });
 }
 
-async function pickRef(shot, key) {
+async function pickRef(shot, key, pickerTitle = null) {
   const chosen = await chooseImage(
-    key === "startRef" ? "Choose a start frame" : "Choose an end frame"
+    pickerTitle || (key === "startRef" ? "Choose a start frame" : "Choose an end frame")
   );
   if (!chosen) return;
   shot[key] = chosen;
