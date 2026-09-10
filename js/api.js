@@ -60,6 +60,9 @@ const API = {
   rewrite: (slug, shotId, text, service) =>
     req("POST", "/api/rewrite", { slug, shotId, text, service }),
 
+  describeCharacter: (image, name, description, service) =>
+    req("POST", "/api/describe-character", { image, name, description, service }),
+
   // Returns the NEW slug: renaming moves the project folder, so the caller
   // has to stop using the old one.
   renameBoard: (slug, name) =>
@@ -95,6 +98,17 @@ const API = {
         text === undefined ? {} : { text }),
 
   render: (slug, shotIds) => req("POST", "/api/render", { slug, shotIds }),
+
+  // Join the rendered clips into one video. A whole-board render does this at
+  // the end; this is the same pass on demand, for when nothing needs
+  // re-rendering and only the cut is out of date.
+  assemble: (slug) => req("POST", "/api/assemble", { slug }),
+
+  // "This clip really is a render of what the board says now" — an assertion
+  // the user is entitled to make, and the only alternative to paying for a
+  // re-render to prove it.
+  accept: (slug, shotId) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept`, {}),
   stop: () => req("POST", "/api/stop"),
   status: () => req("GET", "/api/status"),
 };

@@ -205,12 +205,48 @@ def dub_shot(
         # Nothing to lay it over yet; the line itself is still the point.
         return DubResult(ok=True, video=None, audio=speech_path, speech=speech)
 
+    muxed, error, log, warning = mux_speech(
+        clip=clip, speech=speech_path, shot_dir=shot_dir,
+        speech_seconds=speech.seconds,
+        keep_original_audio=keep_original_audio,
+    )
+    if error:
+        return DubResult(error=error, speech=speech, log=log)
+    if muxed is None:
+        # ffmpeg missing: the line itself is still worth returning.
+        return DubResult(ok=True, video=None, audio=speech_path, speech=speech,
+                         warning=warning, log=log)
+    return DubResult(ok=True, video=muxed, audio=speech_path, speech=speech,
+                     warning=warning, log=log)
+
+
+def mux_speech(
+    *,
+    clip: Path,
+    speech: Path,
+    shot_dir: Path,
+    speech_seconds: float = 0.0,
+    keep_original_audio: bool = True,
+) -> tuple[Path | None, str, list[str], str]:
+    """Lay *speech* over *clip*, writing ``clip-dubbed.mp4`` beside it.
+
+    Split out from :func:`dub_shot` because the two halves are needed apart:
+    a line is usually spoken before the shot has been rendered (that is the
+    whole point — half an hour of video to learn the take is wrong is the
+    wrong order), and at that moment there is no clip to mux into. So the
+    render has to be able to come back afterwards and do just this half,
+    without paying for synthesis again.
+
+    Returns ``(output or None, error, log, warning)``. A None output with no
+    error means ffmpeg was unavailable.
+    """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        return DubResult(
-            ok=True, video=None, audio=speech_path, speech=speech,
-            warning="ffmpeg not found on PATH, so the speech was not mixed "
-                    "onto the clip — the line itself is above",
+        return (
+            None, "",
+            [],
+            "ffmpeg not found on PATH, so the speech was not mixed onto the "
+            "clip — the line itself is above",
         )
 
     out = shot_dir / "clip-dubbed.mp4"
@@ -226,14 +262,14 @@ def dub_shot(
             "[bed][voice]amix=inputs=2:duration=first:dropout_transition=0[a]"
         )
         argv = [
-            ffmpeg, "-y", "-i", str(clip), "-i", str(speech_path),
+            ffmpeg, "-y", "-i", str(clip), "-i", str(speech),
             "-filter_complex", filt,
             "-map", "0:v", "-map", "[a]",
             "-c:v", "copy", "-c:a", "aac", "-shortest", str(out),
         ]
     else:
         argv = [
-            ffmpeg, "-y", "-i", str(clip), "-i", str(speech_path),
+            ffmpeg, "-y", "-i", str(clip), "-i", str(speech),
             "-map", "0:v", "-map", "1:a",
             "-c:v", "copy", "-c:a", "aac", "-shortest", str(out),
         ]
@@ -241,23 +277,18 @@ def dub_shot(
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0 or not out.exists():
         tail = (proc.stderr or "").strip().splitlines()[-6:]
-        return DubResult(
-            error=f"ffmpeg failed (exit {proc.returncode})",
-            speech=speech,
-            log=tail,
-        )
+        return None, f"ffmpeg failed (exit {proc.returncode})", tail, ""
 
     # -shortest keeps the muxed file to the video's length, so a line longer
     # than its clip is cut off. That is the right file to produce, but it must
     # not happen silently — the fix is a longer clip or a shorter line.
     warning = ""
+    spoken = speech_seconds or _duration(speech)
     clip_seconds = _duration(clip)
-    if clip_seconds and speech.seconds > clip_seconds + 0.15:
+    if clip_seconds and spoken > clip_seconds + 0.15:
         warning = (
-            f"the spoken line runs {speech.seconds:.1f}s but the clip is only "
+            f"the spoken line runs {spoken:.1f}s but the clip is only "
             f"{clip_seconds:.1f}s, so it is cut off — lengthen the shot or "
             f"shorten the line"
         )
-
-    return DubResult(ok=True, video=out, audio=speech_path, speech=speech,
-                     warning=warning)
+    return out, "", [], warning

@@ -18,6 +18,7 @@ than three formats.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -57,6 +58,93 @@ def new_id(prefix: str = "s") -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
+# ---------------------------------------------------------------------------
+# What a render was of
+# ---------------------------------------------------------------------------
+
+def _ref_key(ref: Any) -> str | None:
+    """A reference reduced to what identifies it, and nothing that moves.
+
+    ``resolved`` is excluded deliberately: the orchestrator writes it into a
+    chain reference on every run, so including it would make every shot look
+    changed the moment the one before it ran.
+    """
+    if not ref:
+        return None
+    if isinstance(ref, str):
+        return ref
+    if not isinstance(ref, dict):
+        return None
+    if ref.get("kind") == "chain":
+        return f"chain:{ref.get('from') or ''}"
+    return ref.get("path") or ref.get("url") or ""
+
+
+def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
+    """Hash of everything that decides what a render of *shot* produces.
+
+    Recorded on a shot when it renders, so "has this been rendered?" can be
+    answered as "rendered from *what the board says now*?" — a distinction
+    that cost a whole run: every shot was marked done, so a rewritten prompt
+    was skipped and the batch cheerfully re-reported clips of the old words.
+
+    Only conditioning and geometry count. ``dialogue`` does not: speech is
+    synthesised outside the render path and muxed over the finished clip, so
+    changing a line does not invalidate the video.
+    """
+    defaults = board.get("defaults") or {}
+    wanted = set(shot.get("characterIds") or [])
+    cast = [
+        {
+            "name": (c.get("name") or "").strip(),
+            "description": (c.get("description") or "").strip(),
+            "image": _ref_key(c.get("image")),
+        }
+        for c in (board.get("characters") or [])
+        if c.get("id") in wanted
+    ]
+    payload = {
+        "prompt": (shot.get("prompt") or "").strip(),
+        "soundNote": (shot.get("soundNote") or "").strip(),
+        "scene": (board.get("sceneDescription") or "").strip(),
+        "soundscape": (board.get("soundscape") or "").strip(),
+        "cast": cast,
+        "styleRefs": [_ref_key(r) for r in (board.get("styleRefs") or [])],
+        "startRef": _ref_key(shot.get("startRef")),
+        "endRef": _ref_key(shot.get("endRef")),
+        "model": shot.get("model") or defaults.get("model") or "",
+        # Frame size is a project setting with a per-shot fallback, in the same
+        # order the backend resolves it.
+        "resolution": defaults.get("resolution") or shot.get("resolution") or "",
+        "frames": int(shot.get("frames") or 0),
+        "steps": int(shot.get("steps") or 0),
+        "seed": int(shot.get("seed") or 0),
+        "draft": bool(defaults.get("draft")),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def stale_reason(shot: dict[str, Any], board: dict[str, Any]) -> str:
+    """Why this shot's clip is not a render of what the board now says.
+
+    Empty string when the clip is current — or when there is no clip at all,
+    since ``status`` already says that and calling it stale as well would
+    report the same thing twice.
+    """
+    if not shot.get("outputs"):
+        return ""
+    recorded = shot.get("renderFingerprint")
+    if not recorded:
+        # Rendered by a version that kept no record of its inputs. It may well
+        # be current, but nothing here can show that it is, and claiming so is
+        # how a stale clip reaches the final cut.
+        return "rendered before the board started tracking changes, so it cannot be shown to match"
+    if recorded != render_fingerprint(shot, board):
+        return "the prompt, references or clip settings changed since this was rendered"
+    return ""
+
+
 def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
     d = defaults or {}
     return {
@@ -85,6 +173,12 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "thumb": None,
         "logUrl": None,
         "renderedAs": None,   # "draft" | "final"
+        # What the last render was of, so a board edit can be told from a
+        # board that has simply not been rendered. See render_fingerprint.
+        "renderFingerprint": None,
+        # The words the stored dialogue.wav actually says. A line edited after
+        # it was spoken must not be muxed from the old take.
+        "dialogueSpokenText": "",
     }
 
 
@@ -128,6 +222,7 @@ def default_board(name: str) -> dict[str, Any]:
             "llm": "",       # "" means: use the server's default service
         },
         "shots": [],
+        "finalVideo": None,
         "createdAt": time.time(),
         "updatedAt": time.time(),
     }
@@ -470,6 +565,9 @@ class Store:
         board.setdefault("styleRefs", [])
         board.setdefault("createdAt", time.time())
         board.setdefault("updatedAt", time.time())
+        # The assembled cut: {url, builtAt, parts, missing, seconds}. None
+        # until the shots have been concatenated at least once.
+        board.setdefault("finalVideo", None)
 
         defaults = board.setdefault("defaults", {})
         defaults.setdefault("model", "fl2va")
@@ -519,4 +617,6 @@ class Store:
             shot.setdefault("thumb", None)
             shot.setdefault("logUrl", None)
             shot.setdefault("renderedAs", None)
+            shot.setdefault("renderFingerprint", None)
+            shot.setdefault("dialogueSpokenText", "")
         return board

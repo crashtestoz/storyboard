@@ -22,6 +22,11 @@ const state = {
   tts: [],
   selectedId: null,
   status: null,       // last /api/status payload
+  // The server's account of which renders no longer match the board:
+  // {shots: {id: why}, final: why}. Kept beside the board rather than in it,
+  // because the board object is round-tripped straight back on the next save
+  // and anything added here would be persisted as if the user had written it.
+  stale: { shots: {}, final: "" },
   poll: null,
   tab: "prompt",          // which editor tab is open; survives a re-render
   // The last speech run per shot, by shot id. Held for the session so the
@@ -29,9 +34,19 @@ const state = {
   // from disk.
   speechLog: {},
   saveTimer: null,
+  // Set when we start a batch, cleared when its end has been reported. A
+  // whole-board run with nothing to render still has work to do — it
+  // assembles the cut — and can finish between two polls, so "was busy last
+  // tick" is not enough to notice it ended.
+  awaitingBatch: false,
   dirty: false,
   toast: null,
 };
+
+/* Mirrors RERUNNABLE in server/orchestrator.py: the statuses a whole-board
+   run picks up. Kept here only to say in advance what that run will do — the
+   server decides, and a shot whose inputs have changed is picked up too. */
+const RERUNNABLE = ["draft", "failed", "blocked", "review", "interrupted"];
 
 const STATUS_LABELS = {
   draft: "Draft",
@@ -58,6 +73,17 @@ const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
+/* Why this shot's clip is not a render of what the board says now; "" when it
+   is current, or when there is nothing rendered to be out of date. */
+const staleWhy = (id) => (state.stale && state.stale.shots && state.stale.shots[id]) || "";
+const finalWhy = () => (state.stale && state.stale.final) || "";
+/* A shot whose spoken line never made it onto its clip; "" when it did, or
+   when the shot has no dialogue. */
+const dialogueWhy = (id) =>
+  (state.stale && state.stale.dialogue && state.stale.dialogue[id]) || "";
+const takeStale = (payload) => {
+  if (payload && payload.stale) state.stale = payload.stale;
+};
 
 /* Rebuilding a subtree blows away the caret of anything focused inside it.
    The poll used to do exactly that once a second, so typing in one shot's
@@ -139,7 +165,13 @@ async function saveNow() {
   try {
     $("#saveState").textContent = "saving…";
     const sent = state.board;
-    const { board } = await API.saveBoard(state.slug, state.board);
+    const res = await API.saveBoard(state.slug, state.board);
+    const board = res.board;
+    // Every save re-answers "does the render still match?", so the badges
+    // follow the words rather than waiting for the next render.
+    const before = JSON.stringify(state.stale);
+    takeStale(res);
+    if (JSON.stringify(state.stale) !== before) paintStale();
 
     // Deliberately NOT `state.board = board`. The response is only the board
     // we just sent, migrated and re-stamped — but assigning it replaces every
@@ -187,6 +219,40 @@ function view(shot) {
     log: run.log || null,
     summary: run.summary || "",
   };
+}
+
+/* What a finished batch actually produced.
+
+   "Render batch finished." was true and useless. The run that prompted this
+   rendered one shot of three — the other two were marked done, so they were
+   skipped even though their prompts had been rewritten — and built no video
+   at all, while reporting success. A summary has to say what came out. */
+function batchOutcome(status) {
+  const runs = Object.values((status && status.runs) || {});
+  const n = (st) => runs.filter((r) => r.status === st).length;
+  // A whole-board run with nothing stale still has work to do — it assembles
+  // the cut — so "0 shots" is a real and unhelpful thing to announce.
+  const bits = runs.length ? [`${runs.length} shot(s)`] : ["nothing needed re-rendering"];
+  if (n("failed")) bits.push(`${n("failed")} failed`);
+  if (n("blocked")) bits.push(`${n("blocked")} blocked`);
+  if (n("review")) bits.push(`${n("review")} need review`);
+  if (n("interrupted")) bits.push(`${n("interrupted")} interrupted`);
+
+  const a = status && status.assembly;
+  let kind = n("failed") || n("blocked") ? "error" : "info";
+  if (!a) {
+    return { msg: `Render finished — ${bits.join(", ")}.`, kind };
+  }
+  if (a.state === "done") {
+    bits.push(`final video assembled (${a.message})`);
+  } else if (a.state === "partial") {
+    bits.push(`final video assembled but incomplete — ${a.message}`);
+    kind = "warn";
+  } else {
+    bits.push(`final video NOT assembled — ${a.message}`);
+    kind = "error";
+  }
+  return { msg: `Render finished — ${bits.join(", ")}.`, kind };
 }
 
 /* ==========================================================================
@@ -241,13 +307,16 @@ function renderBackendBadge() {
 }
 
 async function openBoard(slug) {
-  const { board } = await API.getBoard(slug);
-  setBoard(slug, board);
+  const res = await API.getBoard(slug);
+  setBoard(slug, res.board, res.stale);
 }
 
-function setBoard(slug, board) {
+function setBoard(slug, board, stale) {
   state.slug = slug;
   state.board = board;
+  // Belongs to the board being installed, so switching boards cannot leave
+  // the previous one's "changed since render" marks on screen.
+  state.stale = stale || { shots: {}, final: "" };
   state.selectedId = board.shots.length ? board.shots[0].id : null;
   state.dirty = false;
   $("#saveState").textContent = "saved";
@@ -264,10 +333,36 @@ function wireChrome() {
     await saveNow();
     try {
       state.status = await API.render(state.slug);
+      state.awaitingBatch = true;
       startPolling();
       render();
     } catch (err) {
       toast(err.message, "error");
+    }
+  });
+
+  $("#btnAssemble").addEventListener("click", async () => {
+    const btn = $("#btnAssemble");
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "assembling…";
+    try {
+      const res = await API.assemble(state.slug);
+      takeStale(res);
+      state.board.finalVideo = res.finalVideo;
+      const f = res.finalVideo;
+      toast(
+        f.partial
+          ? `Assembled ${f.parts.length} clip(s), but ${f.missing.length} shot(s) are not rendered.`
+          : `Assembled ${f.parts.length} clip(s) — ${f.seconds}s.`,
+        f.partial ? "warn" : "info"
+      );
+      render();
+    } catch (err) {
+      toast(`Could not assemble: ${err.message}`, "error");
+    } finally {
+      btn.textContent = was;
+      btn.disabled = false;
     }
   });
 
@@ -612,12 +707,15 @@ async function refreshStatus() {
 
     if (s.busy && !state.poll) startPolling();
 
-    if (!s.busy && wasBusy) {
+    if (!s.busy && (wasBusy || state.awaitingBatch)) {
+      state.awaitingBatch = false;
       stopPolling();
       // the server has been mutating the board as shots finish; re-read it
-      const { board } = await API.getBoard(state.slug);
-      state.board = board;
-      toast("Render batch finished.");
+      const res = await API.getBoard(state.slug);
+      takeStale(res);
+      state.board = res.board;
+      const done = batchOutcome(s);
+      toast(done.msg, done.kind);
     }
     if (s.error) toast(s.error, "error");
 
@@ -644,9 +742,16 @@ async function refreshStatus() {
 
 function structuralSig() {
   const busy = !!(state.status && state.status.busy);
+  const a = state.status && state.status.assembly;
   return JSON.stringify([
     busy,
     state.selectedId,
+    // The assembly pass runs after the last shot, so its state moves while
+    // nothing else does — without it the final panel would sit on "Joining
+    // the clips" until something unrelated forced a rebuild.
+    a ? [a.state, a.message, a.url] : null,
+    (state.board.finalVideo || {}).url || "",
+    finalWhy(),
     shots().map((raw) => {
       const v = view(raw);
       return [
@@ -655,6 +760,7 @@ function structuralSig() {
         raw.thumb || "",
         raw.dubUrl || "",
         raw.renderedAs || "",
+        staleWhy(raw.id),
         (v.outputs || []).join("|"),
       ];
     }),
@@ -668,8 +774,10 @@ function paintLive() {
   if (!state.board) return;
   const busy = !!(state.status && state.status.busy);
   $("#btnRender").disabled = busy || !state.info.backend.healthy;
+  $("#btnAssemble").disabled = busy;
   $("#btnStop").disabled = !busy;
   paintMeta();
+  paintRenderHint();
 
   shots().forEach((raw) => {
     const shot = view(raw);
@@ -743,10 +851,38 @@ function render() {
 
   const busy = !!(state.status && state.status.busy);
   $("#btnRender").disabled = busy || !state.info.backend.healthy;
+  $("#btnAssemble").disabled = busy;
   $("#btnStop").disabled = !busy;
 
   paintMeta();
+  paintRenderHint();
   focusRestore(snap);
+}
+
+/* What "Render all" will actually do.
+
+   It never re-renders a shot that is already a current render — that is the
+   right rule, since a re-render costs half an hour, but it was also an
+   invisible one, and an invisible skip is how a batch reported success having
+   rendered one shot of three. So the count is stated before the click. */
+function pendingShots() {
+  return shots().filter(
+    (raw) => RERUNNABLE.includes(view(raw).status) || !!staleWhy(raw.id)
+  );
+}
+
+function paintRenderHint() {
+  const pending = pendingShots();
+  const changed = pending.filter((raw) => !!staleWhy(raw.id)).length;
+  $("#btnRender").title = pending.length
+    ? `Renders ${pending.length} of ${shots().length} shot(s)` +
+      (changed
+        ? `, ${changed} of them because the board changed since they were rendered`
+        : "") +
+      ", then joins every clip into the final video. A shot already rendered " +
+      "from what the board says now is left alone."
+    : "Every shot is already a render of what the board says now — this just " +
+      "joins the clips into the final video.";
 }
 
 function paintMeta() {
@@ -755,6 +891,8 @@ function paintMeta() {
     a[st] = (a[st] || 0) + 1;
     return a;
   }, {});
+  const pending = pendingShots().length;
+  const changed = shots().filter((raw) => !!staleWhy(raw.id)).length;
   $("#projectTitle").textContent = state.board.name;
   $("#projectMeta").textContent =
     `${shots().length} shots` +
@@ -763,7 +901,9 @@ function paintMeta() {
         Object.entries(counts)
           .map(([k, v]) => `${v} ${(STATUS_LABELS[k] || k).toLowerCase()}`)
           .join(", ")
-      : "");
+      : "") +
+    (changed ? ` · ${changed} changed since rendered` : "") +
+    (pending ? ` · ${pending} to render` : "");
 }
 
 /* --- rail ---------------------------------------------------------------- */
@@ -953,6 +1093,12 @@ function renderRail() {
     dot.dataset.status = shot.status;
     row.appendChild(dot);
     row.appendChild(el("span", "queue-name", raw.title));
+    const why = staleWhy(raw.id);
+    if (why && shot.status !== "running") {
+      const m = el("span", "queue-stale", "●");
+      m.title = `Changed since it was rendered — ${why}. “Render all” will re-run it.`;
+      row.appendChild(m);
+    }
     if (shot.status === "running") {
       row.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%`));
     }
@@ -962,6 +1108,93 @@ function renderRail() {
     });
     q.appendChild(row);
   });
+
+  renderFinal();
+}
+
+/* --- the assembled cut --------------------------------------------------- */
+
+/* The board-level artefact, so it sits with the other board-level things
+   rather than in the per-shot preview. Its whole job is to be visibly absent
+   when it has not been built: a folder of clips and no video is the failure
+   this panel exists to make obvious. */
+function renderFinal() {
+  const host = $("#finalVideo");
+  const prev = host.querySelector("video");
+  if (prev) prev.remove();     // detached, so innerHTML does not destroy it
+  host.innerHTML = "";
+  const f = state.board.finalVideo;
+  const live = state.status && state.status.assembly;
+  const busy = !!(state.status && state.status.busy);
+  const why = finalWhy();
+
+  if (live && live.state === "running") {
+    host.appendChild(el("div", "final-empty", `Joining the clips — ${live.message}`));
+    return;
+  }
+  if (live && live.state === "failed") {
+    host.appendChild(el("div", "final-err", `Not assembled — ${live.message}`));
+  }
+
+  if (f && f.url) {
+    // Carried across rather than rebuilt when the source has not moved: this
+    // panel is repainted on every save that changes a badge, and a fresh
+    // <video> reloads the file and drops the playhead each time.
+    const v = prev && prev.getAttribute("src") === f.url ? prev : el("video");
+    v.src = f.url;
+    v.controls = true;
+    v.preload = "metadata";
+    host.appendChild(v);
+    host.appendChild(
+      el("div", "final-meta",
+         `${f.parts.length} clip(s) · ${dur(f.seconds)} · ${f.url.split("/").pop()}`)
+    );
+    if (f.missing && f.missing.length) {
+      host.appendChild(
+        el("div", "final-warn",
+           `Incomplete — not rendered: ${f.missing.join(", ")}`)
+      );
+    }
+    if (why) host.appendChild(el("div", "final-warn", `Out of date — ${why}.`));
+  }
+
+  const silent = shots().filter((raw) => !!dialogueWhy(raw.id));
+  if (silent.length) {
+    host.appendChild(
+      el("div", "final-warn",
+         `${silent.length} shot(s) have a spoken line that is not on the clip, ` +
+         `so it is missing from the cut: ${silent.map((r) => r.title).join(", ")}.`)
+    );
+  }
+
+  if (!(f && f.url)) {
+    host.appendChild(
+      el("div", "final-empty",
+         "Not built yet. “Render all” assembles it after the last shot, or " +
+         "press Assemble to join whatever is already rendered.")
+    );
+  }
+
+  const acts = el("div", "final-actions");
+  const btn = el("button", "btn btn-sm", f && f.url ? "Re-assemble" : "Assemble now");
+  btn.disabled = busy;
+  if (busy) btn.title = "A render is running — the clips are still being written.";
+  btn.addEventListener("click", () => $("#btnAssemble").click());
+  acts.appendChild(btn);
+  if (f && f.url) {
+    const name = decodeURIComponent(f.url.split("/").pop() || "final.mp4");
+    const download = el("a", "btn btn-sm btn-primary", "Download");
+    download.href = f.url;
+    download.download = name;
+    download.title = "Download the assembled video";
+    acts.appendChild(download);
+
+    const open = el("a", "btn btn-sm btn-ghost", "Open");
+    open.href = f.url;
+    open.target = "_blank";
+    acts.appendChild(open);
+  }
+  host.appendChild(acts);
 }
 
 /* --- cast ---------------------------------------------------------------- */
@@ -1030,6 +1263,10 @@ async function editCharacter(existing) {
   trBtn.title = !transcriber
     ? "No configured speech service can transcribe. Type the transcript instead."
     : `Transcribe with ${transcriber.label}`;
+  const descBtn = $("#castDescribe");
+  const descProposal = $("#castDescProposal");
+  descProposal.innerHTML = "";
+  descBtn.onclick = () => improveDescription(draft);
   $("#castNote").textContent =
     "The image and voice become reference inputs on models that accept them " +
     "(Ref2VA: up to 9 images and 3 voices per shot). On a model without " +
@@ -1044,6 +1281,13 @@ async function editCharacter(existing) {
   const paint = () => {
     mediaSlot($("#castImage"), draft, "image", "Image", "image");
     mediaSlot($("#castVoice"), draft, "voice", "Voice clip", "audio");
+    const llm = currentLLM();
+    descBtn.disabled = !(draft.image && draft.image.path) || !llm || !llm.healthy;
+    descBtn.title = !(draft.image && draft.image.path)
+      ? "Add a reference image first."
+      : !llm || !llm.healthy
+        ? "No prompt rewriting service is available."
+        : `Improve from the reference image with ${llm.label}`;
   };
 
   function mediaSlot(host, obj, key, label, kind) {
@@ -1086,6 +1330,7 @@ async function editCharacter(existing) {
         e.stopPropagation();
         obj[key] = null;
         if (key === "voice") $("#castTranscribe").disabled = true;
+        if (key === "image") descProposal.innerHTML = "";
         paint();
       };
       host.appendChild(x);
@@ -1116,6 +1361,8 @@ async function editCharacter(existing) {
       $("#castVoiceText").value = "";
       draft.voiceText = "";
       $("#castTranscribe").disabled = !transcriber;
+    } else {
+      descProposal.innerHTML = "";
     }
     paint();
   }
@@ -1152,6 +1399,55 @@ async function editCharacter(existing) {
     } finally {
       field.disabled = false;
     }
+  }
+
+  async function improveDescription(obj) {
+    const image = obj.image && obj.image.path;
+    if (!image) return;
+    const llm = currentLLM();
+    const field = $("#castDesc");
+    descProposal.innerHTML = "";
+    descBtn.disabled = true;
+    descBtn.classList.add("busy");
+    const label = descBtn.lastChild;
+    label.textContent = "AI…";
+    try {
+      const r = await API.describeCharacter(
+        image,
+        $("#castName").value.trim(),
+        field.value.trim(),
+        llm && llm.id
+      );
+      descProposal.appendChild(characterDescProposal(r.text, field, descProposal));
+      toast(`Character description proposed by ${r.service}.`);
+    } catch (err) {
+      castError(`Could not describe the image: ${err.message}`);
+    } finally {
+      descBtn.classList.remove("busy");
+      label.textContent = "AI";
+      paint();
+    }
+  }
+
+  function characterDescProposal(text, field, slot) {
+    const box = el("div", "proposal");
+    const head = el("div", "proposal-head");
+    head.appendChild(el("strong", null, "Proposed description"));
+    box.appendChild(head);
+    box.appendChild(el("div", "proposal-body", text));
+
+    const acts = el("div", "proposal-acts");
+    const use = el("button", "btn btn-sm btn-primary", "Use this");
+    use.addEventListener("click", () => {
+      field.value = text;
+      draft.description = text;
+      slot.innerHTML = "";
+    });
+    const drop = el("button", "btn btn-sm btn-ghost", "Discard");
+    drop.addEventListener("click", () => (slot.innerHTML = ""));
+    acts.append(use, drop);
+    box.appendChild(acts);
+    return box;
   }
 
   const foot = $("#castFoot");
@@ -1260,6 +1556,15 @@ function renderStrip() {
     thumb.appendChild(el("span", "shot-index", String(i + 1).padStart(2, "0")));
     if (raw.renderedAs === "draft") {
       thumb.appendChild(el("span", "draft-badge", "DRAFT"));
+    }
+    const staleReason = staleWhy(raw.id);
+    if (staleReason && shot.status !== "running") {
+      // Not a status: the clip is real and plays. It is just not a clip of
+      // what the board says now, which is exactly the thing that shipped a
+      // finished-looking board built from replaced prompts.
+      const b = el("span", "stale-badge", "CHANGED");
+      b.title = staleReason;
+      thumb.appendChild(b);
     }
     if (raw.startRef && raw.startRef.kind === "chain") {
       const b = el("span", "chain-badge");
@@ -1495,6 +1800,7 @@ function renderEditor() {
     await saveNow();
     try {
       state.status = await API.render(state.slug, [raw.id]);
+      state.awaitingBatch = true;
       startPolling();
       render();
     } catch (err) {
@@ -1610,6 +1916,14 @@ function renderEditor() {
       paneHint("spoken separately, then mixed over the finished clip"),
       dlg
     );
+    // Speaking the line belongs with the line. It used to hang off the panel
+    // below the tab strip, which put a "Speak again" button and an audio
+    // player under the Prompt, Sound accents and Resolved tabs as well —
+    // controls for something none of those tabs is about.
+    if (panelDubRow) {
+      dp.appendChild(panelDubRow);
+      panelDubRow = null;
+    }
     pane("dialogue", dp);
 
     const sa = el("textarea", "ta-tall");
@@ -1645,6 +1959,10 @@ function renderEditor() {
   panel.appendChild(panes);
   ta.dataset.fkey = "shot-prompt";
   showTab(state.tab);
+  // Only reachable when the shot carries a line but its model has no audio,
+  // so there is no Dialogue tab to hold it — usually a line left behind by a
+  // model switch. Shown rather than dropped, since a line you cannot see is
+  // one you cannot delete.
   if (panelDubRow) panel.appendChild(panelDubRow);
   host.appendChild(panel);
 
@@ -2109,6 +2427,8 @@ function renderPreview() {
   }
   host.appendChild(stage);
 
+  staleNotes(raw, shot.status).forEach((n) => host.appendChild(n));
+
   const diag = diagnostic(raw, shot);
   if (diag) host.appendChild(diag);
 
@@ -2238,6 +2558,115 @@ function logLine(entry) {
   return line;
 }
 
+/* The two ways a finished clip can be wrong without being broken: it is not a
+   render of what the board says now, or the line someone speaks in it never
+   got mixed in. Built here rather than inline so the save path can put them
+   on screen without rebuilding the pane and taking the caret with it. */
+function staleNotes(raw, status) {
+  const out = [];
+
+  const why = staleWhy(raw.id);
+  if (why && status !== "running") {
+    const note = el("div", "stale-note");
+    note.dataset.note = "stale";
+    note.append(
+      el("strong", null, "This clip is out of date. "),
+      el("span", null, `${why}. It will be re-rendered by “Render all”.`)
+    );
+    // The judgement is sometimes the user's: a board that predates change
+    // tracking cannot be *shown* to match, but they may know that it does,
+    // and half an hour of GPU time to prove it is a poor trade. That is an
+    // assertion, so it is theirs to make rather than ours to infer.
+    const keep = el("button", "btn btn-sm", "Keep this take");
+    keep.title =
+      "Records this clip as a render of what the board says now, without " +
+      "re-rendering it. Use it when you know the clip is current.";
+    keep.style.marginTop = "var(--sp-2)";
+    keep.addEventListener("click", async () => {
+      keep.disabled = true;
+      try {
+        const r = await API.accept(state.slug, raw.id);
+        takeStale(r);
+        const live = shotById(raw.id);
+        if (live) live.renderFingerprint = r.renderFingerprint;
+        render();
+      } catch (err) {
+        toast(err.message, "error");
+        keep.disabled = false;
+      }
+    });
+    note.appendChild(el("div")).appendChild(keep);
+    out.push(note);
+  }
+
+  const dWhy = dialogueWhy(raw.id);
+  if (dWhy) {
+    const note = el("div", "stale-note");
+    note.dataset.note = "dialogue";
+    note.append(
+      el("strong", null, "The spoken line is not on this clip. "),
+      el("span", null, `It was ${dWhy}.`)
+    );
+    out.push(note);
+  }
+  return out;
+}
+
+/* Staleness moves on every save — you rewrite a prompt and the clip you have
+   stops matching it — and a save lands 700ms after you stop typing, while the
+   caret is still in the box. So the marks are painted in place rather than by
+   rebuilding: a full render() here would destroy the field being edited. */
+function paintStale() {
+  if (!state.board) return;
+  shots().forEach((raw) => {
+    const status = view(raw).status;
+    const why = status === "running" ? "" : staleWhy(raw.id);
+
+    const thumb = document.querySelector(`.shot-card[data-id="${raw.id}"] .shot-thumb`);
+    if (thumb) {
+      const have = thumb.querySelector(".stale-badge");
+      if (why && !have) {
+        const b = el("span", "stale-badge", "CHANGED");
+        b.title = why;
+        thumb.appendChild(b);
+      } else if (why && have) {
+        have.title = why;
+      } else if (!why && have) {
+        have.remove();
+      }
+    }
+
+    const row = document.querySelector(`.queue-row[data-id="${raw.id}"]`);
+    if (row) {
+      const have = row.querySelector(".queue-stale");
+      if (why && !have) {
+        const m = el("span", "queue-stale", "●");
+        m.title = `Changed since it was rendered — ${why}. “Render all” will re-run it.`;
+        row.insertBefore(m, row.querySelector(".queue-pct"));
+      } else if (!why && have) {
+        have.remove();
+      }
+    }
+  });
+
+  const host = $("#preview");
+  const stage = host.querySelector(".preview-stage");
+  const raw = selectedShot();
+  host.querySelectorAll(".stale-note").forEach((n) => n.remove());
+  if (raw && stage) {
+    const notes = staleNotes(raw, view(raw).status);
+    let after = stage;
+    notes.forEach((n) => {
+      after.after(n);
+      after = n;
+    });
+  }
+
+  renderFinal();
+  paintMeta();
+  paintRenderHint();
+}
+
 function diagnostic(raw, shot) {
   if (!["failed", "blocked", "review", "interrupted"].includes(shot.status)) {
     return null;
@@ -2279,6 +2708,7 @@ function diagnostic(raw, shot) {
     await saveNow();
     try {
       state.status = await API.render(state.slug, [raw.id]);
+      state.awaitingBatch = true;
       startPolling();
       render();
     } catch (err) {

@@ -37,6 +37,8 @@
       <span class="backend-badge" id="backendBadge" data-healthy="true">—</span>
       <button class="btn btn-danger" id="btnStop" disabled>Stop</button>
       <button class="btn btn-primary" id="btnRender">▶ Render all</button>
+      <button class="btn btn-ghost" id="btnAssemble"
+        title="Join the rendered clips into one video">⧉ Assemble</button>
     </header>
 
     <!-- ================= rail ================= -->
@@ -85,6 +87,14 @@
           <span class="hint">— serial, one at a time</span>
         </div>
         <div class="queue-list" id="queueList"></div>
+      </section>
+
+      <section>
+        <div class="section-label">
+          Final video
+          <span class="hint">— every shot, in order</span>
+        </div>
+        <div class="final-box" id="finalVideo"></div>
       </section>
 
     </aside>
@@ -251,6 +261,12 @@
           <label>Description <span class="hint-inline">required — this is what conditions the model</span></label>
           <textarea id="castDesc" rows="4"
             placeholder="Appearance, clothing, build, age — whatever should stay consistent whenever they appear."></textarea>
+          <div class="cast-ai-row">
+            <button class="btn btn-sm wand" id="castDescribe" title="Improve from the reference image">
+              <span class="wand-icon">🪄</span><span>AI</span>
+            </button>
+          </div>
+          <div class="proposal-slot" id="castDescProposal"></div>
         </div>
         <div class="field-row">
           <div class="field">

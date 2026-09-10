@@ -38,11 +38,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import assemble as assembly
 from .backends.base import Backend
 from .dubbing import dub_shot, speaker_for
 from .orchestrator import Orchestrator
-from .llm import LLMService, rewrite_prompt
-from .store import Store, default_shot
+from .llm import LLMService, describe_character, rewrite_prompt
+from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts.base import TTSEngine
 
 MAX_UPLOAD = 32 * 1024 * 1024
@@ -205,7 +206,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             board = self._read_json()
             saved = self.ctx.store.save(m.group(1), board)
-            return self._send_json({"slug": m.group(1), "board": saved})
+            return self._send_json(
+                {
+                    "slug": m.group(1),
+                    "board": saved,
+                    "stale": self._staleness(m.group(1), saved),
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             return self._err(400, f"{type(exc).__name__}: {exc}")
 
@@ -262,7 +269,13 @@ class Handler(BaseHTTPRequestHandler):
                 board = ctx.store.load(m.group(1))
             except FileNotFoundError:
                 return self._err(404, "no such storyboard")
-            return self._send_json({"slug": m.group(1), "board": board})
+            return self._send_json(
+                {
+                    "slug": m.group(1),
+                    "board": board,
+                    "stale": self._staleness(m.group(1), board),
+                }
+            )
 
         m = re.fullmatch(r"/api/boards/([^/]+)/export", path)
         if m:
@@ -356,6 +369,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._dub(m.group(1), m.group(2))
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/accept", path)
+        if m:
+            return self._accept_take(m.group(1), m.group(2))
+
         if path == "/api/rewrite":
             payload = self._read_json() or {}
             slug = payload.get("slug")
@@ -393,6 +410,30 @@ class Handler(BaseHTTPRequestHandler):
                 {"text": proposal, "service": service.label, "model": service.model}
             )
 
+        if path == "/api/describe-character":
+            payload = self._read_json() or {}
+            image_rel = payload.get("image")
+            if not image_rel:
+                raise ValueError("image is required")
+
+            image = self._resolve_within(ctx.data_dir, image_rel)
+            if image is None or not image.is_file():
+                raise FileNotFoundError(f"no such reference image: {image_rel}")
+            ctype, _ = mimetypes.guess_type(str(image))
+            if not (ctype or "").startswith("image/"):
+                raise ValueError("the selected reference is not an image")
+
+            service = ctx.llm(payload.get("service") or ctx.default_llm)
+            proposal = describe_character(
+                service,
+                image,
+                name=payload.get("name") or "",
+                current=payload.get("description") or "",
+            )
+            return self._send_json(
+                {"text": proposal, "service": service.label, "model": service.model}
+            )
+
         if path == "/api/transcribe":
             return self._transcribe()
 
@@ -406,7 +447,112 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stop":
             return self._send_json(ctx.orch.stop())
 
+        if path == "/api/assemble":
+            return self._assemble()
+
         return self._err(404, "unknown endpoint")
+
+    def _staleness(self, slug: str, board: dict[str, Any]) -> dict[str, Any]:
+        """Which renders no longer match the board, and why.
+
+        Sent beside the board rather than inside it. The front end round-trips
+        the board object it is given straight back on the next save, so a
+        server-computed field placed in there would be persisted into
+        ``storyboard.json`` as though the user had written it.
+        """
+        return {
+            "shots": {
+                shot["id"]: reason
+                for shot in (board.get("shots") or [])
+                if (reason := stale_reason(shot, board))
+            },
+            "final": assembly.final_stale_reason(
+                board, self.ctx.store.project_dir(slug)
+            ),
+            "dialogue": assembly.unmixed_dialogue(
+                board, self.ctx.store.project_dir(slug)
+            ),
+        }
+
+    def _accept_take(self, slug: str, shot_id: str) -> None:
+        """Record this shot's existing clip as a render of the board as it is.
+
+        The user asserting what the server cannot prove. Needed because the
+        rule that catches a stale clip — no recorded fingerprint means it
+        cannot be shown to match — also catches every clip rendered before
+        fingerprints existed, and re-rendering half an hour of good video to
+        establish a fact the user already knows is the wrong trade. Only the
+        record moves; no file is touched.
+        """
+        ctx = self.ctx
+        board = ctx.store.load(slug)
+        shot = next(
+            (s for s in (board.get("shots") or []) if s["id"] == shot_id), None
+        )
+        if shot is None:
+            raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+        if not shot.get("outputs"):
+            return self._err(409, "this shot has nothing rendered to keep")
+
+        shot["renderFingerprint"] = render_fingerprint(shot, board)
+        ctx.store.save(slug, board)
+        return self._send_json(
+            {
+                "shotId": shot_id,
+                "renderFingerprint": shot["renderFingerprint"],
+                "stale": self._staleness(slug, board),
+            }
+        )
+
+    def _assemble(self) -> None:
+        """Join this board's clips into one video, on demand.
+
+        A whole-board render does this at the end, but it has to be available
+        on its own: nothing needs re-rendering after a single shot is re-run,
+        and half an hour of GPU time is the wrong price for a concat.
+        """
+        ctx = self.ctx
+        payload = self._read_json() or {}
+        slug = payload.get("slug")
+        if not slug:
+            raise ValueError("slug is required")
+        if ctx.orch.busy:
+            return self._err(409, "a render is running — assembling now would "
+                                  "join a clip that is still being written")
+
+        board = ctx.store.load(slug)
+        shots = board.get("shots") or []
+        parts: list[tuple[str, Path | None]] = []
+        for i, shot in enumerate(shots):
+            shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, i + 1)
+            label = shot.get("title") or f"shot {i + 1}"
+            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir)))
+
+        width, height = assembly.frame_size(
+            (board.get("defaults") or {}).get("resolution")
+        )
+        project_dir = ctx.store.project_dir(slug)
+        result = assembly.assemble(
+            parts, assembly.final_path(project_dir), width, height
+        )
+        if not result.ok:
+            return self._send_json(
+                {"error": result.error, "log": result.log,
+                 "missing": result.missing}, 409
+            )
+
+        url = "/media/" + str(
+            result.path.relative_to(ctx.data_dir)
+        ).replace("\\", "/")
+        board["finalVideo"] = result.to_json(url)
+        ctx.store.save(slug, board)
+        return self._send_json(
+            {
+                "finalVideo": board["finalVideo"],
+                "log": result.log,
+                "stale": self._staleness(slug, board),
+            }
+        )
 
     def _transcribe(self) -> None:
         """Transcribe a reference clip so the transcript can be reviewed.
@@ -551,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
         # The spoken line is kept on the shot so it survives a reload and can
         # be played again without re-synthesising.
         shot["dialogueAudioUrl"] = as_url(result.audio) if result.audio else None
+        # What this take says. A render finishing later re-muxes the wav onto
+        # the fresh clip, and must not do that once the line has been edited.
+        shot["dialogueSpokenText"] = (text or "").strip()
         if result.video:
             shot["dubUrl"] = as_url(result.video)
         shot["speechLogUrl"] = log_url

@@ -277,8 +277,11 @@ Three things only showed up once the thing existed:
 
 ## Stretch / open questions
 
-- Multi-clip stitching (concat the shots into one final export) — an
-  `ffmpeg` concat pass after the last shot, not a vpipe concern.
+Multi-clip stitching is no longer one of these: it is `server/assemble.py`,
+run at the end of a whole-board batch. It was left as a stretch item for
+longer than it should have been, and the cost was a run that rendered
+everything and produced no video.
+
 - Batch variations (same shot, several seeds) — the queue already supports
   this trivially, just a "generate N seeds" button per shot.
 - Model prep (first-time downloads) is a separate, much longer-running

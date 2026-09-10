@@ -71,6 +71,7 @@ rewrite models it can actually see.
 ```
 <workspace>/projects/<board-slug>/
 ├── storyboard.json      the whole board: scene, sound, cast, shots
+├── final.mp4            every shot, joined in order
 ├── refs/                reference images and voice clips (uploads and picks)
 └── shots/01/
     ├── shot.vpipeline   generated per render
@@ -265,6 +266,7 @@ Both HTTP contracts were read from MCC's source, not guessed.
 ```sh
 python3 tests/store_paths.py             # renaming, and an independent data dir
 python3 tests/speak_line.py              # who speaks, and previewing without a render
+python3 tests/render_all.py              # what "Render all" picks up, and the final cut
 node tests/edits-persist.mjs             # every edit reaches the server, not just the first
 node tests/poll-does-not-rebuild.mjs     # the poll must not rebuild a focused subtree
 ```
@@ -273,7 +275,7 @@ The two `.mjs` ones drive the real page over the DevTools protocol; each file's
 header has the two commands to start the server and a debug Chrome, and both
 take `CDP_PORT` (9222 by default).
 
-All three cover one class of bug: something is replaced underneath state that
+All of them cover one class of bug: something is replaced underneath state that
 had already recorded where it was. Renaming rewrites the paths a board
 recorded. The poll must not rebuild a subtree holding a focused input. And
 saving must not replace the object graph the editor's handlers point into —
@@ -294,6 +296,52 @@ than rendered against a missing frame.
 The runtime baseline is fitted to measured runs on an M4 Pro: 124 frames in
 27m44s, 39 frames in 7m32s, denoise growing as roughly `frames^1.37`. It has
 predicted subsequent runs within 5%.
+
+## Why "Render all" re-renders a shot that says done
+
+A shot already marked done is skipped, because a re-render costs between six
+and forty minutes and doing it casually is worse than not doing it. But "done"
+has to mean *done from what the board says now*, and for a while it only meant
+"done, once". A full run over a three-shot board rendered one shot, kept two
+clips of prompts that had since been rewritten, reported success, and gave no
+hint that two thirds of the batch had been skipped.
+
+So every render records a fingerprint of its inputs — the shot prompt and
+sound note, the scene description and background bed, the cast it uses and
+their descriptions and portraits, the reference images, the model, frame size,
+frame count, steps, seed and draft mode. A whole-board run picks up any shot
+whose fingerprint has moved, plus anything chained to one of those, since a
+start anchor taken from a re-rendered shot is a different picture. Dialogue is
+deliberately *not* in the fingerprint: speech is synthesised outside the render
+and mixed over the finished clip, so rewriting a line does not invalidate the
+video.
+
+A shot rendered before any of this existed has no fingerprint, and is treated
+as stale — it may well be current, but nothing can show that it is, and
+assuming otherwise is how the wrong clip reaches the cut. **Keep this take**
+on the shot records it as current without re-rendering, for when you know it
+is. The board header says how many shots a run will take before you press it.
+
+## Why there is a concat pass at all
+
+A board of finished clips is not the deliverable. The last step used to be
+manual and undocumented, so a run could render every shot and still leave you
+with a folder. `server/assemble.py` joins them in board order into
+`final.mp4` at the end of a whole-board run, or on demand from the rail.
+
+It re-encodes rather than stream-copying, because the inputs genuinely are not
+uniform: a dubbed clip carries AAC, an undubbed one whatever the model wrote,
+and a still has no audio track at all — and `concat` with `-c copy` over
+mismatched streams yields a file that plays for the length of the first clip.
+A clip with no audio gets a matched stretch of silence so nothing after it
+drifts. A shot with no render is left out and *named*, and the cut is marked
+partial rather than quietly being short.
+
+`clip-dubbed.mp4` is preferred over `clip.mp4` only while it is newer, since
+it is built from the clip and a re-render leaves it describing a video that no
+longer exists. A line that was spoken before its shot was rendered is now laid
+onto the clip when that render finishes; one that was spoken before this
+existed is reported in the rail rather than silently missing from the cut.
 
 ## Why the poll paints instead of re-rendering
 
@@ -317,7 +365,10 @@ output — and carries the caret across when it does.
 - The ComfyUI backend is a scaffold with an integration plan, not an
   implementation.
 - Board editing is a whole-board save, so two browser tabs on one board are
-  last-write-wins.
+  last-write-wins. The render queue writes the board too, so an edit made
+  during a long shot can be overwritten when that shot finishes.
+- The cut is a straight concatenation: no transitions, no per-shot trimming,
+  and no separate audio bed across the whole piece.
 - `library()` (the pick-an-existing-image grid) scans the data directory only.
   Images sitting elsewhere in the vpipe workspace are not offered; upload them
   or copy them into a project folder.

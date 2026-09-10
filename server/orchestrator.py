@@ -12,8 +12,16 @@ Responsibilities, in order of how much they matter:
 2.  **Decide honestly whether a run worked.** Delegated to the backend's
     ``validate()``; the queue just records the verdict and stops on failure
     instead of marching on through dependents.
-3.  **Report progress** as it happens, for the UI to poll.
-4.  **Stop cleanly** when asked.
+3.  **Render what the board now says, not what it said once.** A shot marked
+    done is skipped, which is right — a re-render costs half an hour — but
+    "done" has to mean "done *from this*". Each render records a fingerprint
+    of its inputs, and a batch picks up any shot whose inputs have moved
+    since, including one whose start frame comes from a shot being re-run.
+5.  **Produce the video.** A board of finished clips is not the deliverable;
+    the cut is. A full batch ends by concatenating the shots (see
+    ``assemble``), and says so either way.
+6.  **Report progress** as it happens, for the UI to poll.
+7.  **Stop cleanly** when asked.
 """
 
 from __future__ import annotations
@@ -24,8 +32,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import assemble as assembly
 from .backends.base import Backend, ProgressEvent, ShotPaths
-from .store import Store
+from .dubbing import mux_speech
+from .store import Store, render_fingerprint, stale_reason
 
 # statuses that a "render all" should pick up
 RERUNNABLE = {"draft", "failed", "blocked", "review", "interrupted"}
@@ -89,6 +99,13 @@ class Orchestrator:
         self._batch_started: float | None = None
         self._batch_ended: float | None = None
         self._error: str = ""
+        # Why each shot was queued, so "Render all" can say what it picked up
+        # rather than leaving the user to infer it from what changes.
+        self._queued_because: dict[str, str] = {}
+        # Last concat pass: {"state", "message", "url", ...}. Reported with the
+        # batch, because a batch that rendered every shot and produced no video
+        # has not finished the job.
+        self._assembly: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ #
     # status
@@ -111,6 +128,8 @@ class Orchestrator:
                 "batchEndedAt": self._batch_ended,
                 "error": self._error,
                 "cancelRequested": self._cancel.is_set(),
+                "queuedBecause": dict(self._queued_because),
+                "assembly": self._assembly,
             }
 
     # ------------------------------------------------------------------ #
@@ -127,34 +146,104 @@ class Orchestrator:
 
         board = self.store.load(slug)
         shots = board.get("shots") or []
+        # An explicit list is exactly that — the user asked for these shots.
+        # No list means the whole board, which also means assembling the cut.
+        whole_board = not shot_ids
         if shot_ids:
-            targets = [s for s in shots if s["id"] in set(shot_ids)]
+            wanted = set(shot_ids)
+            targets = [s for s in shots if s["id"] in wanted]
+            because = {s["id"]: "asked for by name" for s in targets}
         else:
-            targets = [s for s in shots if s.get("status", "draft") in RERUNNABLE]
-        if not targets:
+            targets, because = self._pending(board)
+        if not targets and not whole_board:
             raise RuntimeError("nothing to render")
+        # A whole-board run with nothing stale is not a no-op: it still owes
+        # the user the assembled cut. Only a board with no clips at all has
+        # genuinely nothing to do.
+        if not targets and not _any_output(shots):
+            raise RuntimeError(
+                "nothing to render — no shot has a prompt to render or a clip "
+                "to assemble yet"
+            )
 
         with self._lock:
             self._cancel.clear()
             self._slug = slug
             self._order = [s["id"] for s in targets]
             self._runs = {s["id"]: ShotRun(shot_id=s["id"]) for s in targets}
+            self._queued_because = because
+            self._assembly = None
             self._current = None
             self._batch_started = time.time()
             self._batch_ended = None
             self._error = ""
 
-        # reset persisted state for the shots about to run
+        # reset persisted state for the shots about to run, and say up front
+        # why each one is in the batch — an unexplained 36-minute re-render of
+        # a shot that looked finished is indistinguishable from a bug.
         for shot in shots:
             if shot["id"] in self._runs:
                 shot.update(status="queued", progress=0, validation=None, outputs=[])
+                why = because.get(shot["id"])
+                if why:
+                    self._runs[shot["id"]].log.append(
+                        {"level": "INFO", "text": f"queued — {why}"}
+                    )
         self.store.save(slug, board)
 
         self._thread = threading.Thread(
-            target=self._run_batch, args=(slug,), name="render-queue", daemon=True
+            target=self._run_batch, args=(slug, whole_board),
+            name="render-queue", daemon=True,
         )
         self._thread.start()
         return self.status()
+
+    def _pending(self, board: dict) -> tuple[list[dict], dict[str, str]]:
+        """The shots a whole-board run should render, in board order.
+
+        Not simply "the ones not marked done". A shot is also pending when its
+        clip no longer matches the board — a rewritten prompt, a swapped
+        reference, a changed frame size — because otherwise a run over a board
+        of finished shots renders nothing, reports success, and leaves a cut
+        built from the words the user replaced. That happened.
+        """
+        shots = board.get("shots") or []
+        because: dict[str, str] = {}
+
+        for shot in shots:
+            status = shot.get("status", "draft")
+            if status in RERUNNABLE:
+                because[shot["id"]] = f"status is “{status}”"
+                continue
+            why = stale_reason(shot, board)
+            if why:
+                because[shot["id"]] = why
+
+        # A start-frame anchor is a picture, and re-rendering the shot it comes
+        # from makes it a different picture — so the shot after it no longer
+        # follows on from the frame it was built to continue. Chase the chain
+        # until it stops growing, because chains can be several long.
+        changed = True
+        while changed:
+            changed = False
+            for shot in shots:
+                if shot["id"] in because:
+                    continue
+                for key in ("startRef", "endRef"):
+                    ref = shot.get(key)
+                    if (
+                        isinstance(ref, dict)
+                        and ref.get("kind") == "chain"
+                        and ref.get("from") in because
+                    ):
+                        because[shot["id"]] = (
+                            "continues from a shot being re-rendered, so its "
+                            "anchor frame will change"
+                        )
+                        changed = True
+                        break
+
+        return [s for s in shots if s["id"] in because], because
 
     def stop(self) -> dict[str, Any]:
         self._cancel.set()
@@ -170,13 +259,15 @@ class Orchestrator:
     # the batch
     # ------------------------------------------------------------------ #
 
-    def _run_batch(self, slug: str) -> None:
+    def _run_batch(self, slug: str, assemble_after: bool = False) -> None:
         try:
             for shot_id in list(self._order):
                 if self._cancel.is_set():
                     self._mark_remaining_cancelled()
                     break
                 self._run_one(slug, shot_id)
+            if assemble_after:
+                self._assemble(slug)
         except Exception as exc:  # noqa: BLE001 - reported to the UI
             with self._lock:
                 self._error = f"{type(exc).__name__}: {exc}"
@@ -290,13 +381,143 @@ class Orchestrator:
             logUrl=log_url,
             # so a draft is never mistaken for a finished shot later
             renderedAs="draft" if spec.payload.get("draft") else "final",
+            # What this run was of. Recorded whatever the verdict, because it
+            # describes the inputs rather than the outcome — a failed run is
+            # picked up again by its status, not by looking changed.
+            renderFingerprint=render_fingerprint(shot, board),
         )
+        if validation.ok:
+            self._relay_speech(shot, paths.abs_dir, run)
         self.store.save(slug, board)
 
         level = "OK" if validation.ok else "ERROR"
         run.log.append(
             {"level": level, "text": f"{validation.verdict}: {validation.reason or 'all checks passed'}"}
         )
+
+    # ------------------------------------------------------------------ #
+    # after the render
+    # ------------------------------------------------------------------ #
+
+    def _relay_speech(self, shot: dict, shot_dir: Path, run: ShotRun) -> None:
+        """Put an already-spoken line back onto the clip that just rendered.
+
+        Speech is synthesised outside the render path, and usually *before* the
+        render — hearing whether a cloned voice says the line right should not
+        cost half an hour of video first. But that means the mux had no clip to
+        write into at the time, so without this the line exists as a wav next
+        to a silent clip and never reaches the cut. Exactly what happened to
+        the one shot in this board that has dialogue.
+
+        Only ffmpeg runs here; nothing is re-synthesised.
+        """
+        line = (shot.get("dialogue") or "").strip()
+        if not line:
+            return
+        speech = shot_dir / "dialogue.wav"
+        if not (speech.exists() and speech.stat().st_size > 1024):
+            return
+        # A line edited after it was spoken must not be muxed from the old
+        # take: the wav says something the board no longer does.
+        spoken = (shot.get("dialogueSpokenText") or "").strip()
+        if spoken and spoken != line:
+            run.log.append(
+                {
+                    "level": "WARN",
+                    "text": "the dialogue was edited after it was last spoken, "
+                            "so it was not mixed onto the clip — press Speak "
+                            "this line again",
+                }
+            )
+            return
+
+        clip = shot_dir / "clip.mp4"
+        if not clip.exists():
+            return
+        try:
+            out, error, log, warning = mux_speech(
+                clip=clip, speech=speech, shot_dir=shot_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed mux is not a failed render
+            run.log.append({"level": "WARN", "text": f"could not mix in the spoken line: {exc}"})
+            return
+
+        for line_text in log:
+            run.log.append({"level": "INFO", "text": line_text})
+        if error:
+            run.log.append({"level": "WARN", "text": f"spoken line not mixed in: {error}"})
+            return
+        if warning:
+            run.log.append({"level": "WARN", "text": warning})
+        if out is None:
+            return
+        shot["dubUrl"] = self._as_url(out)
+        run.log.append(
+            {"level": "OK", "text": f"spoken line mixed onto the clip -> {out.name}"}
+        )
+
+    def _assemble(self, slug: str) -> None:
+        """Concatenate the board's clips into one video.
+
+        Runs at the end of a whole-board batch. Recorded on the board and in
+        the batch status either way: a run that renders everything and then
+        silently fails to produce the deliverable is the failure this whole
+        module exists to prevent.
+        """
+        board = self.store.load(slug)
+        shots = board.get("shots") or []
+        if not shots:
+            self._set_assembly("skipped", "this storyboard has no shots")
+            return
+
+        parts: list[tuple[str, Path | None]] = []
+        for i, shot in enumerate(shots):
+            shot_dir = self.data_dir / self.store.shot_rel_dir(slug, i + 1)
+            label = shot.get("title") or f"shot {i + 1}"
+            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir)))
+
+        width, height = assembly.frame_size(
+            (board.get("defaults") or {}).get("resolution")
+        )
+        project_dir = self.store.project_dir(slug)
+        self._set_assembly("running", f"joining {len(shots)} shot(s)")
+
+        result = assembly.assemble(
+            parts, assembly.final_path(project_dir), width, height
+        )
+        if not result.ok:
+            self._set_assembly("failed", result.error, log=result.log)
+            return
+
+        url = self._as_url(result.path)
+        board["finalVideo"] = result.to_json(url)
+        self.store.save(slug, board)
+
+        message = (
+            f"{len(result.parts)} clip(s), {result.seconds:.1f}s"
+            + (
+                " — incomplete, missing: " + ", ".join(result.missing)
+                if result.missing
+                else ""
+            )
+        )
+        self._set_assembly(
+            "partial" if result.partial else "done",
+            message,
+            url=url,
+            log=result.log,
+        )
+
+    def _set_assembly(self, state: str, message: str, url: str = "",
+                      log: list[str] | None = None) -> None:
+        with self._lock:
+            self._assembly = {
+                "state": state,
+                "message": message,
+                "url": url,
+                "log": list(log or []),
+                "at": time.time(),
+            }
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -372,3 +593,7 @@ class Orchestrator:
         for sid, run in self._runs.items():
             if run.status == "queued":
                 run.status = "draft"
+
+
+def _any_output(shots: list[dict]) -> bool:
+    return any(sh.get("outputs") for sh in shots)

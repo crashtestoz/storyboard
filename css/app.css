@@ -1104,6 +1104,12 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 #castEditor { z-index: 100; }
 #picker     { z-index: 120; }
 
+.cast-ai-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-2);
+}
+
 /* The toast is how failures are reported, so it has to sit above anything
    that can be open when one happens. At z-index 50 it rendered behind the
    cast editor (100) and an upload error was invisible — the user saw nothing
@@ -1465,3 +1471,80 @@ textarea.ta-tall {
    `display: contents` keeps them from affecting layout at all — the lines lay
    out exactly as if they were direct children. */
 .log-part { display: contents; }
+
+/* --- changed since render ------------------------------------------------ */
+/* A shot can be finished and still not be a render of what the board now
+   says. That is not a status — the clip is real and playable — so it reads as
+   a mark on top of the status rather than replacing it. */
+.stale-badge {
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  background: var(--warn);
+  color: #1a1204;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.queue-stale {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--warn);
+  line-height: 1;
+}
+
+.stale-note {
+  border-radius: var(--radius);
+  border: 1px solid var(--warn);
+  background: var(--warn-ghost);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  margin-bottom: var(--sp-3);
+}
+
+/* --- final video -------------------------------------------------------- */
+.final-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.final-box video {
+  width: 100%;
+  border-radius: var(--radius-sm);
+  background: #000;
+  display: block;
+}
+
+.final-empty {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.final-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.final-warn {
+  font-size: var(--fs-xs);
+  color: var(--warn);
+  line-height: 1.45;
+}
+
+.final-err {
+  font-size: var(--fs-xs);
+  color: var(--err);
+  line-height: 1.45;
+}
+
+.final-actions {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
