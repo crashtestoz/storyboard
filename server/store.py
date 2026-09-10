@@ -54,6 +54,93 @@ def _rewrite_slug(node: Any, old: str, new: str) -> Any:
     return node
 
 
+def _media_rel(value: str) -> str:
+    if value.startswith("/media/"):
+        value = value[len("/media/"):]
+    if value.startswith("projects/"):
+        return value
+    return ""
+
+
+def _file_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _ref_path(ref: Any) -> str:
+    if isinstance(ref, str):
+        return _media_rel(ref)
+    if not isinstance(ref, dict):
+        return ""
+    return _media_rel(ref.get("path") or ref.get("url") or ref.get("resolved") or "")
+
+
+def _usage_label(index: int, shot: dict[str, Any] | None, label: str) -> str:
+    if shot:
+        title = (shot.get("title") or "").strip()
+        head = f"Scene {index}"
+        if title:
+            head += f" - {title}"
+        return f"{head} - {label}"
+    return label
+
+
+def _add_usage(
+    usages: dict[str, list[str]],
+    ref: Any,
+    label: str,
+    *,
+    index: int | None = None,
+    shot: dict[str, Any] | None = None,
+) -> None:
+    rel = _ref_path(ref)
+    if not rel:
+        return
+    name = _usage_label(index or 0, shot, label) if shot else label
+    bucket = usages.setdefault(rel, [])
+    if name not in bucket:
+        bucket.append(name)
+
+
+def _collect_media_usages(board: dict[str, Any]) -> dict[str, list[str]]:
+    usages: dict[str, list[str]] = {}
+    shots = board.get("shots") or []
+    characters = {
+        c.get("id"): c
+        for c in (board.get("characters") or [])
+        if c.get("id")
+    }
+
+    for i, ref in enumerate(board.get("styleRefs") or [], start=1):
+        _add_usage(usages, ref, f"Style reference {i}")
+
+    for idx, shot in enumerate(shots, start=1):
+        _add_usage(usages, shot.get("startRef"), "Start", index=idx, shot=shot)
+        _add_usage(usages, shot.get("endRef"), "End", index=idx, shot=shot)
+        for cid in shot.get("characterIds") or []:
+            ch = characters.get(cid)
+            if not ch:
+                continue
+            name = (ch.get("name") or "Character").strip()
+            _add_usage(usages, ch.get("image"), f"Character {name}", index=idx, shot=shot)
+
+    used_in_shots = {
+        cid
+        for shot in shots
+        for cid in (shot.get("characterIds") or [])
+    }
+    for ch in characters.values():
+        if ch.get("id") in used_in_shots:
+            continue
+        name = (ch.get("name") or "Character").strip()
+        _add_usage(usages, ch.get("image"), f"Cast - {name}")
+
+    return usages
+
+
 def new_id(prefix: str = "s") -> str:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
@@ -88,9 +175,9 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
     that cost a whole run: every shot was marked done, so a rewritten prompt
     was skipped and the batch cheerfully re-reported clips of the old words.
 
-    Only conditioning and geometry count. ``dialogue`` does not: speech is
-    synthesised outside the render path and muxed over the finished clip, so
-    changing a line does not invalidate the video.
+    Only conditioning and geometry count. ``dialogue`` is included because it
+    is passed to the video model as a visual mouth-movement cue; the audio is
+    still synthesised outside the render path and muxed over the finished clip.
     """
     defaults = board.get("defaults") or {}
     wanted = set(shot.get("characterIds") or [])
@@ -105,9 +192,12 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
     ]
     payload = {
         "prompt": (shot.get("prompt") or "").strip(),
+        "dialogue": (shot.get("dialogue") or "").strip(),
         "soundNote": (shot.get("soundNote") or "").strip(),
         "scene": (board.get("sceneDescription") or "").strip(),
-        "soundscape": (board.get("soundscape") or "").strip(),
+        "soundscape": (board.get("soundscape") or "").strip()
+        if board.get("soundscapeInShots", True) else "",
+        "soundscapeInShots": bool(board.get("soundscapeInShots", True)),
         "cast": cast,
         "styleRefs": [_ref_key(r) for r in (board.get("styleRefs") or [])],
         "startRef": _ref_key(shot.get("startRef")),
@@ -331,6 +421,7 @@ class Store:
         than something you hunt for in a grid.
         """
         exts = self.LIBRARY_EXTS.get(kind) or self.LIBRARY_EXTS["image"]
+        usages = self.media_usages()
         out: list[dict[str, Any]] = []
         if not self.root.exists():
             return out
@@ -346,20 +437,68 @@ class Store:
             if any(part.startswith("frames") for part in parts[:-1]):
                 continue
             rel = path.relative_to(self.data_dir)
+            rel_name = str(rel).replace("\\", "/")
+            uses = usages.get(rel_name, [])
             project = path.relative_to(self.root).parts[0]
             out.append(
                 {
-                    "path": str(rel).replace("\\", "/"),
-                    "url": "/media/" + str(rel).replace("\\", "/"),
+                    "path": rel_name,
+                    "url": "/media/" + rel_name,
                     "label": path.name,
                     "project": project,
                     "kind": kind,
+                    "used": bool(uses),
+                    "uses": uses,
+                    "digest": _file_digest(path) if kind == "image" else "",
                     "bytes": path.stat().st_size,
                     "modifiedAt": path.stat().st_mtime,
                 }
             )
         out.sort(key=lambda i: i["modifiedAt"], reverse=True)
         return out
+
+    def used_media_paths(self) -> set[str]:
+        """Media paths still referenced by any storyboard."""
+        return set(self.media_usages())
+
+    def media_usages(self) -> dict[str, list[str]]:
+        """Media paths and human-readable places that still reference them."""
+        out: dict[str, list[str]] = {}
+        if not self.root.exists():
+            return out
+        for bp in self.root.glob(f"*/{BOARD_FILE}"):
+            try:
+                board = json.loads(bp.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            project = (board.get("name") or bp.parent.name).strip()
+            for rel, labels in _collect_media_usages(board).items():
+                bucket = out.setdefault(rel, [])
+                for label in labels:
+                    full = f"{project} - {label}"
+                    if full not in bucket:
+                        bucket.append(full)
+        return out
+
+    def delete_library_item(self, rel_path: str, *, kind: str = "image") -> dict[str, Any]:
+        """Remove an unreferenced media file from the projects tree."""
+        exts = self.LIBRARY_EXTS.get(kind) or self.LIBRARY_EXTS["image"]
+        data_dir = self.data_dir.resolve()
+        root = self.root.resolve()
+        path = (data_dir / rel_path).resolve()
+        path.relative_to(data_dir)
+        path.relative_to(root)
+        if not path.is_file():
+            raise FileNotFoundError(f"no such file: {rel_path}")
+        if path.suffix.lower() not in exts:
+            raise ValueError(f"not a {kind} library file: {rel_path}")
+
+        rel_name = str(path.relative_to(data_dir)).replace("\\", "/")
+        if rel_name in self.used_media_paths():
+            raise ValueError("that file is still used by a storyboard")
+
+        path.unlink()
+        return {"ok": True, "path": rel_name}
 
     # -- read / write ---------------------------------------------------- #
 
@@ -561,6 +700,7 @@ class Store:
         board.setdefault("name", "Untitled storyboard")
         board.setdefault("sceneDescription", "")
         board.setdefault("soundscape", "")
+        board.setdefault("soundscapeInShots", True)
         board.setdefault("characters", [])
         board.setdefault("styleRefs", [])
         board.setdefault("createdAt", time.time())

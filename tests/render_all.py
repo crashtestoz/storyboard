@@ -46,6 +46,7 @@ from server.store import (                                     # noqa: E402
     render_fingerprint,
     stale_reason,
 )
+from server.backends.vpipe_backend import _resolved_prompt      # noqa: E402
 
 failures: list[str] = []
 
@@ -164,13 +165,14 @@ def test_pending(tmp: Path) -> None:
     check("switching to draft makes all three pending",
           pending_ids(orch, board) == ["s1", "s2", "s3"])
 
-    section("things that do not change the picture")
+    section("dialogue drives mouth movement")
     board = a_board()
     board["shots"][0]["dialogue"] = "Say something."
-    check("a dialogue line does not force a re-render",
-          pending_ids(orch, board) == [],
-          "speech is synthesised outside the render and muxed on afterwards")
+    check("a dialogue line makes the shot pending",
+          pending_ids(orch, board) == ["s1"],
+          "the line is a visual cue for lips; speech is still muxed afterwards")
 
+    section("things that do not change the picture")
     board = a_board()
     board["shots"][0]["title"] = "Renamed"
     check("renaming a shot does not force a re-render",
@@ -215,6 +217,56 @@ def test_pending(tmp: Path) -> None:
     board["shots"][0]["renderFingerprint"] = None
     ids = pending_ids(orch, board)
     check("cannot be shown to match, so it is re-rendered", ids == ["s1"], str(ids))
+
+
+def test_dialogue_prompting() -> None:
+    section("dialogue reaches render as a visual cue")
+    board = a_board(1)
+    board["characters"] = [
+        {
+            "id": "c1",
+            "name": "Kira",
+            "description": "Kira: a focused pilot in a worn flight jacket",
+        }
+    ]
+    shot = board["shots"][0]
+    shot["characterIds"] = ["c1"]
+    shot["dialogue"] = "Hold course."
+    prompt = _resolved_prompt(shot, board, with_audio=True)
+    check("the spoken words are a mouth-movement cue",
+          'Kira speaks the line with natural jaw and lip movement: "Hold course."' in prompt,
+          prompt)
+    check("a named description is not named twice",
+          "Kira: Kira:" not in prompt,
+          prompt)
+    check("generated speech is explicitly blocked",
+          "Generated audio contains ambient sound only" in prompt and
+          "no intelligible dialogue" in prompt,
+          prompt)
+
+
+def test_soundscape_modes() -> None:
+    section("background sound modes")
+    board = a_board(1)
+    shot = board["shots"][0]
+    shot["soundNote"] = "A hatch slams."
+
+    prompt = _resolved_prompt(shot, board, with_audio=True)
+    check("background sound renders into shots by default",
+          "Deep engine roar." in prompt,
+          prompt)
+    check("per-shot sound effects still render",
+          "A hatch slams." in prompt,
+          prompt)
+
+    board["soundscapeInShots"] = False
+    prompt = _resolved_prompt(shot, board, with_audio=True)
+    check("background sound can be held out of shot renders",
+          "Deep engine roar." not in prompt,
+          prompt)
+    check("shot effects remain when background sound is held out",
+          "A hatch slams." in prompt,
+          prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +374,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         test_pending(tmp)
+        test_dialogue_prompting()
+        test_soundscape_modes()
         test_clip_choice(tmp)
         test_final_staleness(tmp)
         test_assemble(tmp)

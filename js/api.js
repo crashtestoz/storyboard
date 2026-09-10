@@ -84,6 +84,12 @@ const API = {
   // has to be pickable, or it can never be linked to a character.
   library: (kind) =>
     req("GET", `/api/library?kind=${encodeURIComponent(kind || "image")}`),
+  deleteLibraryItem: (kind, path) =>
+    req(
+      "DELETE",
+      `/api/library?kind=${encodeURIComponent(kind || "image")}` +
+        `&path=${encodeURIComponent(path)}`
+    ),
 
   transcribe: (path, engine) => req("POST", "/api/transcribe", { path, engine }),
 

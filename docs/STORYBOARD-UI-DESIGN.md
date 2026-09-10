@@ -247,11 +247,13 @@ Added since, from use rather than from the plan:
 5. **A cast.** Characters with a required name and description and optional
    reference image and voice clip; a shot casts who appears in it. Portraits
    and voices become Ref2VA references, within that model's real limits.
-6. **Sound in two layers** — a project bed and per-shot accents, appended
-   after the visual description because that is where H3 expects sound.
-7. **Dialogue via a pluggable speech engine** (`server/tts/`), mixed over the
-   finished clip rather than asked of the video model, which does not produce
-   intelligible speech.
+6. **Sound in two layers** — a project bed and per-shot accents. The bed can
+   render into every shot, or be held out for a continuous final mix/add-later
+   workflow; per-shot accents still render with their clip.
+7. **Dialogue via a pluggable speech engine** (`server/tts/`), with the line
+   passed to the video model only as a visual mouth-movement cue. The final
+   voice is mixed over the finished clip rather than trusted to the video
+   model, which does not produce intelligible speech.
 8. **Draft mode** — half size, 6 steps, same length and seed, 3.7-8.3x faster.
 9. **Aspect ratios** with the sizes each model's docs cite marked as such.
 
