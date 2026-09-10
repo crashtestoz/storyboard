@@ -94,9 +94,13 @@ true of every shot) plus a per-shot prompt (action, camera, mood). The editor
 shows the assembled result, so nothing about the composition is hidden.
 
 **Sound in two layers.** A project-wide background bed and per-shot accents.
-Both are appended after the visual description, because MiniMax H3 generates
-its soundtrack in the same denoise loop as the picture and its own examples put
-sound in a trailing clause. Dropped automatically for a still.
+The background bed can be rendered into every shot for quick all-in-one clips,
+or held out of shot renders so music/ambience can be added later as one
+continuous final mix. Per-shot accents still render with each clip: local
+effects like switches, impacts, footsteps or spray. Sound cues are appended
+after the visual description because MiniMax H3 generates its soundtrack in the
+same denoise loop as the picture and its own examples put sound in a trailing
+clause. Dropped automatically for a still.
 
 **A cast.** Characters have a required name and description, and optional
 reference image and voice clip. An attached clip shows its name behind a ♪ and
@@ -132,15 +136,17 @@ preferring whoever actually has a clip.
 It works **before the shot is rendered**. Synthesis and muxing are separate
 functions for that reason: finding out after half an hour of video that a
 cloned voice reads the line wrong is exactly the wrong order. You get a player
-next to the line immediately; when the clip does exist, the speech is also
-mixed over it, ducking the generated soundtrack rather than replacing it — H3's
-soundtrack is part of what the model made, and dropping it for one line would
-be a downgrade.
+next to the line immediately. The line also reaches the video render as a
+visual cue — "speaks the line with natural jaw and lip movement" — so the shot
+prompt can stay about action and framing instead of carrying spoken words.
+When the clip exists, the TTS speech is mixed over it while the generated audio
+is explicitly asked to stay ambient only: no spoken words, no voice and no
+intelligible dialogue.
 
 Dubbing separately from rendering is deliberate in the other direction too: a
 line can be rewritten and re-spoken in seconds without touching a clip that
 took half an hour, and nothing in H3's documentation claims intelligible
-lip-synced speech from written text.
+phoneme-accurate lip-synced speech from written text.
 
 **Every take is trimmed and levelled.** Both of these are model behaviour, not
 integration bugs, and both were measured here rather than assumed. MOSS 8B does
@@ -307,14 +313,14 @@ clips of prompts that had since been rewritten, reported success, and gave no
 hint that two thirds of the batch had been skipped.
 
 So every render records a fingerprint of its inputs — the shot prompt and
-sound note, the scene description and background bed, the cast it uses and
-their descriptions and portraits, the reference images, the model, frame size,
-frame count, steps, seed and draft mode. A whole-board run picks up any shot
-whose fingerprint has moved, plus anything chained to one of those, since a
-start anchor taken from a re-rendered shot is a different picture. Dialogue is
-deliberately *not* in the fingerprint: speech is synthesised outside the render
-and mixed over the finished clip, so rewriting a line does not invalidate the
-video.
+dialogue line, sound note, the scene description and background bed, the cast
+it uses and their descriptions and portraits, the reference images, the model,
+frame size, frame count, steps, seed and draft mode. A whole-board run picks up
+any shot whose fingerprint has moved, plus anything chained to one of those,
+since a start anchor taken from a re-rendered shot is a different picture.
+Dialogue is included because it is passed to the video model as a visual cue
+for natural jaw and lip movement; the spoken audio is still synthesised outside
+the render and mixed over the finished clip.
 
 A shot rendered before any of this existed has no fingerprint, and is treated
 as stale — it may well be current, but nothing can show that it is, and

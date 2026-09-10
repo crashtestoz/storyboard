@@ -185,11 +185,68 @@ def test_independent_data_dir(tmp: Path) -> None:
           st2.root == ws / "projects")
 
 
+def test_library_delete(tmp: Path) -> None:
+    print("\n-- library delete safety --")
+    st = Store(workspace=tmp)
+    slug = seeded_board(st, "Library")
+    board = st.load(slug)
+    board["styleRefs"] = [{
+        "path": f"projects/{slug}/refs/style.png",
+        "url": f"/media/projects/{slug}/refs/style.png",
+        "label": "style.png",
+    }]
+    board["shots"][0]["characterIds"] = ["c1"]
+    board["shots"][0]["startRef"] = {
+        "path": f"projects/{slug}/refs/start.png",
+        "url": f"/media/projects/{slug}/refs/start.png",
+        "label": "start.png",
+    }
+    st.save(slug, board)
+    d = st.project_dir(slug)
+    unused = d / "refs/unused.png"
+    unused.write_bytes(b"x")
+    duplicate = d / "refs/kira-copy.png"
+    duplicate.write_bytes(b"x")
+    (d / "refs/style.png").write_bytes(b"style")
+    (d / "refs/start.png").write_bytes(b"start")
+
+    images = st.library(kind="image")
+    by_name = {i["label"]: i for i in images}
+    check("referenced image is marked used",
+          by_name["kira.png"]["used"] is True,
+          str(by_name.get("kira.png")))
+    check("character use names the scene",
+          any("Scene 1 - One - Character Kira" in u for u in by_name["kira.png"]["uses"]),
+          str(by_name["kira.png"].get("uses")))
+    check("start use names the scene",
+          any("Scene 1 - One - Start" in u for u in by_name["start.png"]["uses"]),
+          str(by_name["start.png"].get("uses")))
+    check("style use is named",
+          any("Style reference 1" in u for u in by_name["style.png"]["uses"]),
+          str(by_name["style.png"].get("uses")))
+    check("duplicate images carry matching digests",
+          by_name["kira.png"]["digest"] == by_name["kira-copy.png"]["digest"],
+          str((by_name["kira.png"].get("digest"), by_name["kira-copy.png"].get("digest"))))
+    check("unreferenced image is removable",
+          by_name["unused.png"]["used"] is False,
+          str(by_name.get("unused.png")))
+
+    try:
+        st.delete_library_item(by_name["kira.png"]["path"], kind="image")
+        check("used image cannot be deleted", False, "no error raised")
+    except ValueError:
+        check("used image cannot be deleted", True)
+
+    st.delete_library_item(by_name["unused.png"]["path"], kind="image")
+    check("unused image is deleted", not unused.exists())
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="sbv-store-test-"))
     try:
         test_rename(tmp / "a")
         test_independent_data_dir(tmp / "b")
+        test_library_delete(tmp / "c")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -218,6 +218,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/library":
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                rel = (q.get("path") or [""])[0]
+                kind = (q.get("kind") or ["image"])[0]
+                if kind not in Store.LIBRARY_EXTS:
+                    raise ValueError(
+                        f"unknown library kind {kind!r} "
+                        f"(expected {', '.join(sorted(Store.LIBRARY_EXTS))})"
+                    )
+                if not rel:
+                    raise ValueError("path is required")
+                return self._send_json(
+                    self.ctx.store.delete_library_item(rel, kind=kind)
+                )
+            except FileNotFoundError as exc:
+                return self._err(404, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                return self._err(400, f"{type(exc).__name__}: {exc}")
+
         m = re.fullmatch(r"/api/boards/([^/]+)", path)
         if not m:
             return self._err(404, "not found")

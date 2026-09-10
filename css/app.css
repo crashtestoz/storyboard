@@ -590,6 +590,10 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   background: var(--accent);
 }
 
+.rail-toggle {
+  margin-top: var(--sp-2);
+}
+
 /* ==========================================================================
    Queue list (rail)
    ========================================================================== */
@@ -970,9 +974,14 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   background: var(--bg-sunken);
   cursor: pointer;
   transition: border-color 0.12s, transform 0.12s;
+  position: relative;
 }
 
 .pick:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+.pick.used img {
+  opacity: 0.52;
+}
 
 .pick img {
   width: 100%;
@@ -994,6 +1003,41 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 .pick-project { color: var(--text-faint); }
+
+.pick-usage {
+  margin-top: 2px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pick-delete {
+  position: absolute;
+  right: var(--sp-2);
+  bottom: 34px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  line-height: 1;
+}
+
+.pick-delete:hover {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.pick-delete:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
 
 .drop-hint {
   border-color: var(--accent) !important;

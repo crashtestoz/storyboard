@@ -461,6 +461,11 @@ function wireChrome() {
     markDirty();
     updateResolvedPreview();
   });
+  $("#soundscapeInShots").addEventListener("change", (e) => {
+    state.board.soundscapeInShots = e.target.checked;
+    markDirty();
+    render();
+  });
 
   $("#addCharacter").addEventListener("click", () => editCharacter(null));
 
@@ -913,6 +918,11 @@ function renderRail() {
   if (document.activeElement !== sd) sd.value = state.board.sceneDescription || "";
   const snd = $("#soundscape");
   if (document.activeElement !== snd) snd.value = state.board.soundscape || "";
+  const sndMode = $("#soundscapeInShots");
+  sndMode.checked = state.board.soundscapeInShots !== false;
+  sndMode.title = sndMode.checked
+    ? "The background sound text is included in every shot render."
+    : "The background sound text is kept for the final mix/add-later stage; only per-shot sound accents render now.";
 
   const wrap = $("#styleRefs");
   wrap.innerHTML = "";
@@ -1903,17 +1913,18 @@ function renderEditor() {
     dlg.value = raw.dialogue || "";
     dlg.placeholder =
       "A line someone speaks in this clip.\n" +
-      "Synthesised by the speech engine and muxed over the finished clip — " +
-      "the video model itself does not produce intelligible dialogue.";
+      "Used as a visual cue for mouth movement, then synthesised by the " +
+      "speech engine and muxed over the finished clip.";
     dlg.addEventListener("input", () => {
       live().dialogue = dlg.value;
       markDirty();
+      updateResolvedPreview();
       syncTabDots();
     });
     dlg.dataset.fkey = "dialogue";
     const dp = el("div");
     dp.append(
-      paneHint("spoken separately, then mixed over the finished clip"),
+      paneHint("drives mouth movement; the final voice is mixed in separately"),
       dlg
     );
     // Speaking the line belongs with the line. It used to hang off the panel
@@ -1930,7 +1941,7 @@ function renderEditor() {
     sa.value = raw.soundNote || "";
     sa.placeholder =
       "Sound accents for THIS clip — what happens sonically here.\n" +
-      "The project background sound is already applied to every shot.";
+      "The project background sound is controlled by the rail switch.";
     sa.addEventListener("input", () => {
       live().soundNote = sa.value;
       markDirty();
@@ -1940,7 +1951,7 @@ function renderEditor() {
     sa.dataset.fkey = "sound-accents";
     const sp2 = el("div");
     sp2.append(
-      paneHint("this clip only — the project background sound is already applied"),
+      paneHint("this clip only — independent of the project background sound mode"),
       sa
     );
     pane("sound", sp2);
@@ -2292,24 +2303,75 @@ function resolvedParts(raw) {
     .forEach((c) => {
       const n = (c.name || "").trim();
       const d = (c.description || "").trim();
-      if (d) push(`cast · ${n || "unnamed"}`, n ? `${n}: ${d}` : d);
+      if (d) push(`cast · ${n || "unnamed"}`, characterDescription(n, d));
     });
 
   push("shot", raw.prompt);
 
   if (!cap || cap.supportsAudio) {
-    push("sound bed", state.board.soundscape);   // project-wide
+    push("dialogue movement", dialogueVisualCue(raw));
+    if (state.board.soundscapeInShots !== false) {
+      push("sound bed", state.board.soundscape);   // project-wide
+    } else if ((state.board.soundscape || "").trim()) {
+      push("sound bed", "(held for final mix; not sent to this shot render)");
+    }
     push("accents", raw.soundNote);              // this clip only
+    if ((raw.dialogue || "").trim()) {
+      push(
+        "speech guard",
+        "Generated audio contains ambient sound only: no spoken words, no voice, " +
+          "and no intelligible dialogue; the voice line is dubbed separately."
+      );
+    }
   }
   return out;
+}
+
+function dialogueVisualCue(raw) {
+  const line = (raw.dialogue || "").trim();
+  if (!line) return "";
+  return `${speakerName(raw)} speaks the line with natural jaw and lip movement: "${line}"`;
+}
+
+function speakerName(raw) {
+  const cast = (state.board.characters || []).filter((c) =>
+    (raw.characterIds || []).includes(c.id)
+  );
+  if (raw.speakerId) {
+    const explicit = (state.board.characters || []).find((c) => c.id === raw.speakerId);
+    if (explicit && (explicit.name || "").trim()) return explicit.name.trim();
+  }
+  const first = cast.find((c) => (c.name || "").trim());
+  return first ? first.name.trim() : "The visible character";
 }
 
 /** Exactly what the backend will assemble, so the preview cannot drift. */
 function resolvedPromptText(raw) {
   const joined = resolvedParts(raw)
-    .map(({ text }) => (".!?;:,".includes(text.slice(-1)) ? text : text + "."))
+    .map(({ text }) => sentenceText(text))
     .join(" ");
   return joined || "(empty)";
+}
+
+function sentenceText(text) {
+  text = (text || "").trim();
+  if (!text) return "";
+  if (".!?;:,".includes(text.slice(-1))) return text;
+  if (text.length >= 2 && "\"”'".includes(text.slice(-1)) &&
+      ".!?;:,".includes(text.slice(-2, -1))) {
+    return text;
+  }
+  return text + ".";
+}
+
+function characterDescription(name, desc) {
+  name = (name || "").trim();
+  desc = (desc || "").trim();
+  if (!desc) return "";
+  if (name && desc.toLowerCase().startsWith(name.toLowerCase() + ":")) {
+    return desc;
+  }
+  return name ? `${name}: ${desc}` : desc;
 }
 
 /* Takes the node rather than looking it up: during renderEditor the pane is
@@ -2953,6 +3015,46 @@ async function chooseImage(title) {
   return chooseMedia(title, "image");
 }
 
+function groupedImageItems(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.digest || `${item.bytes || ""}:${item.label || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  return [...groups.values()].map((group) => {
+    const own = group.find((item) => item.path && item.path.includes(`projects/${state.slug}/`));
+    const used = group.find((item) => item.used);
+    const newest = group.reduce((best, item) =>
+      (item.modifiedAt || 0) > (best.modifiedAt || 0) ? item : best
+    );
+    const main = own || used || newest;
+    const uses = [...new Set(group.flatMap((item) => item.uses || []))];
+    const projects = [...new Set(group.map((item) => item.project).filter(Boolean))];
+    return {
+      ...main,
+      used: group.some((item) => item.used),
+      uses,
+      duplicates: group.length,
+      project: projects.length > 1
+        ? `${projects[0]} +${projects.length - 1}`
+        : main.project,
+      duplicatePaths: group.map((item) => item.path),
+      unusedDuplicatePaths: group
+        .filter((item) => !item.used)
+        .map((item) => item.path),
+    };
+  });
+}
+
+function usageText(item) {
+  const uses = item.uses || [];
+  if (!uses.length) return "";
+  if (uses.length <= 2) return uses.join(" · ");
+  return `${uses.slice(0, 2).join(" · ")} · +${uses.length - 2} more`;
+}
+
 /* One picker for both kinds. Audio needed the same "already in the project"
    route images had: without it the only way to attach a voice clip was to
    upload it again from the filesystem, so a clip already sitting in a
@@ -3003,7 +3105,8 @@ async function chooseMedia(title, kind) {
     API.library(kind)
       .then(({ items }) => {
         grid.innerHTML = "";
-        if (!items.length) {
+        const shown = isAudio ? items : groupedImageItems(items);
+        if (!shown.length) {
           grid.appendChild(
             el("div", "empty-state",
                isAudio
@@ -3012,8 +3115,12 @@ async function chooseMedia(title, kind) {
           );
           return;
         }
-        items.forEach((img) => {
+        shown.forEach((img) => {
           const card = el("div", isAudio ? "pick pick-audio" : "pick");
+          if (!isAudio && img.used) {
+            card.classList.add("used");
+            card.title = usageText(img) || "Used by a storyboard";
+          }
           if (isAudio) {
             const icon = el("div", "pick-audio-icon", "♪");
             card.appendChild(icon);
@@ -3023,10 +3130,51 @@ async function chooseMedia(title, kind) {
             im.loading = "lazy";
             im.alt = img.label;
             card.appendChild(im);
+            if (img.unusedDuplicatePaths && img.unusedDuplicatePaths.length) {
+              const del = el("button", "pick-delete", "🗑");
+              del.title = img.unusedDuplicatePaths.length > 1
+                ? `Delete ${img.unusedDuplicatePaths.length} unused duplicate images`
+                : "Delete unused image";
+              del.addEventListener("click", async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const count = img.unusedDuplicatePaths.length;
+                const name = count > 1 ? `${count} unused copies of ${img.label}` : img.label;
+                if (!confirm(`Delete ${name}?`)) return;
+                del.disabled = true;
+                try {
+                  await Promise.all(
+                    img.unusedDuplicatePaths.map((path) =>
+                      API.deleteLibraryItem("image", path)
+                    )
+                  );
+                  if (img.used) {
+                    img.unusedDuplicatePaths = [];
+                    del.remove();
+                  } else {
+                    card.remove();
+                  }
+                  toast(`Deleted ${name}.`);
+                  if (!grid.querySelector(".pick")) {
+                    grid.appendChild(el("div", "empty-state", "No images in your projects yet — upload one."));
+                  }
+                } catch (err) {
+                  del.disabled = false;
+                  toast(`Could not delete ${name}: ${err.message}`, "error");
+                }
+              });
+              card.appendChild(del);
+            }
           }
           const meta = el("div", "pick-meta");
-          meta.appendChild(el("div", "pick-name", img.label));
+          meta.appendChild(el("div", "pick-name", img.duplicates > 1
+            ? `${img.label} (${img.duplicates})`
+            : img.label));
           meta.appendChild(el("div", "pick-project", img.project));
+          const usedAt = usageText(img);
+          if (!isAudio && usedAt) {
+            meta.appendChild(el("div", "pick-usage", usedAt));
+          }
           card.appendChild(meta);
           if (isAudio) {
             // Audible before you commit to it: one clip of dialogue sounds
