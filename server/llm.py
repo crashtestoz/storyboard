@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import mimetypes
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -93,6 +95,23 @@ characters or locations, and do not remove any they named.
 - Write only the prompt itself. Your entire reply is used verbatim.
 """
 
+CHARACTER_IMAGE_SYSTEM_PROMPT = """\
+You write compact, production-ready character descriptions for a storyboard to \
+video generator, using the supplied reference image as visual evidence.
+
+Rules:
+- Describe only stable visible traits useful for recreating the character: age \
+range, build, face shape, hair, skin tone, clothing, accessories, posture or \
+distinctive marks.
+- If a name is provided, start with that name followed by a colon.
+- Preserve any concrete user-provided details that do not contradict the image.
+- Do not identify real people or copyrighted characters from the image. If the \
+user supplied a name, use that name as a label without claiming identity.
+- One paragraph. No headings, no bullets, no preamble, no explanation.
+- Aim for 35 to 75 words.
+- Write only the character description.
+"""
+
 
 def build_user_message(
     text: str,
@@ -143,6 +162,20 @@ class LLMService:
 
     def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
         raise NotImplementedError
+
+    def complete_with_image(
+        self,
+        system: str,
+        user: str,
+        image: Path,
+        *,
+        timeout: float = 120.0,
+    ) -> str:
+        raise RuntimeError(
+            f"{self.label} is configured for text completion only. Use a "
+            "vision-capable Ollama or OpenAI-compatible model for image-based "
+            "character descriptions."
+        )
 
     def to_json(self) -> dict[str, Any]:
         ok, msg = self.health()
@@ -239,6 +272,41 @@ class OllamaLLM(LLMService):
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
 
+    def complete_with_image(
+        self,
+        system: str,
+        user: str,
+        image: Path,
+        *,
+        timeout: float = 120.0,
+    ) -> str:
+        body = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": user,
+                        "images": [
+                            base64.b64encode(image.read_bytes()).decode("ascii")
+                        ],
+                    },
+                ],
+                "stream": False,
+                "options": {"temperature": 0.4, "top_p": 0.9,
+                            "num_ctx": self.num_ctx},
+                "think": False,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"{self.url}/api/chat", data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            doc = json.loads(r.read().decode())
+        return ((doc.get("message") or {}).get("content") or "").strip()
+
 
 class OpenAICompatLLM(LLMService):
     """Anything exposing ``/v1/chat/completions`` — llama.cpp, vLLM, LM Studio."""
@@ -283,6 +351,45 @@ class OpenAICompatLLM(LLMService):
                     {"role": "user", "content": user},
                 ],
                 "temperature": 0.7,
+                "stream": False,
+            }
+        ).encode()
+        req = urllib.request.Request(f"{self.url}/v1/chat/completions",
+                                     data=body, headers=self._headers())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            doc = json.loads(r.read().decode())
+        choices = doc.get("choices") or [{}]
+        return ((choices[0].get("message") or {}).get("content") or "").strip()
+
+    def complete_with_image(
+        self,
+        system: str,
+        user: str,
+        image: Path,
+        *,
+        timeout: float = 120.0,
+    ) -> str:
+        mime = mimetypes.guess_type(str(image))[0] or "application/octet-stream"
+        encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+        body = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime};base64,{encoded}"
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "temperature": 0.4,
                 "stream": False,
             }
         ).encode()
@@ -383,6 +490,43 @@ def rewrite_prompt(
         raise RuntimeError(
             f"{service.label} returned an empty rewrite. It may have run out "
             "of context, or be a model that only emits reasoning."
+        )
+    return out
+
+
+def describe_character(
+    service: LLMService,
+    image: Path,
+    *,
+    name: str = "",
+    current: str = "",
+) -> str:
+    """Ask *service* to describe a character from a reference image."""
+    ok, msg = service.health()
+    if not ok:
+        raise RuntimeError(msg)
+    if not image.is_file():
+        raise FileNotFoundError(f"no such reference image: {image}")
+
+    blocks = [
+        "Write or improve the character description from the attached image."
+    ]
+    if name.strip():
+        blocks.append(f"Character label: {name.strip()}")
+    if current.strip():
+        blocks.append(
+            "Current description to preserve where accurate:\n" + current.strip()
+        )
+
+    out = service.complete_with_image(
+        CHARACTER_IMAGE_SYSTEM_PROMPT,
+        "\n\n".join(blocks),
+        image,
+    )
+    out = _strip_wrapping(out)
+    if not out:
+        raise RuntimeError(
+            f"{service.label} returned an empty character description."
         )
     return out
 
