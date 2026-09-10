@@ -244,6 +244,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "soundNote": "",
         "characterIds": [],
         "dialogue": "",           # the spoken line, synthesised separately
+        "dialogueStyle": "",      # delivery notes for TTS, not spoken text
         "dialogueVoice": "",      # engine voice id, or "" for the default
         "speakerId": "",          # which cast member says it; "" = infer
         "dialogueAudioUrl": None, # the spoken line on its own, for preview
@@ -269,6 +270,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         # The words the stored dialogue.wav actually says. A line edited after
         # it was spoken must not be muxed from the old take.
         "dialogueSpokenText": "",
+        "dialogueSpokenStyle": "",
     }
 
 
@@ -740,6 +742,7 @@ class Store:
             shot.setdefault("speakerId", "")
             shot.setdefault("dialogueAudioUrl", None)
             shot.setdefault("dialogue", "")
+            shot.setdefault("dialogueStyle", "")
             shot.setdefault("dialogueVoice", "")
             shot.setdefault("dubUrl", None)
             shot.setdefault("startRef", None)
@@ -759,4 +762,5 @@ class Store:
             shot.setdefault("renderedAs", None)
             shot.setdefault("renderFingerprint", None)
             shot.setdefault("dialogueSpokenText", "")
+            shot.setdefault("dialogueSpokenStyle", "")
         return board

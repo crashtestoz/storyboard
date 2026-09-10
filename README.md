@@ -12,29 +12,104 @@ scaffold behind the same interface.
 Design rationale and the orchestrator contract:
 [`docs/STORYBOARD-UI-DESIGN.md`](docs/STORYBOARD-UI-DESIGN.md).
 
-## Running it
+## Installation
+
+The web app itself has no Python package install step and no Node build step:
+it runs on Python's standard library. The full workflow does need system tools
+and model services.
+
+### 1. Install system dependencies
+
+macOS/Homebrew:
 
 ```sh
-./serve.sh                              # http://localhost:9877
-./serve.sh --lan                        # reachable on your LAN
-./serve.sh --port 8080
-./serve.sh --workspace DIR              # where vpipe is launched from
-./serve.sh --data-dir DIR               # where your storyboards live
-./serve.sh --tts qwen3-clone            # default engine id (see tts-services.json)
-./serve.sh --llm ollama-local           # default rewrite model (see llm-services.json)
+brew install python@3.14 ffmpeg lsof
 ```
 
-Standard library Python only — nothing to install. Run the script, it prints a
-URL, Ctrl-C stops it. Port 9877 by default so it never collides with
-`vpipe-web-ui` on 9876.
+Minimum versions:
 
-### Fetching the speech models
+| Dependency | Required for | Notes |
+| --- | --- | --- |
+| Python 3.10+ | The storyboard web server | `start.sh` prefers Homebrew Python 3.14, 3.13, 3.12, 3.11, then 3.10. |
+| vpipe CLI | Rendering MiniMax H3 / Ref2VA / Krea-2 pipelines | Pass with `--vpipe PATH` or set `SBV_VPIPE`. |
+| vpipe workspace with `models/` | Model discovery and render runtime | Pass with `--workspace DIR` or set `SBV_WORKSPACE`. |
+| ffmpeg | Final video assembly and dialogue muxing | Without it, individual renders can still run, but final joining/dubbing is limited. |
+| lsof | `./start.sh --restart` | Used to find the process listening on the selected port. |
+| Ollama or OpenAI-compatible LLM service | Prompt rewrite and character-description AI buttons | Optional; configured in `llm-services.json`. |
+| TTS service or MOSS models | Spoken dialogue | Optional; configured in `tts-services.json`. |
+| Node.js | Browser/JS regression tests only | Not needed to run the app. |
+
+There is deliberately no `pip install -r requirements.txt` and no
+`npm install`.
+
+### 2. Install or point to vpipe
+
+Build or install vpipe separately, then make sure the storyboard app can find
+the CLI binary and the workspace where vpipe keeps its `models/` directory.
+Pass those paths explicitly if your checkout is not in the default location:
+
+```sh
+./start.sh --workspace /path/to/vpipe-workspace \
+  --vpipe /path/to/vpipe/build/apps/vpipe/vpipe
+```
+
+Use flags or environment variables if your paths differ:
+
+```sh
+export SBV_WORKSPACE=/path/to/vpipe-workspace
+export SBV_VPIPE=/path/to/vpipe/build/apps/vpipe/vpipe
+```
+
+The workspace is vpipe's runtime root. It is where vpipe resolves `models/`
+and its model registry from, so it must be the same workspace used when the
+models were prepared.
+
+### 3. Prepare vpipe models
+
+Run the setup pipelines from the vpipe workspace for the models you want to
+use:
+
+```sh
+cd "$SBV_WORKSPACE"
+"$SBV_VPIPE" --launch setup/prepare-minimax-h3-8bit.vpipeline
+"$SBV_VPIPE" --launch setup/prepare-minimax-h3-ref2va-8bit.vpipeline
+"$SBV_VPIPE" --launch setup/prepare-krea-2.vpipeline
+```
+
+Those are the render models currently exposed by the UI:
+
+| Model | UI mode |
+| --- | --- |
+| MiniMax H3 8-bit | Text-to-video with generated sound |
+| MiniMax H3 Ref2VA 8-bit | Reference images / voice clips to video |
+| Krea-2 Turbo | Still-image prompt preview |
+
+If your vpipe workspace keeps setup files elsewhere, run the equivalent
+prepare pipelines from that workspace. The server startup banner reports which
+models are available.
+
+### 4. Configure storyboard storage
+
+Storyboards and uploads are saved under:
+
+```text
+<data-dir>/projects/<board-slug>/
+```
+
+By default, `--data-dir` is the same as `--workspace`, preserving the original
+layout. To keep storyboards outside the vpipe runtime folder:
+
+```sh
+export SBV_DATA_DIR=/path/to/storyboard-data
+```
+
+### 5. Fetch speech models, if using local MOSS
 
 `vpipe-moss` needs two models in the workspace. Once:
 
 ```sh
-cd <workspace>
-<vpipe>/build/apps/vpipe/vpipe --launch setup/prepare-moss-tts.vpipeline
+cd "$SBV_WORKSPACE"
+"$SBV_VPIPE" --launch setup/prepare-moss-tts.vpipeline
 ```
 
 That pulls `mlx-community/MOSS-TTS-8B-8bit` (already 8-bit, no quantize pass)
@@ -66,6 +141,61 @@ these pipelines do not set.)
 The startup banner lists both directories and which models, speech engines and
 rewrite models it can actually see.
 
+### 6. Configure optional services
+
+The first run creates service config files if they do not exist:
+
+```text
+tts-services.json
+llm-services.json
+```
+
+Edit `tts-services.json` for speech engines such as local MOSS through vpipe,
+a Qwen-style voice-clone service, or a plain HTTP TTS service. Edit
+`llm-services.json` for prompt rewriting and image-based character
+description services such as Ollama or an OpenAI-compatible
+`/v1/chat/completions` server.
+
+For services needing an API key, use `apiKeyEnv` in the config and keep the
+secret in the named environment variable.
+
+## Running it
+
+```sh
+./start.sh                              # http://localhost:9877
+./start.sh --lan                        # reachable on your LAN
+./start.sh --port 8080
+./start.sh --workspace DIR              # where vpipe is launched from
+./start.sh --data-dir DIR               # where your storyboards live
+./start.sh --vpipe PATH                 # path to the vpipe CLI binary
+./start.sh --tts qwen3-clone            # default engine id (see tts-services.json)
+./start.sh --llm ollama-local           # default rewrite model (see llm-services.json)
+```
+
+Run in the foreground while developing; Ctrl-C stops it.
+
+```sh
+./start.sh
+```
+
+Run or restart detached on the same port:
+
+```sh
+./start.sh --restart
+./start.sh --restart --port 9877
+```
+
+Detached mode writes:
+
+```text
+server.log
+server.pid
+```
+
+Port 9877 is the default so it does not collide with `vpipe-web-ui` on 9876.
+`serve.sh` is still present as the older foreground-only launcher, but
+`start.sh` is the recommended entry point.
+
 ## Where things live
 
 ```
@@ -84,7 +214,7 @@ rewrite models it can actually see.
 
 A project folder is self-contained: copy or zip it and you have the board, its
 references and everything it rendered. Picked images are copied in rather than
-referenced in place, so a board never depends on another project's folder.
+referenced in place, so a board never depends on an outside folder.
 Save, load and export are all the same file.
 
 ## What it does
@@ -92,6 +222,20 @@ Save, load and export are all the same file.
 **Two-tier prompting.** A project-level scene description (subject and style,
 true of every shot) plus a per-shot prompt (action, camera, mood). The editor
 shows the assembled result, so nothing about the composition is hidden.
+
+**Style references and the media library.** Style reference images are
+project-wide. On Ref2VA renders they are sent to vpipe's `video-ref-encoder`
+after any character portraits and before the shot's own reference image, so
+they help steer visual consistency across every compatible shot. Ref2VA also
+offers a per-shot **Shot reference image**; it is a subject/style reference for
+that clip, not a start-frame anchor. Style images are not copied into the text
+prompt for non-reference models.
+
+The image picker scans project `refs/` folders and rendered stills, groups
+exact duplicate images by content hash, and shows where used files are
+referenced: scene start/end frames, scene character refs, cast refs, or global
+style refs. Used images are faded and protected from deletion. Unused images,
+including unused duplicate copies, show a trash button.
 
 **Sound in two layers.** A project-wide background bed and per-shot accents.
 The background bed can be rendered into every shot for quick all-in-one clips,
@@ -113,25 +257,48 @@ to them by name in its prompt. On Ref2VA the portrait becomes an image
 reference and the voice clip a soundtrack reference, respecting that model's
 real limits (9 images, 3 soundtracks, 12 total).
 
-**Frame anchors and chaining.** A shot can open — and close — on an exact
-frame, including "the last frame of the previous shot", which is how a
-sequence reads as continuous. Verified: a chained shot's first frame matches
-its predecessor's last.
+**Frame anchors and chaining.** On FL2VA, a shot can open — and close — on an
+exact frame, including "the last frame of the previous shot", which is how a
+sequence reads as continuous. Ref2VA does not expose start/end anchors; its
+per-shot image is encoded as a reference instead. Verified: a chained FL2VA
+shot's first frame matches its predecessor's last.
 
 **Transcription is its own capability.** Cloning a voice and recognising
 speech are separate, and one does not imply the other — MOSS clones a voice and
 has no speech recognition at all. So engines declare `supports_transcription`,
 the Transcribe button reports on whichever configured service actually has it
 (naming it in the tooltip), and `/api/transcribe` uses the engine you asked for
-when it can and otherwise finds one that can, saying which it used. Refusing on
-the grounds that *the selected* engine cannot transcribe was a dead end when
-another configured service was sitting right there.
+when it can and otherwise finds one that can, saying which it used.
 
-**Dialogue, in the character's own voice.** *Speak this line* synthesises the
-shot's line using the speaking character's reference clip and transcript, so
-what you hear is their cloned voice, not a generic one. Who speaks is inferred
-when a shot has one character in it and chosen from a list when it has several,
+**Dialogue, in the character's own voice.** **Generate** synthesises the shot's
+line using the speaking character's reference clip and transcript, so what you
+hear is their cloned voice, not a generic one. Who speaks is inferred when a
+shot has one character in it and chosen from a list when it has several,
 preferring whoever actually has a clip.
+
+The Dialogue tab also has **Voice direction** for delivery notes such as
+`tired`, `quiet`, `breathy`, `urgent whisper`, or `slight smile`. Those notes
+are sent separately to compatible speech engines and are not spoken aloud. If
+the direction changes after a take was generated, the app treats the existing
+spoken audio as stale and asks you to speak the line again.
+
+For `qwen3-clone`, the adapter sends the shot dialogue as the text to speak
+and sends voice direction through Qwen's instruction field. You can paste a
+full Qwen-style block in **Voice direction**; the app keeps the delivery
+section and ignores the `[TEXT TO SPEAK]` section because the shot dialogue is
+already the source of truth:
+
+```text
+[STYLE / VOICE DIRECTION]
+
+...
+
+[TEXT TO SPEAK]
+
+...
+
+[END]
+```
 
 It works **before the shot is rendered**. Synthesis and muxing are separate
 functions for that reason: finding out after half an hour of video that a
@@ -225,14 +392,14 @@ Render backends (`server/backends/`) and speech engines (`server/tts/`) are
 both pluggable, and each reports its own health so a missing model or an
 unreachable service says so at startup rather than mid-render.
 
-Speech services are **linked, not installed**. A voice model here is usually
-already running somewhere with an owner, so this project points at it by name
-and URL in `tts-services.json` (created on first run, meant to be edited):
+Speech services are **linked, not installed**. A voice model may be running as
+a separate service, so this app points at it by name and URL in
+`tts-services.json` (created on first run, meant to be edited):
 
 ```json
 {"services": [
   {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone",
-   "kind": "qwen3-clone", "url": "http://optiplex:8790"}
+   "kind": "qwen3-clone", "url": "http://127.0.0.1:8790"}
 ]}
 ```
 
@@ -242,8 +409,7 @@ client:
 | kind | Notes |
 | --- | --- |
 | `vpipe-moss` | MOSS-TTS 8B through vpipe's own text-to-speech stage. Local, no URL needed, and clones a voice from a reference clip. Needs the MOSS models fetched — run `setup/prepare-moss-tts.vpipeline` from the workspace (~9 GB, one time). Roughly 27s for a short line on an M4 Pro. |
-| `qwen3-clone` | The Qwen3-TTS voice-clone server MCC uses. Around 3x faster than MOSS for a short line, and the transcript conditions the clone. Needs a reference clip **and a transcript of what it says** — its `generate_voice_clone()` conditions on both — and it will transcribe the clip itself if the transcript is blank. **Reachability:** it binds `127.0.0.1`, so from another machine either start it with `--host 0.0.0.0` and open port 8790, or tunnel it with `ssh -L 8790:127.0.0.1:8790 <host>` and leave the URL as localhost. |
-| `mcc-sherpa` | MCC's `/api/tts`, a sherpa-onnx VITS voice. Text in, wav out, no cloning. |
+| `qwen3-clone` | A Qwen3-TTS-compatible voice-clone HTTP service. The transcript conditions the clone, so it needs a reference clip **and a transcript of what it says**; if the service exposes transcription, the app can fill that transcript from the clip. |
 | `none` | Dialogue is stored but not spoken. |
 
 Language models for prompt rewriting work the same way, in
@@ -251,7 +417,7 @@ Language models for prompt rewriting work the same way, in
 
 ```json
 {"services": [
-  {"id": "ollama-local", "label": "Ollama (this machine)",
+  {"id": "ollama-local", "label": "Ollama",
    "kind": "ollama", "url": "http://localhost:11434",
    "model": "qwen3.8:27b-mlx"}
 ]}
@@ -264,8 +430,6 @@ Language models for prompt rewriting work the same way, in
 shows progress and the result waits for approval. For a service needing a key,
 use `apiKeyEnv` to name an environment variable rather than putting the key in
 this tracked file.
-
-Both HTTP contracts were read from MCC's source, not guessed.
 
 ## Tests
 
@@ -364,10 +528,6 @@ output — and carries the caret across when it does.
 
 ## Known gaps
 
-- The theme is a placeholder, not MCC's palette. All colours live in
-  `css/tokens.css` and `css/app.css` has none, so matching MCC is a
-  value-for-value swap in one file — but this repo had no read access to
-  `admin/mcc`.
 - The ComfyUI backend is a scaffold with an integration plan, not an
   implementation.
 - Board editing is a whole-board save, so two browser tabs on one board are

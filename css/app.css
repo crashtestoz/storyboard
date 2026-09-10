@@ -212,7 +212,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   padding: 6px var(--sp-3);
+  color: var(--text);
   cursor: pointer;
+  text-decoration: none;
   transition: background 0.12s, border-color 0.12s;
   white-space: nowrap;
 }
@@ -222,6 +224,13 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .btn:disabled {
   opacity: 0.42;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn.disabled {
+  opacity: 0.42;
+  pointer-events: none;
   cursor: not-allowed;
   transform: none;
 }
@@ -598,7 +607,41 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
    Queue list (rail)
    ========================================================================== */
 
+.queue-box > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-2);
+  align-items: baseline;
+  cursor: pointer;
+  list-style: none;
+}
+
+.queue-box > summary::-webkit-details-marker { display: none; }
+
+.queue-box > summary::after {
+  content: "▸";
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.queue-box[open] > summary::after { content: "▾"; }
+
+.queue-summary {
+  min-width: 0;
+  padding-right: 16px;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .queue-list { display: flex; flex-direction: column; gap: 3px; }
+
+.queue-box[open] .queue-list { margin-top: var(--sp-2); }
 
 .queue-row {
   display: flex;
@@ -1303,6 +1346,13 @@ textarea.ta-tall {
   line-height: 1.55;
 }
 
+textarea.ta-compact {
+  min-height: 72px;
+  margin-top: var(--sp-2);
+  resize: vertical;
+  line-height: 1.45;
+}
+
 /* --- prompt rewriting ---------------------------------------------------- */
 
 .wand { flex: none; }
@@ -1500,6 +1550,15 @@ textarea.ta-tall {
   height: 32px;
   flex: 1 1 240px;
   min-width: 200px;
+}
+
+.speak-player.busy {
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.speak-download {
+  flex: none;
 }
 
 /* A saved log's "# ..." header: context for the run, not a line the engine

@@ -32,6 +32,7 @@ from server.dubbing import (                                   # noqa: E402
     speaker_for,
 )
 from server.tts.base import SpeechResult, TTSEngine            # noqa: E402
+from server.tts.http_services import _qwen_style_instruction   # noqa: E402
 
 failures: list[str] = []
 
@@ -58,6 +59,7 @@ class StubEngine(TTSEngine):
         self.calls.append({
             "text": text, "voice": voice, "reference": reference,
             "reference_text": kw.get("reference_text", ""),
+            "style": kw.get("style", ""),
         })
         if self.fail:
             return SpeechResult(engine=self.id, error=self.fail)
@@ -178,6 +180,26 @@ def test_speaker_for() -> None:
           name(speaker_for({"characterIds": ["c1"], "speakerId": "gone"}, board)) == "Kira")
 
 
+def test_qwen_style_prompt() -> None:
+    print("\n-- qwen style instruction --")
+    empty = _qwen_style_instruction("")
+    plain = _qwen_style_instruction("polite and anxious")
+    template = _qwen_style_instruction(
+        "[STYLE / VOICE DIRECTION]\n\nformal\n\n[TEXT TO SPEAK]\n\n{{TEXT}}\n\n[END]",
+    )
+    pasted = _qwen_style_instruction(
+        "[STYLE / VOICE DIRECTION]\n\nformal\n\n[TEXT TO SPEAK]\n\nold placeholder\n\n[END]",
+    )
+    check("empty style stays empty", empty == "", empty)
+    check("plain style stays plain", plain == "polite and anxious", plain)
+    check("full pasted template keeps direction",
+          template == "formal",
+          template)
+    check("full pasted template removes text section",
+          pasted == "formal" and "old placeholder" not in pasted and "{{TEXT}}" not in pasted,
+          pasted)
+
+
 def test_preview_without_render(tmp: Path) -> None:
     print("\n-- preview, with no clip rendered --")
     eng = StubEngine(seconds=1.5)
@@ -185,7 +207,8 @@ def test_preview_without_render(tmp: Path) -> None:
 
     r = dub_shot(eng, clip=shot_dir / "clip.mp4", shot_dir=shot_dir,
                  text="And that is how you fly it.",
-                 reference=Path("/some/kira.wav"), reference_text="hello there")
+                 reference=Path("/some/kira.wav"), reference_text="hello there",
+                 style="quiet, breathy, tired")
     check("succeeds with no clip to mux into", r.ok, r.error)
     check("no video is claimed", r.video is None)
     check("the spoken line is returned", bool(r.audio and r.audio.is_file()))
@@ -194,6 +217,8 @@ def test_preview_without_render(tmp: Path) -> None:
           eng.calls and eng.calls[0]["reference"] == Path("/some/kira.wav"))
     check("the transcript was passed too",
           eng.calls and eng.calls[0]["reference_text"] == "hello there")
+    check("voice direction was passed separately",
+          eng.calls and eng.calls[0]["style"] == "quiet, breathy, tired")
 
     empty = dub_shot(eng, clip=shot_dir / "clip.mp4", shot_dir=shot_dir, text="   ")
     check("an empty line is refused", not empty.ok and "no dialogue" in empty.error,
@@ -248,6 +273,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="sbv-speak-"))
     try:
         test_speaker_for()
+        test_qwen_style_prompt()
         test_polish(tmp)
         test_preview_without_render(tmp)
         test_mux_when_clip_exists(tmp)

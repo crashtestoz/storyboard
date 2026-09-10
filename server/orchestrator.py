@@ -425,8 +425,20 @@ class Orchestrator:
                 {
                     "level": "WARN",
                     "text": "the dialogue was edited after it was last spoken, "
-                            "so it was not mixed onto the clip — press Speak "
-                            "this line again",
+                            "so it was not mixed onto the clip — press "
+                            "Generate again",
+                }
+            )
+            return
+        style = (shot.get("dialogueStyle") or "").strip()
+        spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
+        if spoken_style != style:
+            run.log.append(
+                {
+                    "level": "WARN",
+                    "text": "the voice direction changed after the line was "
+                            "last spoken, so it was not mixed onto the clip "
+                            "— press Generate again",
                 }
             )
             return
@@ -474,7 +486,7 @@ class Orchestrator:
         for i, shot in enumerate(shots):
             shot_dir = self.data_dir / self.store.shot_rel_dir(slug, i + 1)
             label = shot.get("title") or f"shot {i + 1}"
-            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir)))
+            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir, shot)))
 
         width, height = assembly.frame_size(
             (board.get("defaults") or {}).get("resolution")

@@ -462,6 +462,8 @@ class Handler(BaseHTTPRequestHandler):
             slug = payload.get("slug")
             if not slug:
                 raise ValueError("slug is required")
+            if isinstance(payload.get("board"), dict):
+                ctx.store.save(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
 
         if path == "/api/stop":
@@ -546,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
         for i, shot in enumerate(shots):
             shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, i + 1)
             label = shot.get("title") or f"shot {i + 1}"
-            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir)))
+            parts.append((f"{i + 1:02d} {label}", assembly.shot_clip(shot_dir, shot)))
 
         width, height = assembly.frame_size(
             (board.get("defaults") or {}).get("resolution")
@@ -634,6 +636,10 @@ class Handler(BaseHTTPRequestHandler):
         text = payload.get("text")
         if text is None:
             text = shot.get("dialogue") or ""
+        style = payload.get("style")
+        if style is None:
+            style = shot.get("dialogueStyle") or ""
+        style = (style or "").strip()
 
         engine = ctx.tts((board.get("defaults") or {}).get("tts"))
         shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1)
@@ -673,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
             voice=shot.get("dialogueVoice") or None,
             reference=reference,
             reference_text=reference_text,
+            style=style,
         )
 
         def as_url(p: Path) -> str:
@@ -716,10 +723,16 @@ class Handler(BaseHTTPRequestHandler):
 
         # The spoken line is kept on the shot so it survives a reload and can
         # be played again without re-synthesising.
-        shot["dialogueAudioUrl"] = as_url(result.audio) if result.audio else None
+        if result.audio:
+            shot["dialogueAudioUrl"] = (
+                as_url(result.audio) + f"?v={result.audio.stat().st_mtime_ns}"
+            )
+        else:
+            shot["dialogueAudioUrl"] = None
         # What this take says. A render finishing later re-muxes the wav onto
         # the fresh clip, and must not do that once the line has been edited.
         shot["dialogueSpokenText"] = (text or "").strip()
+        shot["dialogueSpokenStyle"] = style
         if result.video:
             shot["dubUrl"] = as_url(result.video)
         shot["speechLogUrl"] = log_url
