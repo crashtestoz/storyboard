@@ -65,6 +65,14 @@ over "cool-looking ship".
 Rules:
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters, locations or story beats, and do not remove any they named.
+- When the camera and the subject move at the same time, give each its own \
+short clause rather than one blended sentence, and state the subject's \
+direction of travel in its own frame of reference (e.g. "continues forward, \
+accelerating away") rather than only relative to the camera. A camera that \
+rises and swings around behind a subject, described in the same breath as \
+the subject "moving away", is the kind of sentence this model tends to \
+resolve by reversing the subject instead — say what the camera does, then \
+say what the subject does, in that order.
 - If reference images are listed in the context, treat them as visual \
 constraints. Add a compact natural-language summary of the relevant reference \
 cues to the rewritten prompt, especially location, framing, lighting, material \
