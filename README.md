@@ -104,6 +104,14 @@ folder. To point it somewhere else instead:
 export SBV_DATA_DIR=/path/to/storyboard-data
 ```
 
+or from the app itself: **⚙ Settings → Global projects folder**, which saves
+the path to `server-config.json` (next to `llm-services.json`) and restarts
+the server onto it — no flag or environment variable needed. Priority, highest
+first: `--data-dir` flag, `SBV_DATA_DIR`, `server-config.json`, then the
+`/Volumes/KINGSTON/ai-diffusers` default — so a launch script that already
+pins one of the first two keeps working untouched, and Settings tells you so
+if it would otherwise be overridden.
+
 ### 5. Fetch speech models, if using local MOSS
 
 `vpipe-moss` needs two models in the workspace. Once:

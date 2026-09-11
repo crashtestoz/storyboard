@@ -19,16 +19,19 @@
       </div>
       <div class="header-divider"></div>
 
-      <select id="boardPicker" class="board-picker" title="Open a storyboard"></select>
       <button class="btn btn-ghost btn-sm" id="btnNewBoard" title="New storyboard">New</button>
       <button class="btn btn-ghost btn-sm" id="btnOpen" title="Open a storyboard">Open</button>
       <button class="btn btn-ghost btn-sm" id="btnExport" title="Download this storyboard">Export</button>
       <button class="btn btn-ghost btn-sm" id="btnSettings" title="Project settings">⚙ Settings</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
 
-      <div class="header-divider"></div>
-      <div class="titles">
-        <span class="project-name" id="projectTitle">—</span>
+      <div class="header-spacer"></div>
+
+      <!-- The picker's selected option already names the open project, so
+           this is the one place that says which project you're in — a
+           separate name/summary label next to it would just repeat it. -->
+      <div class="project-switcher">
+        <select id="boardPicker" class="board-picker" title="Switch storyboard"></select>
         <span class="project-meta" id="projectMeta"></span>
       </div>
 
@@ -241,6 +244,21 @@
           <span>Render drafts</span>
         </label>
         <div class="cast-note" id="draftNote" style="margin-top:var(--sp-2)"></div>
+        </section>
+
+        <section>
+        <div class="section-label">
+          Global projects folder
+          <span class="hint">— every project's files, server-wide</span>
+        </div>
+        <div class="field">
+          <label>Folder path</label>
+          <input type="text" id="dataDirInput" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field-note" id="dataDirWarn"></div>
+        <div class="rename-row" style="margin-top:var(--sp-2)">
+          <button class="btn btn-sm" id="btnSaveDataDir">Save &amp; restart server</button>
+        </div>
         </section>
 
       </div>

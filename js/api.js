@@ -69,6 +69,13 @@ const API = {
     req("POST", `/api/boards/${encodeURIComponent(slug)}/rename`, { name }),
   exportUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export`,
 
+  // Saved to server-config.json; takes effect on the next restart, not
+  // immediately — see restartServer.
+  setDataDir: (dataDir) => req("POST", "/api/server-settings", { dataDir }),
+  // Only resolves once the request lands; the process re-execs itself right
+  // after, so the caller has to poll info() to know when it's back.
+  restartServer: () => req("POST", "/api/server-settings/restart"),
+
   addShot: (slug, patch) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots`, patch || {}),
 

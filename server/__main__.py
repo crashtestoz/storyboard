@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import socket
 import sys
 from pathlib import Path
 
-from .app import Context, build_server
+from .app import SERVER_CONFIG_NAME, Context, build_server
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .store import Store
@@ -31,6 +32,25 @@ DEFAULT_VPIPE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe/build/apps/vpipe/vpip
 # be pointed at. Existing projects under the old default (vpipe-work/sandbox)
 # are left in place — this only changes where a fresh launch looks by default.
 DEFAULT_DATA_DIR = Path("/Volumes/KINGSTON/ai-diffusers")
+
+
+def _configured_data_dir(ui_root: Path) -> Path | None:
+    """What the Settings dialog last saved, if anything.
+
+    Lowest priority above the hardcoded default: an explicit --data-dir or
+    SBV_DATA_DIR always wins, so a launch script that already pins one keeps
+    working exactly as before no matter what was saved here.
+    """
+    path = ui_root / SERVER_CONFIG_NAME
+    if not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = doc.get("dataDir")
+    return Path(raw).expanduser() if raw else None
+
 
 BANNER = r"""
   ______ _____  ____   ______  __ ______  ____  ___    ____  ____
@@ -60,9 +80,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path(os.environ.get("SBV_DATA_DIR", DEFAULT_DATA_DIR)),
-        help="where storyboards and uploads live "
-             f"(default: {DEFAULT_DATA_DIR})",
+        default=None,
+        help="where storyboards and uploads live — highest priority; falls "
+             "back to SBV_DATA_DIR, then whatever Settings last saved, then "
+             f"{DEFAULT_DATA_DIR}",
     )
     p.add_argument(
         "--vpipe",
@@ -103,10 +124,19 @@ def main(argv: list[str] | None = None) -> int:
     workspace = args.workspace.expanduser()
     # Two roots on purpose. The workspace is vpipe's — it resolves models/ and
     # its model registry relative to it, so it is not ours to choose. The data
-    # directory is where the user's storyboards and uploads live, and defaults
-    # to DEFAULT_DATA_DIR (see above) rather than the workspace, so projects
-    # are not left inside whatever vpipe sandbox happens to be configured.
-    data_dir = args.data_dir.expanduser()
+    # directory is where the user's storyboards and uploads live. Priority,
+    # highest first: an explicit --data-dir, SBV_DATA_DIR, whatever the
+    # Settings dialog last saved to server-config.json, then DEFAULT_DATA_DIR.
+    if args.data_dir:
+        data_dir = args.data_dir.expanduser()
+        data_dir_source = "cli"
+    elif os.environ.get("SBV_DATA_DIR"):
+        data_dir = Path(os.environ["SBV_DATA_DIR"]).expanduser()
+        data_dir_source = "env"
+    else:
+        configured = _configured_data_dir(UI_ROOT)
+        data_dir = configured or DEFAULT_DATA_DIR
+        data_dir_source = "config" if configured else "default"
     data_dir.mkdir(parents=True, exist_ok=True)
     backend = build_backend(
         args.backend,
@@ -131,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     orch = Orchestrator(backend=backend, store=store, workspace=workspace,
                         data_dir=data_dir)
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
-                  data_dir=data_dir,
+                  data_dir=data_dir, data_dir_source=data_dir_source,
                   tts_engines=tts_engines, default_tts=args.tts,
                   llm_services=llm_services, default_llm=args.llm)
 
@@ -220,6 +250,15 @@ def main(argv: list[str] | None = None) -> int:
             print("  a render is in flight — asking it to stop")
             orch.stop()
         httpd.shutdown()
+
+    # /api/server-settings/restart stops serve_forever() the same way Ctrl-C
+    # does (from another thread, since shutdown() deadlocks called from the
+    # loop's own thread) and sets this first, so it is the one thing that
+    # tells the two apart once the loop has already exited either way.
+    if ctx.restart_requested:
+        print("\n  restarting onto the updated projects folder...")
+        httpd.server_close()
+        os.execv(sys.executable, [sys.executable, "-u", "-m", "server"] + sys.argv[1:])
     return 0
 
 
