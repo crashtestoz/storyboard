@@ -206,6 +206,39 @@ Port 9877 is the default so it does not collide with `vpipe-web-ui` on 9876.
 `serve.sh` is still present as the older foreground-only launcher, but
 `start.sh` is the recommended entry point.
 
+## Settings reference
+
+Every machine-specific location or service this app talks to is configurable
+from outside the code — nothing here should ever need editing in a `.py` or
+`.js` file. Three places to set it, later ones winning over earlier ones:
+
+1. A baked-in default — always something harmless (`127.0.0.1`, or a path
+   under this checkout), never a real personal host.
+2. A config file — `server-config.json`, `tts-services.json`,
+   `llm-services.json`. Editable by hand or, for the data directory, from
+   **⚙ Settings** in the app itself.
+3. An environment variable, or the matching CLI flag (flags win outright).
+
+| What | Flag | Env var | Config file |
+| --- | --- | --- | --- |
+| Port | `--port` | `SBV_PORT` | — |
+| Bind address | `--bind` / `--lan` | `SBV_BIND` | — |
+| Render backend | `--backend` | `SBV_BACKEND` | — |
+| vpipe workspace | `--workspace` | `SBV_WORKSPACE` | — |
+| vpipe CLI path | `--vpipe` | `SBV_VPIPE` | — |
+| Storyboard data dir | `--data-dir` | `SBV_DATA_DIR` | `server-config.json` |
+| ComfyUI URL | `--comfyui-url` | `SBV_COMFYUI` | — |
+| Default TTS engine id | `--tts` | `SBV_TTS` | `tts-services.json` |
+| Default LLM/rewrite id | `--llm` | `SBV_LLM` | `llm-services.json` |
+| TTS/LLM service URLs, API keys | — | — | `tts-services.json`, `llm-services.json` — use `apiKeyEnv` in either to name an environment variable rather than checking a key in |
+
+`tts-services.json` and `llm-services.json` are tracked in git, so whatever
+they contain ships with the repo — the versions here use `127.0.0.1`
+placeholders on purpose. Point them at your own services after cloning
+rather than committing a real hostname or IP back into them.
+`server-config.json` is created by the app and gitignored, so your data-dir
+choice never gets committed at all.
+
 ## Where things live
 
 ```
@@ -549,3 +582,7 @@ output — and carries the caret across when it does.
 - `library()` (the pick-an-existing-image grid) scans the data directory only.
   Images sitting elsewhere in the vpipe workspace are not offered; upload them
   or copy them into a project folder.
+
+## Author
+
+Peter Chodyra — [candco.com.au](https://candco.com.au)

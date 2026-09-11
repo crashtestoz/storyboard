@@ -1,8 +1,8 @@
 """Speech engines, described by a config file rather than hardcoded.
 
 A voice model in this network is usually **already running somewhere with an
-owner** — Qwen3-TTS as a FastAPI process next to a dashboard, a dashboard's own endpoint
-driving a sherpa-onnx binary from that app's environment. So this project
+owner** — Qwen3-TTS as a FastAPI process on another box, that box's own
+endpoint driving a sherpa-onnx binary from its environment. So this project
 links to services by name and URL instead of installing models of its own.
 That keeps one copy of the weights, one lifecycle to maintain, and this
 project's "nothing to install" property.
@@ -12,9 +12,9 @@ sensible defaults on first run and meant to be edited::
 
     {
       "services": [
-        {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone (CPU host)",
+        {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone",
          "kind": "qwen3-clone", "url": "http://127.0.0.1:8790"},
-        {"id": "plain-sherpa",  "label": "a dashboard sherpa-onnx voice",
+        {"id": "plain-sherpa",  "label": "Plain sherpa-onnx voice",
          "kind": "plain-sherpa", "url": "http://127.0.0.1:3000"},
         {"id": "vpipe-moss",  "label": "MOSS-TTS via vpipe (local)",
          "kind": "vpipe-moss"}
@@ -51,18 +51,18 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
     },
     {
         "id": "qwen3-clone",
-        "label": "Qwen3-TTS voice clone (same server a dashboard uses)",
+        "label": "Qwen3-TTS voice clone",
         "kind": "qwen3-clone",
-        # CPU host, where a dashboard and this server run. Still binds 127.0.0.1
-        # there, so it needs rebinding to 0.0.0.0 (or a tunnel) before this
-        # address answers.
-        "url": "http://localhost:8790",
+        # Wherever you run serve_qwen3_tts.py (see vendor/README.md). Binds
+        # 127.0.0.1 by default there, so it needs rebinding to 0.0.0.0 (or a
+        # tunnel) before a remote address like this answers.
+        "url": "http://127.0.0.1:8790",
     },
     {
         "id": "plain-sherpa",
-        "label": "a dashboard sherpa-onnx voice (plain, no cloning)",
+        "label": "Plain sherpa-onnx voice (no cloning)",
         "kind": "plain-sherpa",
-        "url": "http://localhost:3000",
+        "url": "http://127.0.0.1:3000",
     },
 ]
 
