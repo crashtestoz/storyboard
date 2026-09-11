@@ -154,7 +154,7 @@ class Context:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "storyboard-to-video/0.2"
+    server_version = "storyboard/0.2"
     ctx: Context  # injected below
 
     # -- plumbing -------------------------------------------------------- #
