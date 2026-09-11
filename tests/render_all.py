@@ -23,6 +23,7 @@ Run:  python3 tests/render_all.py
 
 from __future__ import annotations
 
+import json
 import shutil
 import os
 import subprocess
@@ -565,6 +566,52 @@ def test_unmixed_dialogue(tmp: Path) -> None:
           str(unmixed_dialogue(board, project)))
 
 
+def test_load_heals_foreign_refs(tmp: Path) -> None:
+    section("load heals foreign refs")
+    store = Store(workspace=tmp, data_dir=tmp)
+
+    other_slug, _ = store.create("Other Project")
+    other_refs = store.refs_dir(other_slug)
+    other_refs.mkdir(parents=True, exist_ok=True)
+    (other_refs / "hero.png").write_bytes(b"y" * 32)
+
+    # A board hand-edited (or left over from before rehoming existed) to
+    # point a character portrait and a style ref at another project's refs/.
+    slug, board = store.create("My Project")
+    board["characters"] = [{
+        "id": "c1", "name": "Hero",
+        "image": {
+            "path": f"projects/{other_slug}/refs/hero.png",
+            "url": f"/media/projects/{other_slug}/refs/hero.png",
+            "label": "hero.png",
+        },
+    }]
+    board["styleRefs"] = [{
+        "path": f"projects/{other_slug}/refs/hero.png",
+        "url": f"/media/projects/{other_slug}/refs/hero.png",
+        "label": "hero.png",
+    }]
+    store.save(slug, board)
+
+    reloaded = store.load(slug)
+    char_image = reloaded["characters"][0]["image"]
+    style = reloaded["styleRefs"][0]
+    check("a foreign character portrait is rehomed on load",
+          char_image["path"].startswith(f"projects/{slug}/"), char_image["path"])
+    check("a foreign style ref is rehomed on load",
+          style["path"].startswith(f"projects/{slug}/"), style["path"])
+    check("the fix is saved, not just returned in memory",
+          json.loads(store.board_path(slug).read_text())["styleRefs"][0]["path"]
+          == style["path"])
+    check("the other project's own file is untouched", (other_refs / "hero.png").is_file())
+
+    # Loading an already-healed board is a no-op: no further copies appear.
+    before = list((store.refs_dir(slug)).iterdir())
+    store.load(slug)
+    check("re-loading a clean board makes no further copies",
+          list((store.refs_dir(slug)).iterdir()) == before)
+
+
 def test_import_rehomes_media(tmp: Path) -> None:
     section("import rehomes media")
     store = Store(workspace=tmp, data_dir=tmp)
@@ -616,6 +663,7 @@ def main() -> int:
         test_clip_choice(tmp)
         test_final_staleness(tmp)
         test_unmixed_dialogue(tmp)
+        test_load_heals_foreign_refs(tmp)
         test_import_rehomes_media(tmp)
         test_assemble(tmp)
 
