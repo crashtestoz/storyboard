@@ -92,6 +92,32 @@ function downloadName(...parts) {
     .slice(0, 80) || "download";
 }
 
+function downloadFileName(base, ext) {
+  const clean = (base || "download")
+    .replace(/[<>:"/\\|?*\x00-\x1f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120) || "download";
+  return `${clean}.${ext || "mp4"}`;
+}
+
+function extensionFromUrl(url, fallback = "mp4") {
+  const file = decodeURIComponent(
+    (url || "").split("#")[0].split("?")[0].split("/").pop() || ""
+  );
+  const match = file.match(/\.([a-z0-9]+)$/i);
+  return match ? match[1].toLowerCase() : fallback;
+}
+
+function sceneClipDownloadName(raw, url) {
+  const n = shotIndex(raw.id);
+  const scene = n >= 0 ? n + 1 : "";
+  return downloadFileName(
+    `${state.board.name || state.slug || "Project"} - scene ${scene}`,
+    extensionFromUrl(url)
+  );
+}
+
 function setSpeakAudioBusy(row, busy) {
   const au = row.querySelector && row.querySelector(".speak-player");
   const dl = row.querySelector && row.querySelector(".speak-download");
@@ -1141,10 +1167,12 @@ function renderRail() {
 
   const q = $("#queueList");
   q.innerHTML = "";
+  wireDragList(q);
   queueShots.forEach((raw, i) => {
     const shot = view(raw);
     const row = el("div", "queue-row");
     row.dataset.id = raw.id;
+    row.draggable = true;
     if (raw.id === state.selectedId) row.classList.add("selected");
     row.appendChild(el("span", "queue-num", String(i + 1)));
     const dot = el("span", "queue-dot");
@@ -1164,6 +1192,7 @@ function renderRail() {
       state.selectedId = raw.id;
       render();
     });
+    wireDrag(row, raw, "y");
     q.appendChild(row);
   });
 
@@ -1240,10 +1269,12 @@ function renderFinal() {
   btn.addEventListener("click", () => $("#btnAssemble").click());
   acts.appendChild(btn);
   if (f && f.url) {
-    const name = decodeURIComponent(f.url.split("/").pop() || "final.mp4");
     const download = el("a", "btn btn-sm btn-primary", "Download");
     download.href = f.url;
-    download.download = name;
+    download.download = downloadFileName(
+      state.board.name || state.slug || "Project",
+      extensionFromUrl(f.url)
+    );
     download.title = "Download the assembled video";
     acts.appendChild(download);
 
@@ -1573,6 +1604,7 @@ async function editCharacter(existing) {
 function renderStrip() {
   const strip = $("#strip");
   strip.innerHTML = "";
+  wireDragList(strip);
 
   shots().forEach((raw, i) => {
     const shot = view(raw);
@@ -1667,7 +1699,7 @@ function renderStrip() {
       state.selectedId = raw.id;
       render();
     });
-    wireDrag(card, raw);
+    wireDrag(card, raw, "x");
     strip.appendChild(card);
   });
 
@@ -1677,28 +1709,112 @@ function renderStrip() {
   strip.appendChild(add);
 }
 
-function wireDrag(card, shot) {
-  card.addEventListener("dragstart", (e) => {
-    card.classList.add("dragging");
+const SHOT_DRAG_TYPE = "application/x-storyboard-shot";
+let activeDragShotId = null;
+
+function clearDropClasses(root = document) {
+  root
+    .querySelectorAll(".drop-target, .drop-before, .drop-after, .dropping")
+    .forEach((n) => {
+      n.classList.remove("drop-target", "drop-before", "drop-after", "dropping");
+    });
+}
+
+function dropAfter(node, axis, e) {
+  const r = node.getBoundingClientRect();
+  return axis === "y"
+    ? e.clientY > r.top + r.height / 2
+    : e.clientX > r.left + r.width / 2;
+}
+
+function moveShot(dragId, targetId = null, after = false) {
+  if (!dragId || !state.board || !Array.isArray(state.board.shots)) return false;
+  const from = shotIndex(dragId);
+  if (from < 0) return false;
+
+  let to = targetId ? shotIndex(targetId) : state.board.shots.length;
+  if (to < 0) return false;
+  if (targetId && after) to += 1;
+  if (from < to) to -= 1;
+  if (from === to) return false;
+
+  const [moved] = state.board.shots.splice(from, 1);
+  state.board.shots.splice(to, 0, moved);
+  markDirty();
+  render();
+  return true;
+}
+
+function draggedShotId(e) {
+  return (
+    e.dataTransfer.getData(SHOT_DRAG_TYPE) ||
+    e.dataTransfer.getData("text/plain") ||
+    activeDragShotId
+  );
+}
+
+function hasShotDrag(e) {
+  return (
+    !!activeDragShotId ||
+    Array.from(e.dataTransfer.types || []).includes(SHOT_DRAG_TYPE)
+  );
+}
+
+function wireDrag(node, shot, axis = "x") {
+  node.addEventListener("dragstart", (e) => {
+    activeDragShotId = shot.id;
+    node.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(SHOT_DRAG_TYPE, shot.id);
     e.dataTransfer.setData("text/plain", shot.id);
   });
-  card.addEventListener("dragend", () => card.classList.remove("dragging"));
-  card.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    card.classList.add("drop-target");
+  node.addEventListener("dragend", () => {
+    activeDragShotId = null;
+    clearDropClasses();
   });
-  card.addEventListener("dragleave", () => card.classList.remove("drop-target"));
-  card.addEventListener("drop", (e) => {
+  node.addEventListener("dragover", (e) => {
     e.preventDefault();
-    card.classList.remove("drop-target");
-    const id = e.dataTransfer.getData("text/plain");
+    e.dataTransfer.dropEffect = "move";
+    const after = dropAfter(node, axis, e);
+    node.classList.add("drop-target");
+    node.classList.toggle("drop-before", !after);
+    node.classList.toggle("drop-after", after);
+  });
+  node.addEventListener("dragleave", () => {
+    node.classList.remove("drop-target", "drop-before", "drop-after");
+  });
+  node.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const id = draggedShotId(e);
+    const after = dropAfter(node, axis, e);
+    activeDragShotId = null;
+    clearDropClasses();
     if (!id || id === shot.id) return;
-    const from = shotIndex(id);
-    const to = shotIndex(shot.id);
-    const [moved] = state.board.shots.splice(from, 1);
-    state.board.shots.splice(to, 0, moved);
-    markDirty();
-    render();
+    moveShot(id, shot.id, after);
+  });
+}
+
+function wireDragList(list) {
+  if (list.dataset.dragListWired === "1") return;
+  list.dataset.dragListWired = "1";
+  list.addEventListener("dragover", (e) => {
+    if (!hasShotDrag(e)) return;
+    if (e.target.closest(".shot-card, .queue-row")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    list.classList.add("dropping");
+  });
+  list.addEventListener("dragleave", (e) => {
+    if (!list.contains(e.relatedTarget)) list.classList.remove("dropping");
+  });
+  list.addEventListener("drop", (e) => {
+    if (e.target.closest(".shot-card, .queue-row")) return;
+    e.preventDefault();
+    const id = draggedShotId(e);
+    activeDragShotId = null;
+    clearDropClasses();
+    moveShot(id);
   });
 }
 
@@ -2572,6 +2688,16 @@ function renderPreview() {
   }
   host.appendChild(stage);
 
+  if (video) {
+    const actions = el("div", "preview-actions");
+    const download = el("a", "btn btn-sm btn-primary", "Download clip");
+    download.href = video;
+    download.download = sceneClipDownloadName(raw, video);
+    download.title = "Download this scene clip";
+    actions.appendChild(download);
+    host.appendChild(actions);
+  }
+
   staleNotes(raw, shot.status).forEach((n) => host.appendChild(n));
 
   const diag = diagnostic(raw, shot);
@@ -2800,7 +2926,7 @@ function paintStale() {
   host.querySelectorAll(".stale-note").forEach((n) => n.remove());
   if (raw && stage) {
     const notes = staleNotes(raw, view(raw).status);
-    let after = stage;
+    let after = host.querySelector(".preview-actions") || stage;
     notes.forEach((n) => {
       after.after(n);
       after = n;
