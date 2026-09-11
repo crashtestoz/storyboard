@@ -1056,13 +1056,13 @@ function renderRail() {
   const draftOn = !!state.board.defaults.draft;
   dt.checked = draftOn;
   const [cw, ch] = current.split("x").map(Number);
-  const dw = Math.max(320, Math.floor(cw / 2 / 16) * 16);
-  const dh = Math.max(192, Math.floor(ch / 2 / 16) * 16);
+  const cap = modelCap(state.board.defaults.model) || state.models[0] || null;
+  const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
-    ? `Rendering at ${dw}×${dh} and 6 steps — roughly 4x faster. Clip length ` +
-      `and seed are unchanged, so the camera move is the one you will get.`
-    : `Drafts render at half size (${dw}×${dh}) and 6 steps to check framing ` +
-      `and motion quickly. Length and seed stay the same.`;
+    ? `Rendering at ${dw}×${dh} and 4 steps without generated audio. Clip ` +
+      `length and seed are unchanged, so the camera move is the one you will get.`
+    : `Drafts render at ${dw}×${dh} and 4 steps to check framing and motion ` +
+      `quickly. Audio and full frame dumps are skipped unless needed for chaining.`;
 
   const modelSel = $("#defModel");
   if (modelSel.dataset.built !== "1") {
@@ -2133,26 +2133,16 @@ function renderEditor() {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     refPanel.appendChild(el("div", "section-label", "Reference images"));
-
-    const slots = el("div", "ref-slots");
-    slots.appendChild(
-      refSlot(
-        "Shot reference image",
-        raw,
-        "startRef",
-        "Choose a shot reference image"
-      )
-    );
-    refPanel.appendChild(slots);
+    refPanel.appendChild(shotReferenceImages(raw));
 
     refPanel.appendChild(
       el(
         "div",
         "hint-body",
         `${cap.label.split("—")[0].trim()} uses reference images rather than ` +
-          `start/end frame anchors. Character portraits and project style ` +
-          `references are included automatically; this shot image is added as ` +
-          `an extra subject/style reference for this clip.`
+          `start/end frame anchors. Character portraits preserve identity, ` +
+          `shot images are treated as primary clip references, and ` +
+          `broad project style references are used only when no shot images are set.`
       )
     );
     host.appendChild(refPanel);
@@ -2289,11 +2279,12 @@ function aspectOf(res) {
   if (!w || !h) return "other";
   const r = w / h;
   const named = [
+    ["21:9", 21 / 9],
     ["16:9", 16 / 9],
     ["4:3", 4 / 3],
     ["1:1", 1],
-    ["9:16", 9 / 16],
     ["3:4", 3 / 4],
+    ["9:16", 9 / 16],
   ];
   let best = "other";
   let bestErr = 0.06;   // within ~6% counts as that ratio
@@ -2496,6 +2487,19 @@ function frameHint(frames, cap) {
   return `${r.step}n + ${r.offset} — ok`;
 }
 
+function alignUp(v, align) {
+  if (!align || align <= 1) return v;
+  return Math.ceil(v / align) * align;
+}
+
+function draftGeometry(w, h, align = 16) {
+  const scale = Math.min(0.5, 384 / Math.max(w, h));
+  return [
+    alignUp(Math.max(align, Math.round(w * scale)), align),
+    alignUp(Math.max(align, Math.round(h * scale)), align),
+  ];
+}
+
 /* --- preview ------------------------------------------------------------- */
 
 function renderPreview() {
@@ -2578,7 +2582,7 @@ function renderPreview() {
     ["Status", STATUS_LABELS[shot.status] || shot.status],
     ["Model", (modelCap(raw.model) || {}).label || raw.model],
     ["Runtime", dur(shot.runtimeSeconds)],
-    ["Rendered", raw.renderedAs === "draft" ? "draft (half size, 6 steps)"
+    ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, 4 steps)"
                  : raw.renderedAs === "final" ? "final" : "—"],
     ["Outputs", (shot.outputs || []).length
       ? (shot.outputs || []).map((u) => u.split("/").pop()).join(", ")
@@ -3083,6 +3087,74 @@ function refSlot(label, shot, key, pickerTitle = null) {
     };
   }
   return slot;
+}
+
+function shotReferenceImages(shot) {
+  if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
+  const wrap = el("div", "ref-slots");
+  wrap.appendChild(
+    refSlot(
+      "Primary reference",
+      shot,
+      "startRef",
+      "Choose the primary shot reference image"
+    )
+  );
+
+  shot.referenceImages.forEach((ref, i) => {
+    const slot = el("div", "ref-slot filled");
+    const img = el("img");
+    img.src = ref.url || ref.path;
+    slot.appendChild(img);
+    const x = el("button", "clear-ref", "✕");
+    x.addEventListener("click", (e) => {
+      e.stopPropagation();
+      shot.referenceImages.splice(i, 1);
+      markDirty();
+      render();
+    });
+    slot.appendChild(x);
+    wrap.appendChild(slot);
+  });
+
+  const add = el("div", "ref-slot ref-slot-add");
+  const l = el("div", "ref-slot-label");
+  l.append(el("strong", null, "Add viewpoint"), el("span", null, "click to choose · or drop images"));
+  add.appendChild(l);
+  add.addEventListener("click", () => addShotReferenceImage(shot));
+  add.ondragover = (e) => {
+    e.preventDefault();
+    add.classList.add("dropping");
+  };
+  add.ondragleave = () => add.classList.remove("dropping");
+  add.ondrop = async (e) => {
+    e.preventDefault();
+    add.classList.remove("dropping");
+    const files = [...(e.dataTransfer.files || [])].filter((x) => x.type.startsWith("image/"));
+    if (!files.length) return;
+    try {
+      for (const f of files) {
+        shot.referenceImages.push(await API.uploadRef(state.slug, f));
+      }
+      markDirty();
+      await saveNow();
+      render();
+    } catch (err) {
+      toast(`Upload failed: ${err.message}`, "error");
+    }
+  };
+  wrap.appendChild(add);
+  return wrap;
+}
+
+async function addShotReferenceImage(shot) {
+  const chosen = await chooseImage("Choose an additional shot reference image");
+  if (!chosen) return;
+  if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
+  shot.referenceImages.push(chosen);
+  markDirty();
+  await saveNow();
+  render();
 }
 
 /**

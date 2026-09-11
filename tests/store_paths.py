@@ -201,6 +201,11 @@ def test_library_delete(tmp: Path) -> None:
         "url": f"/media/projects/{slug}/refs/start.png",
         "label": "start.png",
     }
+    board["shots"][0]["referenceImages"] = [{
+        "path": f"projects/{slug}/refs/cockpit.png",
+        "url": f"/media/projects/{slug}/refs/cockpit.png",
+        "label": "cockpit.png",
+    }]
     st.save(slug, board)
     d = st.project_dir(slug)
     unused = d / "refs/unused.png"
@@ -209,6 +214,7 @@ def test_library_delete(tmp: Path) -> None:
     duplicate.write_bytes(b"x")
     (d / "refs/style.png").write_bytes(b"style")
     (d / "refs/start.png").write_bytes(b"start")
+    (d / "refs/cockpit.png").write_bytes(b"cockpit")
 
     images = st.library(kind="image")
     by_name = {i["label"]: i for i in images}
@@ -221,6 +227,10 @@ def test_library_delete(tmp: Path) -> None:
     check("start use names the scene",
           any("Scene 1 - One - Start" in u for u in by_name["start.png"]["uses"]),
           str(by_name["start.png"].get("uses")))
+    check("shot reference use names the scene",
+          any("Scene 1 - One - Shot reference 1" in u
+              for u in by_name["cockpit.png"]["uses"]),
+          str(by_name["cockpit.png"].get("uses")))
     check("style use is named",
           any("Style reference 1" in u for u in by_name["style.png"]["uses"]),
           str(by_name["style.png"].get("uses")))

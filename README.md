@@ -225,11 +225,11 @@ shows the assembled result, so nothing about the composition is hidden.
 
 **Style references and the media library.** Style reference images are
 project-wide. On Ref2VA renders they are sent to vpipe's `video-ref-encoder`
-after any character portraits and before the shot's own reference image, so
-they help steer visual consistency across every compatible shot. Ref2VA also
-offers a per-shot **Shot reference image**; it is a subject/style reference for
-that clip, not a start-frame anchor. Style images are not copied into the text
-prompt for non-reference models.
+only when a shot has no local reference images, so they help steer visual
+consistency without overriding a specific cockpit/corridor/etc. reference.
+Ref2VA also offers per-shot **Reference images**; they are subject/style
+references for that clip, not start-frame anchors. Style images are not copied
+into the text prompt for non-reference models.
 
 The image picker scans project `refs/` folders and rendered stills, groups
 exact duplicate images by content hash, and shows where used files are
@@ -376,15 +376,16 @@ the fact that a shot has dialogue. The resolved tab shows the assembled prompt
 **segmented and labelled by source** — scene, each cast member, shot, sound
 bed, accents — so it is never ambiguous which clause came from where.
 
-**Draft mode.** Renders at half size and 6 steps — 3.7x to 8.3x faster
-depending on settings — to check framing and camera motion before committing.
-Clip length and seed are left alone, so the move you see is the move you will
-get. A draft output is badged as such so it is never mistaken for a finished
-shot.
+**Draft mode.** Renders with the long edge capped around 384 px and 4 steps,
+without generated audio or full PNG frame dumps unless another shot chains
+from it. Clip length and seed are left alone, so the move you see is the move
+you will get. A draft output is badged as such so it is never mistaken for a
+finished shot.
 
-**Aspect ratios.** 16:9, 4:3, 1:1, 9:16, every dimension a multiple of 16 as
-these models require. Sizes a model's own documentation cites are marked;
-anything else is offered but labelled untested.
+**Aspect ratios.** 21:9, 16:9, 4:3, 1:1, 3:4 and 9:16, every dimension a
+multiple of 32 so H3 does not silently round the request. The picker includes
+large experimental outputs such as 1536x864 and 1920x1088; sizes a model's own
+documentation cites are marked, anything else is offered but labelled untested.
 
 ## Selectable engines
 
