@@ -1,4 +1,4 @@
-# Storyboard → Video
+# Storyboard
 
 A storyboard-shaped front end for local video generation. Build a piece as an
 ordered sequence of shots — each with a prompt, optional reference frames, a
@@ -96,9 +96,12 @@ Storyboards and uploads are saved under:
 <data-dir>/projects/<board-slug>/
 ```
 
-By default, `--data-dir` is `/Volumes/KINGSTON/ai-diffusers` — outside any
-vpipe workspace, so storyboards are never left inside a runtime/sandbox
-folder. To point it somewhere else instead:
+By default, `--data-dir` is a fixed path baked in at
+`DEFAULT_DATA_DIR` in `server/__main__.py` — this checkout's own machine, not
+yours, so treat it as a placeholder to override rather than a sensible
+default. The intent is a directory outside any vpipe workspace, so
+storyboards are never left inside a runtime/sandbox folder. Point it at your
+own location:
 
 ```sh
 export SBV_DATA_DIR=/path/to/storyboard-data
@@ -107,10 +110,10 @@ export SBV_DATA_DIR=/path/to/storyboard-data
 or from the app itself: **⚙ Settings → Global projects folder**, which saves
 the path to `server-config.json` (next to `llm-services.json`) and restarts
 the server onto it — no flag or environment variable needed. Priority, highest
-first: `--data-dir` flag, `SBV_DATA_DIR`, `server-config.json`, then the
-`/Volumes/KINGSTON/ai-diffusers` default — so a launch script that already
-pins one of the first two keeps working untouched, and Settings tells you so
-if it would otherwise be overridden.
+first: `--data-dir` flag, `SBV_DATA_DIR`, `server-config.json`, then that
+baked-in default — so a launch script that already pins one of the first two
+keeps working untouched, and Settings tells you so if it would otherwise be
+overridden.
 
 ### 5. Fetch speech models, if using local MOSS
 
@@ -133,10 +136,12 @@ relative to the directory it is launched from, so this must be the directory
 the models were prepared in — it is not ours to choose.
 
 `--data-dir` is yours: storyboards and uploaded references. It **defaults to
-`/Volumes/KINGSTON/ai-diffusers`** (so projects land in
-`/Volumes/KINGSTON/ai-diffusers/projects/`), but it can be anywhere, which is
-the point — a storyboard and its reference images are documents, and should
-not have to live inside another tool's runtime directory to be usable.
+whatever `DEFAULT_DATA_DIR` in `server/__main__.py` says** (so projects land
+in `<that path>/projects/`), but it can be anywhere, which is the point — a
+storyboard and its reference images are documents, and should not have to
+live inside another tool's runtime directory to be usable. Set `--data-dir`,
+`SBV_DATA_DIR`, or Settings → Global projects folder to your own path; don't
+rely on the shipped default.
 Nothing is moved automatically when you point it somewhere new; the startup
 banner names any boards left behind in the old location and prints the `mv` to
 move them, because they are your files.

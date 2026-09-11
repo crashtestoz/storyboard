@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Storyboard → Video — front end.
+   Storyboard — front end.
    --------------------------------------------------------------------------
    Talks to the server in server/. Board edits are saved back with a short
    debounce; while a render is running the queue is polled once a second and

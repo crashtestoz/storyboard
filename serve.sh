@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# Storyboard -> Video : server
+# Storyboard : server
 # --------------------------------------------------------------------------
 # Same shape as launching vpipe-web-ui: run the script, it prints a URL,
 # Ctrl-C stops it.
