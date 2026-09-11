@@ -1070,6 +1070,22 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .pick-project { color: var(--text-faint); }
 
+.pick-group-header {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-faint);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+
+.pick-group-header:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
 .pick-usage {
   margin-top: 2px;
   color: var(--accent);

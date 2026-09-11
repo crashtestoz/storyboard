@@ -3462,7 +3462,8 @@ async function chooseMedia(title, kind) {
           );
           return;
         }
-        shown.forEach((img) => {
+
+        const addCard = (img) => {
           const card = el("div", isAudio ? "pick pick-audio" : "pick");
           if (!isAudio && img.used) {
             card.classList.add("used");
@@ -3503,6 +3504,7 @@ async function chooseMedia(title, kind) {
                   }
                   toast(`Deleted ${name}.`);
                   if (!grid.querySelector(".pick")) {
+                    grid.innerHTML = "";
                     grid.appendChild(el("div", "empty-state", "No images in your projects yet — upload one."));
                   }
                 } catch (err) {
@@ -3546,7 +3548,28 @@ async function chooseMedia(title, kind) {
             }
           };
           grid.appendChild(card);
-        });
+        };
+
+        // A brand-new project's picker is otherwise indistinguishable from
+        // "this project's own references" — every card here that isn't
+        // already this project's own is something picking it will *copy*
+        // in, not something already attached, and that needs to be obvious
+        // at a glance rather than readable only in each card's fine print.
+        const mine = shown.filter((img) => img.project === state.slug);
+        const others = shown.filter((img) => img.project !== state.slug);
+        if (mine.length) {
+          if (others.length) grid.appendChild(el("div", "pick-group-header", "This project"));
+          mine.forEach(addCard);
+        }
+        if (others.length) {
+          grid.appendChild(
+            el("div", "pick-group-header",
+               mine.length
+                 ? "From other projects — picking one copies it in"
+                 : "Nothing here yet — from your other projects, picking one copies it in")
+          );
+          others.forEach(addCard);
+        }
       })
       .catch((err) => {
         grid.innerHTML = "";
