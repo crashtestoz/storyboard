@@ -256,7 +256,8 @@ Added since, from use rather than from the plan:
    passed to the video model only as a visual mouth-movement cue. The final
    voice is mixed over the finished clip rather than trusted to the video
    model, which does not produce intelligible speech.
-8. **Draft mode** — half size, 6 steps, same length and seed, 3.7-8.3x faster.
+8. **Draft mode** — long edge capped around 384 px, 4 steps, same length and seed,
+   no generated audio or full frame dump unless needed for chained shots.
 9. **Aspect ratios** with the sizes each model's docs cite marked as such.
 
 ## What use taught us that the plan did not

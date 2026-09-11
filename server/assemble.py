@@ -93,7 +93,7 @@ def frame_size(res: str | None) -> tuple[int, int]:
     """Frame size from a ``"WxH"`` project setting, with the usual default.
 
     The cut has to be one geometry, and this is the one the board asked for —
-    not whichever clip happens to be first, which in draft mode is half size.
+    not whichever clip happens to be first, which in draft mode is smaller.
     """
     try:
         w, h = str(res or "").lower().split("x")

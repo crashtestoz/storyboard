@@ -120,6 +120,9 @@ def _collect_media_usages(board: dict[str, Any]) -> dict[str, list[str]]:
     for idx, shot in enumerate(shots, start=1):
         _add_usage(usages, shot.get("startRef"), "Start", index=idx, shot=shot)
         _add_usage(usages, shot.get("endRef"), "End", index=idx, shot=shot)
+        for ref_idx, ref in enumerate(shot.get("referenceImages") or [], start=1):
+            _add_usage(usages, ref, f"Shot reference {ref_idx}",
+                       index=idx, shot=shot)
         for cid in shot.get("characterIds") or []:
             ch = characters.get(cid)
             if not ch:
@@ -202,6 +205,9 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "styleRefs": [_ref_key(r) for r in (board.get("styleRefs") or [])],
         "startRef": _ref_key(shot.get("startRef")),
         "endRef": _ref_key(shot.get("endRef")),
+        "referenceImages": [
+            _ref_key(r) for r in (shot.get("referenceImages") or [])
+        ],
         "model": shot.get("model") or defaults.get("model") or "",
         # Frame size is a project setting with a per-shot fallback, in the same
         # order the backend resolves it.
@@ -211,6 +217,10 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "seed": int(shot.get("seed") or 0),
         "draft": bool(defaults.get("draft")),
     }
+    if payload["draft"]:
+        payload["draftProfile"] = "384-long-edge-4-step-no-audio-light-frames"
+    if payload["model"] == "ref2va":
+        payload["ref2vaProfile"] = "shot-reference-set-isolated-v2"
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -251,6 +261,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "dubUrl": None,           # the clip with speech muxed over it
         "startRef": None,
         "endRef": None,
+        "referenceImages": [],
         "model": d.get("model", "fl2va"),
         "resolution": d.get("resolution", "960x544"),
         "frames": d.get("frames", 124),
@@ -747,6 +758,7 @@ class Store:
             shot.setdefault("dubUrl", None)
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
+            shot.setdefault("referenceImages", [])
             shot.setdefault("model", defaults["model"])
             shot.setdefault("resolution", defaults["resolution"])
             shot.setdefault("frames", defaults["frames"])
