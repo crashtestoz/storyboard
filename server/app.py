@@ -22,6 +22,9 @@ Routes
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
+``POST /api/server-settings``   set the global projects folder ``{dataDir}`` —
+                                 read back from /api/info; takes effect on restart
+``POST /api/server-settings/restart``  restart the process onto the new folder
 ``GET  /media/<path>``          generated clips / frames / uploads
 """
 
@@ -31,6 +34,7 @@ import json
 import mimetypes
 import posixpath
 import re
+import threading
 import time
 import urllib.parse
 from http import HTTPStatus
@@ -47,6 +51,12 @@ from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts.base import TTSEngine
 
 MAX_UPLOAD = 32 * 1024 * 1024
+
+# Written by the Settings dialog's "global projects folder" field, read by
+# server/__main__.py at the next startup. Lives beside llm-services.json and
+# tts-services.json — one more "linked, not installed" bit of local config —
+# rather than inside data_dir itself, since data_dir is the very thing it names.
+SERVER_CONFIG_NAME = "server-config.json"
 # Extensions are the reliable signal here: browsers disagree about audio MIME
 # types (Safari says audio/mp3, others audio/mpeg, some send nothing at all or
 # application/octet-stream), and the client is ours. The content type is only
@@ -88,6 +98,7 @@ class Context:
     def __init__(self, ui_root: Path, workspace: Path, store: Store,
                  backend: Backend, orch: Orchestrator, *,
                  data_dir: Path | None = None,
+                 data_dir_source: str = "default",
                  tts_engines: dict[str, TTSEngine] | None = None,
                  default_tts: str = "none",
                  llm_services: dict[str, LLMService] | None = None,
@@ -97,6 +108,12 @@ class Context:
         # Where the user's storyboards and uploads live. Defaults to the
         # workspace, so an existing install is unaffected.
         self.data_dir = (data_dir or workspace).resolve()
+        # Where this value came from, highest priority first: an explicit
+        # --data-dir flag, the SBV_DATA_DIR env var, server-config.json (what
+        # the Settings dialog writes), or the hardcoded default. Anything
+        # other than "config" or "default" means editing it from Settings
+        # will not take effect until whatever outranks it is removed.
+        self.data_dir_source = data_dir_source
         self.store = store
         self.backend = backend
         self.orch = orch
@@ -104,6 +121,9 @@ class Context:
         self.default_tts = default_tts
         self.llm_services = llm_services or {}
         self.default_llm = default_llm
+        # Set by the /restart endpoint; main() checks this after the server
+        # loop exits to decide whether to exec a fresh process or just stop.
+        self.restart_requested = False
 
     def llm(self, sid: str | None) -> LLMService:
         return self.llm_services.get(sid or self.default_llm) or self.llm_services.get(
@@ -257,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "healthy": ok, "message": msg},
                     "workspace": str(ctx.workspace),
                     "dataDir": str(ctx.data_dir),
+                    "dataDirSource": ctx.data_dir_source,
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
                     "llm": {
                         "default": ctx.default_llm,
@@ -472,6 +493,52 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/assemble":
             return self._assemble()
+
+        if path == "/api/server-settings":
+            payload = self._read_json() or {}
+            raw = (payload.get("dataDir") or "").strip()
+            if not raw:
+                raise ValueError("dataDir is required")
+            target = Path(raw).expanduser()
+            if not target.is_absolute():
+                raise ValueError("dataDir must be an absolute path")
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValueError(f"cannot use that folder: {exc}") from exc
+            doc = {"dataDir": str(target)}
+            cfg = ctx.ui_root / SERVER_CONFIG_NAME
+            tmp = cfg.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, indent=2) + "\n")
+            tmp.replace(cfg)
+            return self._send_json(
+                {
+                    "ok": True,
+                    "dataDir": str(target),
+                    "active": str(target) == str(ctx.data_dir),
+                    "overridden": ctx.data_dir_source in ("cli", "env"),
+                }
+            )
+
+        if path == "/api/server-settings/restart":
+            if ctx.orch.busy:
+                return self._err(
+                    409, "a render is running — stop it before restarting the server"
+                )
+            ctx.restart_requested = True
+            self._send_json({"ok": True})
+            server = self.server
+
+            def _shutdown_soon() -> None:
+                # The response above must reach the browser before the
+                # listening socket goes away, so shutdown() runs a beat later
+                # and from a different thread than serve_forever() — calling
+                # it from the same thread that runs the loop deadlocks.
+                time.sleep(0.3)
+                server.shutdown()
+
+            threading.Thread(target=_shutdown_soon, daemon=True).start()
+            return
 
         return self._err(404, "unknown endpoint")
 

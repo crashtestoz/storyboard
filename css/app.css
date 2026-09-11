@@ -91,14 +91,9 @@ button, input, textarea, select {
   background: var(--border);
 }
 
-.project-name {
-  font-weight: 500;
-  color: var(--text);
-}
-
 .project-meta {
   color: var(--text-faint);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
 }
 
 .header-spacer { flex: 1; }
@@ -863,14 +858,29 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
    Added when the UI was wired to the server
    ========================================================================== */
 
-.board-picker {
-  width: auto;
-  max-width: 220px;
-  padding: 4px var(--sp-2);
-  font-size: var(--fs-sm);
+/* Centered between the two flex:1 header-spacers either side of it, so it
+   sits in the middle of the bar regardless of how wide the button groups on
+   each end are. */
+.project-switcher {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.25;
+  min-width: 0;
 }
 
-.titles { display: flex; flex-direction: column; line-height: 1.25; }
+.board-picker {
+  width: auto;
+  max-width: 320px;
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--text);
+  background: transparent;
+  border-color: transparent;
+}
+
+.board-picker:hover, .board-picker:focus { border-color: var(--border); }
 
 .save-state {
   font-size: var(--fs-xs);
@@ -937,8 +947,10 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   line-height: 1.55;
 }
 
-.field-warn { font-size: var(--fs-xs); color: var(--warn); margin-top: 3px; }
 .field-note { font-size: var(--fs-xs); color: var(--text-faint); margin-top: 3px; }
+/* Declared after .field-note so toggling .field-warn on top of it (same
+   specificity either way) reliably wins instead of silently doing nothing. */
+.field-warn { font-size: var(--fs-xs); color: var(--warn); margin-top: 3px; }
 
 .inline-warn {
   margin-top: var(--sp-3);
@@ -1390,8 +1402,6 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   font-size: var(--fs-xs);
   word-break: break-all;
 }
-
-.project-name { cursor: pointer; }
 
 /* --- editor tabs ---------------------------------------------------------- */
 

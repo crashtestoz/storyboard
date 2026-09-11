@@ -475,9 +475,6 @@ function wireChrome() {
   });
 
   $("#btnSettings").addEventListener("click", openSettings);
-  // The header title is the obvious thing to click when you want to rename.
-  $("#projectTitle").title = "Click to rename this project";
-  $("#projectTitle").addEventListener("click", openSettings);
   $("#projName").addEventListener("input", () => {
     const v = $("#projName").value.trim();
     $("#btnRename").disabled = !v || !state.board || v === state.board.name;
@@ -490,6 +487,7 @@ function wireChrome() {
     }
   });
   $("#btnRename").addEventListener("click", renameProject);
+  $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
 
   $("#settingsClose").addEventListener("click", () => {
     $("#settings").hidden = true;
@@ -747,7 +745,21 @@ function openSettings() {
   $("#projName").value = state.board ? state.board.name : "";
   paintProjPath();
   $("#btnRename").disabled = true;
+  paintDataDir();
   $("#settings").hidden = false;
+}
+
+function paintDataDir() {
+  const info = state.info || {};
+  $("#dataDirInput").value = info.dataDir || "";
+  const warn = $("#dataDirWarn");
+  const overridden = info.dataDirSource === "cli" || info.dataDirSource === "env";
+  warn.textContent = overridden
+    ? "This server was started with --data-dir or SBV_DATA_DIR set, which " +
+      "always wins — saving a new folder here won't take effect until " +
+      "that flag/variable is removed from however this server is launched."
+    : "";
+  warn.classList.toggle("field-warn", overridden);
 }
 
 /** Mirror of the server's slugify, for previewing the folder a rename lands in. */
@@ -761,9 +773,11 @@ function paintProjPath() {
   const typed = $("#projName").value.trim();
   const current = state.board ? state.board.name : "";
   const slug = typed && typed !== current ? slugify(typed) : state.slug;
-  const ws = (state.info && state.info.workspace) || "<workspace>";
+  // Projects live under the data dir, not the vpipe workspace — those can
+  // (and by default now do) differ.
+  const root = (state.info && state.info.dataDir) || "<projects folder>";
   const note = $("#projPath");
-  note.textContent = `${ws}/projects/${slug}/`;
+  note.textContent = `${root}/projects/${slug}/`;
   note.classList.toggle("field-warn", slug !== state.slug);
   if (slug !== state.slug) {
     note.textContent += "   ← the folder moves here";
@@ -785,7 +799,7 @@ async function renameProject() {
     const r = await API.renameBoard(state.slug, name);
     state.slug = r.slug;
     state.board = r.board;
-    state.boards = (await API.boards()).boards;
+    state.boards = (await API.listBoards()).boards;
     state.sig = null;
     render();
     paintProjPath();
@@ -794,6 +808,56 @@ async function renameProject() {
     toast(`Rename failed: ${err.message}`, "error");
     btn.disabled = false;
   } finally {
+    btn.textContent = was;
+  }
+}
+
+async function saveDataDirAndRestart() {
+  const path = $("#dataDirInput").value.trim();
+  if (!path) return;
+  if (
+    !confirm(
+      `Save "${path}" as the global projects folder and restart the server ` +
+        `now?\n\nThis briefly drops every connection to this app (any open ` +
+        `tab). Existing project files are not moved automatically.`
+    )
+  ) {
+    return;
+  }
+
+  const btn = $("#btnSaveDataDir");
+  btn.disabled = true;
+  const was = btn.textContent;
+  try {
+    btn.textContent = "saving…";
+    await API.setDataDir(path);
+    btn.textContent = "restarting…";
+    await API.restartServer();
+
+    // The process is re-exec'ing itself: connections drop for a moment, then
+    // it comes back up serving the new folder. Poll rather than reload
+    // immediately, since an instant reload would just hit the gap and show
+    // the browser's own connection-refused page.
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 700));
+      try {
+        await API.info();
+        window.location.reload();
+        return;
+      } catch {
+        // still restarting — keep polling
+      }
+    }
+    toast(
+      "The server didn't come back within 20s — check the terminal it's " +
+        "running in, then reload this page.",
+      "error"
+    );
+  } catch (err) {
+    toast(`Could not save the projects folder: ${err.message}`, "error");
+  } finally {
+    btn.disabled = false;
     btn.textContent = was;
   }
 }
@@ -1006,7 +1070,6 @@ function paintMeta() {
   }, {});
   const pending = pendingShots().length;
   const changed = shots().filter((raw) => !!staleWhy(raw.id)).length;
-  $("#projectTitle").textContent = state.board.name;
   $("#projectMeta").textContent =
     `${shots().length} shots` +
     (Object.keys(counts).length
