@@ -963,10 +963,10 @@ def _ref2va_references(
         if src and src not in sounds and len(sounds) < 3:
             sounds.append(src)
 
-    # A start reference cannot anchor a Ref2VA clip -- that partition packs
-    # references instead of keyframes -- but it is the shot's local visual
-    # reference, so it should outrank portraits and project-wide style
-    # references.
+    # A start or end reference cannot anchor a Ref2VA clip -- that partition
+    # packs references instead of keyframes -- but each is still a shot-local
+    # visual reference, so together they should outrank portraits and
+    # project-wide style references.
     for ref in _shot_reference_images(shot):
         add_image(ref)
 
@@ -991,9 +991,20 @@ def _ref2va_references(
 
 
 def _shot_reference_images(shot: dict) -> list[Any]:
+    """Every image this shot points at, for a model with no true anchor port.
+
+    Ref2VA has no first/last-frame input at all — it takes one flat list of
+    reference images (see ``_ref2va_spec``) — so a start or end frame anchor
+    set on a Ref2VA shot cannot pin a frame; the closest it can do is join
+    the same reference set everything else here does. Leaving either one out
+    would make it silently do nothing, while the "Frame anchors" panel still
+    tells the user it is "stored ... for continuity".
+    """
     refs = []
     if shot.get("startRef"):
         refs.append(shot.get("startRef"))
+    if shot.get("endRef"):
+        refs.append(shot.get("endRef"))
     refs.extend(shot.get("referenceImages") or [])
     return refs
 

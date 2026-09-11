@@ -2280,8 +2280,9 @@ function renderEditor() {
         el(
           "div",
           "hint-body",
-          `${cap.label.split("—")[0].trim()} stores these for continuity, ` +
-            `but does not enforce exact start/end frames during render.`
+          `${cap.label.split("—")[0].trim()} sends these as shot reference ` +
+            `images rather than exact start/end frames — they describe the ` +
+            `scene, not a frame this model can pin.`
         )
       );
     }
@@ -2300,7 +2301,7 @@ function renderEditor() {
           ? `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
             `Start/end frame anchors above still control exact opening and closing frames.`
           : `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
-            `The start frame above is also sent as a primary shot reference.`)
+            `The start and end frames above are also sent as primary shot references.`)
       : `${cap.label.split("—")[0].trim()} does not use shot reference images, ` +
         `so these are stored with the clip but not used ` +
         `until you switch to a reference-capable model.`;
