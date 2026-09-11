@@ -12,7 +12,8 @@
 
     <!-- ================= header ================= -->
     <header class="header">
-      <div class="brand">
+      <div class="brand" id="btnHelp" role="button" tabindex="0"
+           title="Camera angles &amp; shot sizes reference">
         <span class="brand-mark">▦</span>
         <span>Storyboard&nbsp;→&nbsp;Video</span>
       </div>
@@ -297,6 +298,131 @@
         <div class="cast-note" id="castNote"></div>
       </div>
       <div class="modal-foot" id="castFoot"></div>
+    </div>
+  </div>
+
+  <div id="helpDialog" class="modal" hidden>
+    <div class="modal-card" style="width:min(920px,100%)">
+      <div class="modal-head">
+        <span>Camera angles &amp; shot sizes</span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-ghost btn-sm" id="helpClose">Close</button>
+      </div>
+      <div class="modal-body help-body" style="display:block">
+
+        <section class="help-section">
+          <div class="section-label">
+            Camera level
+            <span class="hint">— how high the camera sits relative to the subject</span>
+          </div>
+          <svg class="help-diagram" viewBox="0 0 640 480" role="img"
+               aria-label="A standing figure with six camera heights marked, from overhead down to ground level.">
+            <circle class="help-fig" cx="460" cy="60" r="32"/>
+            <rect class="help-fig" x="452" y="92" width="16" height="14"/>
+            <polygon class="help-fig" points="420,106 500,106 485,270 435,270"/>
+            <polygon class="help-fig" points="435,270 460,270 454,455 432,455"/>
+            <polygon class="help-fig" points="460,270 485,270 488,455 466,455"/>
+            <ellipse class="help-fig" cx="440" cy="458" rx="15" ry="6"/>
+            <ellipse class="help-fig" cx="478" cy="458" rx="15" ry="6"/>
+
+            <!-- overhead -->
+            <polyline class="help-line" points="300,12 460,12 460,26"/>
+            <g class="help-cam" transform="translate(447,2)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="292" y="16" text-anchor="end">OVERHEAD</text>
+
+            <!-- eye level -->
+            <polyline class="help-line" points="300,58 425,58"/>
+            <g class="help-cam" transform="translate(250,50)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="20" y="62">EYE LEVEL</text>
+
+            <!-- shoulder level -->
+            <polyline class="help-line" points="300,104 420,104"/>
+            <g class="help-cam" transform="translate(250,96)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="20" y="108">SHOULDER LEVEL</text>
+
+            <!-- hip level -->
+            <polyline class="help-line" points="300,270 434,270"/>
+            <g class="help-cam" transform="translate(250,262)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="20" y="274">HIP LEVEL</text>
+
+            <!-- knee level -->
+            <polyline class="help-line" points="300,380 432,380"/>
+            <g class="help-cam" transform="translate(250,372)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="20" y="384">KNEE LEVEL</text>
+
+            <!-- ground level -->
+            <polyline class="help-line" points="300,455 432,455"/>
+            <g class="help-cam" transform="translate(250,447)"><use href="#help-cam-icon"/></g>
+            <text class="help-label" x="20" y="459">GROUND LEVEL</text>
+
+            <defs>
+              <g id="help-cam-icon">
+                <rect x="0" y="3" width="20" height="12" rx="2"/>
+                <polygon points="20,6 27,3 27,15 20,12"/>
+                <circle cx="6" cy="9" r="3.4" class="help-cam-lens"/>
+              </g>
+            </defs>
+          </svg>
+          <dl class="help-legend">
+            <div><dt>Overhead</dt><dd>straight down from above — lays out geography and scale, or disorients on purpose.</dd></div>
+            <div><dt>Eye level</dt><dd>matches how people actually look at each other — neutral, natural.</dd></div>
+            <div><dt>Shoulder level</dt><dd>a touch below eye level — common for handheld, observational coverage.</dd></div>
+            <div><dt>Hip level</dt><dd>around waist height, angled slightly up — common alongside a walking subject.</dd></div>
+            <div><dt>Knee level</dt><dd>low, looking further up — adds height and a little power to the subject.</dd></div>
+            <div><dt>Ground level</dt><dd>at the floor — makes a subject tower overhead, or reads action happening low.</dd></div>
+          </dl>
+        </section>
+
+        <section class="help-section">
+          <div class="section-label">
+            Shot size
+            <span class="hint">— how much of the subject the frame holds, tightest to widest</span>
+          </div>
+          <svg class="help-diagram" viewBox="0 0 640 480" role="img"
+               aria-label="A standing figure with seven nested crop lines, from an extreme close-up on the head down to a full shot of the whole body.">
+            <circle class="help-fig" cx="220" cy="60" r="32"/>
+            <rect class="help-fig" x="212" y="92" width="16" height="14"/>
+            <polygon class="help-fig" points="180,106 260,106 245,270 195,270"/>
+            <polygon class="help-fig" points="195,270 220,270 214,455 192,455"/>
+            <polygon class="help-fig" points="220,270 245,270 248,455 226,455"/>
+            <ellipse class="help-fig" cx="200" cy="458" rx="15" ry="6"/>
+            <ellipse class="help-fig" cx="238" cy="458" rx="15" ry="6"/>
+
+            <rect class="help-crop" x="175" y="15" width="90" height="80"/>
+            <rect class="help-crop" x="162" y="15" width="116" height="130"/>
+            <rect class="help-crop" x="150" y="15" width="140" height="180"/>
+            <rect class="help-crop" x="125" y="15" width="190" height="255"/>
+            <rect class="help-crop" x="110" y="15" width="220" height="325"/>
+            <rect class="help-crop" x="100" y="15" width="240" height="375"/>
+            <rect class="help-crop" x="85" y="15" width="270" height="445"/>
+
+            <g class="help-tick">
+              <line x1="265" y1="95" x2="290" y2="95"/><text x="296" y="99">ECU</text>
+              <line x1="278" y1="145" x2="303" y2="145"/><text x="309" y="149">CU</text>
+              <line x1="290" y1="195" x2="315" y2="195"/><text x="321" y="199">MCU</text>
+              <line x1="315" y1="270" x2="340" y2="270"/><text x="346" y="274">MS</text>
+              <line x1="330" y1="340" x2="355" y2="340"/><text x="361" y="344">CS</text>
+              <line x1="340" y1="390" x2="365" y2="390"/><text x="371" y="394">MFS</text>
+              <line x1="355" y1="460" x2="380" y2="460"/><text x="386" y="464">FS</text>
+            </g>
+          </svg>
+          <dl class="help-legend">
+            <div><dt>Extreme close-up (ECU)</dt><dd>just the eyes or mouth — intense emotion, or a tiny detail.</dd></div>
+            <div><dt>Close-up (CU)</dt><dd>the face, forehead to chin — reaction and emotion.</dd></div>
+            <div><dt>Medium close-up (MCU)</dt><dd>head and upper chest — the standard dialogue frame.</dd></div>
+            <div><dt>Medium shot (MS)</dt><dd>waist up — balances expression with body language.</dd></div>
+            <div><dt>Cowboy shot (CS)</dt><dd>mid-thigh up, named for a Western gunslinger's holster — body language plus a hint of the surroundings.</dd></div>
+            <div><dt>Medium full shot (MFS)</dt><dd>knees up.</dd></div>
+            <div><dt>Full shot (FS)</dt><dd>head to toe — posture, movement, and the subject's relationship to the space around them.</dd></div>
+          </dl>
+        </section>
+
+      </div>
+      <div class="modal-foot">
+        These describe how a shot's prompt is framed — mention them in the shot
+        prompt itself (e.g. "a cowboy shot, hip level") the same way you'd
+        describe a camera move.
+      </div>
     </div>
   </div>
 
