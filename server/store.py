@@ -259,6 +259,13 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "speakerId": "",          # which cast member says it; "" = infer
         "dialogueAudioUrl": None, # the spoken line on its own, for preview
         "dubUrl": None,           # the clip with speech muxed over it
+        # "mix": lay the spoken line over the clip's own generated audio, so
+        # ambience (engine hum, wind) survives under it. "replace": the
+        # dubbed clip carries only the spoken line — for when the video model
+        # ignored the "no voice" prompt instruction and generated its own
+        # mumbled dialogue, which "mix" would otherwise leave audible under
+        # the real line as a second, overlapping voice.
+        "dubMode": "mix",
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
@@ -831,6 +838,7 @@ class Store:
             shot.setdefault("dialogueStyle", "")
             shot.setdefault("dialogueVoice", "")
             shot.setdefault("dubUrl", None)
+            shot.setdefault("dubMode", "mix")
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])

@@ -448,7 +448,8 @@ class Orchestrator:
             return
         try:
             out, error, log, warning = mux_speech(
-                clip=clip, speech=speech, shot_dir=shot_dir
+                clip=clip, speech=speech, shot_dir=shot_dir,
+                keep_original_audio=shot.get("dubMode") != "replace",
             )
         except Exception as exc:  # noqa: BLE001 - a failed mux is not a failed render
             run.log.append({"level": "WARN", "text": f"could not mix in the spoken line: {exc}"})
