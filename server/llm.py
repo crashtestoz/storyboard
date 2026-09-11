@@ -65,6 +65,10 @@ over "cool-looking ship".
 Rules:
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters, locations or story beats, and do not remove any they named.
+- If reference images are listed in the context, treat them as visual \
+constraints. Add a compact natural-language summary of the relevant reference \
+cues to the rewritten prompt, especially location, framing, lighting, material \
+and character identity. Do not include filenames or paths in the final prompt.
 - Refer to named characters by exactly the name the writer used.
 - One paragraph. No headings, no bullet points, no preamble, no explanation, \
 no quotation marks around the whole thing.
@@ -88,6 +92,10 @@ wear, texture, the time of day.
 Rules:
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters or locations, and do not remove any they named.
+- If reference images are listed in the context, treat them as visual \
+constraints. Add a compact natural-language summary of the relevant reference \
+cues to the rewritten prompt. Do not include filenames or paths in the final \
+prompt.
 - Refer to named characters by exactly the name the writer used.
 - Describe no sound at all: this is a still image.
 - One paragraph. No headings, no bullets, no preamble, no explanation.
@@ -118,6 +126,7 @@ def build_user_message(
     *,
     scene: str = "",
     characters: list[dict[str, Any]] | None = None,
+    reference_images: list[dict[str, str]] | None = None,
 ) -> str:
     """The shot to rewrite, plus the context it has to stay consistent with.
 
@@ -141,6 +150,23 @@ def build_user_message(
                 f"{name}: {desc}" if desc else
                 f"A character in this shot. Refer to them as \"{name}\"."
             )
+    refs = [r for r in (reference_images or []) if (r.get("label") or "").strip()]
+    if refs:
+        lines = []
+        for r in refs:
+            role = (r.get("role") or "Reference image").strip()
+            label = (r.get("label") or "").strip()
+            summary = (r.get("summary") or "").strip()
+            line = f"- {role}: {label}"
+            if summary and summary != label:
+                line += f" ({summary})"
+            lines.append(line)
+        blocks.append(
+            "Reference images attached to this shot. Use these as visual "
+            "constraints when rewriting, and fold a concise summary of their "
+            "visual cues into the prompt. Do not mention filenames or paths in "
+            "the rewritten prompt:\n" + "\n".join(lines)
+        )
     blocks.append("Rewrite this shot description:\n" + text.strip())
     return "\n\n".join(blocks)
 
@@ -470,6 +496,7 @@ def rewrite_prompt(
     *,
     scene: str = "",
     characters: list[dict[str, Any]] | None = None,
+    reference_images: list[dict[str, str]] | None = None,
     still: bool = False,
 ) -> str:
     """Ask *service* to restyle *text*. Returns the proposal, never applies it."""
@@ -483,7 +510,12 @@ def rewrite_prompt(
 
     out = service.complete(
         STILL_SYSTEM_PROMPT if still else SYSTEM_PROMPT,
-        build_user_message(text, scene=scene, characters=characters),
+        build_user_message(
+            text,
+            scene=scene,
+            characters=characters,
+            reference_images=reference_images,
+        ),
     )
     out = _strip_wrapping(out)
     if not out:

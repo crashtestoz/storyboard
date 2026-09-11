@@ -68,14 +68,19 @@ H3_FRAME_RULE = FrameRule(
 # text-to-video and the reference image silently does nothing.
 H3_SIZE_ALIGN = 32
 
-# Every dimension here is a multiple of 16, which these models require.
-# Grouped by aspect so the UI can offer a ratio rather than a pixel string.
-# 640x368 is the closest valid 16:9 (640x360 is not a multiple of 16).
+# Every dimension here is a multiple of 32, matching H3's rounded canvas and
+# still satisfying Krea's multiple-of-16 requirement. Grouped by aspect so the
+# UI can offer a ratio rather than a pixel string. Sizes above H3's documented
+# 768p canvas are deliberate "try it if you can afford the time/RAM" options
+# and remain labelled untested unless a model marks them otherwise.
 ASPECT_TABLE: dict[str, list[str]] = {
-    "16:9": ["1344x768", "960x544", "832x480", "640x368"],
-    "4:3":  ["1024x768", "960x720", "768x576", "640x480"],
-    "1:1":  ["1024x1024", "768x768", "640x640"],
-    "9:16": ["768x1344", "544x960", "480x832"],
+    "21:9": ["1792x768", "1344x576", "1120x480"],
+    "16:9": ["1920x1088", "1536x864", "1344x768", "1280x736",
+             "960x544", "832x480", "672x384"],
+    "4:3":  ["1280x960", "1024x768", "768x576", "640x480"],
+    "1:1":  ["1536x1536", "1344x1344", "1024x1024", "768x768", "640x640"],
+    "3:4":  ["960x1280", "768x1024", "576x768"],
+    "9:16": ["1088x1920", "864x1536", "768x1344", "544x960", "480x832"],
 }
 ALL_RESOLUTIONS = [r for group in ASPECT_TABLE.values() for r in group]
 
@@ -258,7 +263,12 @@ class VpipeBackend(Backend):
         )
         width, height = _wh(res)
         draft = bool((project.get("defaults") or {}).get("draft"))
-        prompt = _resolved_prompt(shot, project, with_audio=cap.supports_audio)
+        prompt = _resolved_prompt(
+            shot,
+            project,
+            with_audio=cap.supports_audio and not draft,
+            model=model,
+        )
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
 
@@ -276,18 +286,22 @@ class VpipeBackend(Backend):
             expected_seconds = 150.0
             frames_dir = None
             frames = 0
+            save_frames = False
         else:
             frames = cap.frame_rule.snap(int(shot.get("frames") or cap.frame_rule.minimum))
+            save_frames = (not draft) or _has_downstream_chain(shot, project)
             if model == "ref2va":
                 spec, outputs = self._ref2va_spec(
-                    shot, project, paths, prompt, width, height, frames, steps, seed
+                    shot, project, paths, prompt, width, height, frames, steps,
+                    seed, draft, save_frames
                 )
             else:
                 spec, outputs = self._fl2va_spec(
-                    shot, paths, prompt, width, height, frames, steps, seed
+                    shot, paths, prompt, width, height, frames, steps, seed,
+                    draft, save_frames
                 )
             expected_seconds = _estimate_seconds(width, height, frames, steps, model)
-            frames_dir = paths.abs_frames
+            frames_dir = paths.abs_frames if save_frames else None
 
         spec_path = paths.abs_dir / "shot.vpipeline"
         spec_path.write_text(json.dumps(spec, indent=2) + "\n")
@@ -296,7 +310,7 @@ class VpipeBackend(Backend):
             shot_id=shot["id"],
             expected_outputs=outputs,
             frames_dir=frames_dir,
-            expected_frames=frames if cap.kind == "video" else 0,
+            expected_frames=frames if save_frames else 0,
             expected_seconds=expected_seconds,
             payload={
                 "spec_path": str(spec_path),
@@ -305,6 +319,7 @@ class VpipeBackend(Backend):
                 "model": model,
                 "frames": frames,
                 "draft": draft,
+                "save_frames": save_frames,
             },
             summary=(
                 f"{cap.label.split('—')[0].strip()} · {width}x{height}"
@@ -316,7 +331,8 @@ class VpipeBackend(Backend):
 
     # -- templates ------------------------------------------------------ #
 
-    def _fl2va_spec(self, shot, paths, prompt, w, h, frames, steps, seed):
+    def _fl2va_spec(self, shot, paths, prompt, w, h, frames, steps, seed,
+                    draft=False, save_frames=True):
         """Text-to-video, plus optional first/last frame anchors on ports 5/6."""
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-FL2VA-8bit"),
@@ -381,46 +397,15 @@ class VpipeBackend(Backend):
         iports[9] = {"src": "minimax-h3-model-config", "oport": 0}
 
         stages.append(_generate_video(iports, w, h, frames, steps, seed))
-        stages += _decode_and_save(paths, audio=True)
+        stages += _decode_and_save(paths, audio=not draft, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
-    def _ref2va_spec(self, shot, project, paths, prompt, w, h, frames, steps, seed):
+    def _ref2va_spec(self, shot, project, paths, prompt, w, h, frames, steps,
+                     seed, draft=False, save_frames=True):
         """Reference-conditioned video via video-ref-encoder's file list."""
-        # Ref2VA's own limits: 9 images, 3 soundtracks, 12 references total,
-        # and audio can never be the only kind. Character portraits come first
-        # because identity is what a reference list is for; style references
-        # fill whatever is left.
-        images: list[str] = []
-        sounds: list[str] = []
-
-        for ch in _shot_characters(shot, project):
-            img = _ref_source(ch.get("image"), paths)
-            if img and img not in images and len(images) < 9:
-                images.append(img)
-            voice = _ref_source(ch.get("voice"), paths)
-            if voice and voice not in sounds and len(sounds) < 3:
-                sounds.append(voice)
-
-        for r in project.get("styleRefs") or []:
-            src = _ref_source(r, paths)
-            if src and src not in images and len(images) < 9:
-                images.append(src)
-
-        # A start reference cannot anchor a Ref2VA clip — that partition packs
-        # references instead of keyframes — but it is still a usable subject
-        # reference, so it is kept rather than silently dropped.
-        own = _ref_source(shot.get("startRef"), paths)
-        if own and own not in images and len(images) < 9:
-            images.append(own)
-
-        # "audio can never be the only kind": a voice clip with no picture
-        # alongside it is not a request Ref2VA accepts, so drop the sound
-        # rather than have the encoder refuse the whole thing.
-        if sounds and not images:
-            sounds = []
-
-        refs = (images + sounds)[:12]
+        refs = _ref2va_references(shot, project, paths,
+                                  include_audio_refs=not draft)
 
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-Ref2VA-8bit"),
@@ -438,7 +423,7 @@ class VpipeBackend(Backend):
                     # must match generate-video's frames exactly — a mismatch
                     # is a shape error 50 layers deep
                     "frames": frames,
-                    "reference_image_short_edge": 1024,
+                    "reference_image_short_edge": 512 if draft else 1024,
                     "unload_when_idle": "auto",
                 },
             },
@@ -452,7 +437,7 @@ class VpipeBackend(Backend):
         iports[9] = {"src": "minimax-h3-model-config", "oport": 0}
 
         stages.append(_generate_video(iports, w, h, frames, steps, seed))
-        stages += _decode_and_save(paths, audio=True)
+        stages += _decode_and_save(paths, audio=not draft, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
@@ -743,7 +728,8 @@ def _generate_video(iports, w, h, frames, steps, seed) -> dict:
     }
 
 
-def _decode_and_save(paths: ShotPaths, audio: bool) -> list[dict]:
+def _decode_and_save(paths: ShotPaths, audio: bool,
+                     save_frames: bool = True) -> list[dict]:
     stages = [
         {
             "id": "vae-decode",
@@ -760,7 +746,9 @@ def _decode_and_save(paths: ShotPaths, audio: bool) -> list[dict]:
             "iports": [{"src": "vae-decode", "oport": 0}],
             "config": {"fps": 24},
         },
-        {
+    ]
+    if save_frames:
+        stages.append({
             "id": "save-frames",
             "type": "save-image",
             "iports": [{"src": "vae-decode", "oport": 0}],
@@ -768,8 +756,7 @@ def _decode_and_save(paths: ShotPaths, audio: bool) -> list[dict]:
                 "path": f"{paths.pipe_frames}/frame-%04d.png",
                 "format": "png",
             },
-        },
-    ]
+        })
     save_iports = [{"src": "rgb-to-video", "oport": 0}]
     if audio:
         stages.insert(
@@ -823,14 +810,14 @@ def _draft_geometry(w: int, h: int, steps: int,
     What is safe to cut, and what is not:
 
     *   **Pixels** — the big lever. Denoise cost is proportional to frame area,
-        so halving each dimension is ~4x less work. Rounded UP to `align`, the
-        multiple the model tiles at, and floored so a draft stays legible.
+        so the draft caps the long edge at 384 px and never uses more than
+        half-size. Rounded UP to `align`, the multiple the model tiles at.
         Up rather than down because generate-video rounds up: a draft that
         rounded the other way would be re-rounded there, and a start-frame
         anchor encoded at this size would stop matching.
-    *   **Steps** — cut to 6. Below 8 is nominally the Turbo LoRA's territory
+    *   **Steps** — cut to 4. Below 8 is nominally the Turbo LoRA's territory
         rather than the raw model's, but for judging whether a camera move and
-        a composition work, slightly noisier output is the correct trade.
+        a composition work, noisy output is the correct trade.
     *   **Frames — NOT cut.** The whole point of a draft here is checking
         motion, and a shorter clip is a different motion. Length is preserved.
     *   **Seed — NOT changed** (handled by the caller). Same seed keeps the
@@ -838,9 +825,10 @@ def _draft_geometry(w: int, h: int, steps: int,
         changing the resolution changes the latent geometry, but the framing
         and the move carry over.
     """
-    dw = _align_up(max(320, w // 2), align)
-    dh = _align_up(max(192, h // 2), align)
-    return dw, dh, max(4, min(steps, 6))
+    scale = min(0.5, 384.0 / max(w, h))
+    dw = _align_up(max(align, round(w * scale)), align)
+    dh = _align_up(max(align, round(h * scale)), align)
+    return dw, dh, max(4, min(steps, 4))
 
 
 def _wh(res: str) -> tuple[int, int]:
@@ -851,7 +839,28 @@ def _wh(res: str) -> tuple[int, int]:
         return 960, 544
 
 
-def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
+def _has_downstream_chain(shot: dict, project: dict) -> bool:
+    shot_id = shot.get("id")
+    if not shot_id:
+        return False
+    for other in project.get("shots") or []:
+        for key in ("startRef", "endRef"):
+            ref = other.get(key)
+            if (
+                isinstance(ref, dict)
+                and ref.get("kind") == "chain"
+                and ref.get("from") == shot_id
+            ):
+                return True
+    return False
+
+
+def _resolved_prompt(
+    shot: dict,
+    project: dict,
+    with_audio: bool = True,
+    model: str = "",
+) -> str:
     """Parts in the order MiniMax H3's own examples use.
 
     1. the project scene description — subject and style, every shot
@@ -876,7 +885,22 @@ def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
     Sound parts are dropped for a model with no audio (a still), where they
     would only compete with the visual description.
     """
-    parts = [(project.get("sceneDescription") or "").strip()]
+    parts = []
+    has_shot_refs = model == "ref2va" and bool(_shot_reference_images(shot))
+    if has_shot_refs:
+        parts.append(
+            "The shot reference image set is the primary visual reference for "
+            "this clip's location, framing, lighting and surface details."
+        )
+        parts.append(
+            "Use character portraits for identity and material details only; "
+            "do not copy their pose, camera angle, or background."
+        )
+    view = _view_constraint(shot)
+    if view:
+        parts.append(view)
+    if not has_shot_refs:
+        parts.append((project.get("sceneDescription") or "").strip())
 
     # Characters appearing in this shot, named so the shot prompt can refer to
     # them ("Kira ducks behind the crate"). Only the ones this shot casts —
@@ -884,6 +908,13 @@ def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
     for ch in _shot_characters(shot, project):
         name = (ch.get("name") or "").strip()
         desc = (ch.get("description") or "").strip()
+        if has_shot_refs and ch.get("image") and name:
+            parts.append(
+                f"{name}: use the character portrait for identity, silhouette, "
+                "materials, and color only; follow this shot for pose, camera "
+                "angle, and environment."
+            )
+            continue
         character = _character_description(name, desc)
         if character:
             parts.append(character)
@@ -895,7 +926,7 @@ def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
             parts.append(cue)
 
     if with_audio:
-        if project.get("soundscapeInShots", True):
+        if project.get("soundscapeInShots", True) and not has_shot_refs:
             parts.append((project.get("soundscape") or "").strip())
         parts.append((shot.get("soundNote") or "").strip())
         if (shot.get("dialogue") or "").strip():
@@ -905,6 +936,79 @@ def _resolved_prompt(shot: dict, project: dict, with_audio: bool = True) -> str:
                 "dubbed separately."
             )
     return " ".join(_sentence(p) for p in parts if p)
+
+
+def _ref2va_references(
+    shot: dict,
+    project: dict,
+    paths: ShotPaths,
+    include_audio_refs: bool = True,
+) -> list[str]:
+    """Reference order for Ref2VA, strongest shot-local signals first.
+
+    The shot's own image sets clip-specific location/framing first. Character
+    portraits preserve identity after that, and project style refs are useful
+    background only when there is no local shot reference.
+    """
+    images: list[str] = []
+    sounds: list[str] = []
+
+    def add_image(ref: Any) -> None:
+        src = _ref_source(ref, paths)
+        if src and src not in images and len(images) < 9:
+            images.append(src)
+
+    def add_sound(ref: Any) -> None:
+        src = _ref_source(ref, paths)
+        if src and src not in sounds and len(sounds) < 3:
+            sounds.append(src)
+
+    # A start reference cannot anchor a Ref2VA clip -- that partition packs
+    # references instead of keyframes -- but it is the shot's local visual
+    # reference, so it should outrank portraits and project-wide style
+    # references.
+    for ref in _shot_reference_images(shot):
+        add_image(ref)
+
+    for ch in _shot_characters(shot, project):
+        add_image(ch.get("image"))
+
+    if not _shot_reference_images(shot):
+        for r in project.get("styleRefs") or []:
+            add_image(r)
+
+    if include_audio_refs:
+        for ch in _shot_characters(shot, project):
+            add_sound(ch.get("voice"))
+
+    # "audio can never be the only kind": a voice clip with no picture
+    # alongside it is not a request Ref2VA accepts, so drop the sound rather
+    # than have the encoder refuse the whole thing.
+    if sounds and not images:
+        sounds = []
+
+    return (images + sounds)[:12]
+
+
+def _shot_reference_images(shot: dict) -> list[Any]:
+    refs = []
+    if shot.get("startRef"):
+        refs.append(shot.get("startRef"))
+    refs.extend(shot.get("referenceImages") or [])
+    return refs
+
+
+def _view_constraint(shot: dict) -> str:
+    prompt = (shot.get("prompt") or "").lower()
+    rear_words = ("from behind", "from the rear", "rear view", "back view")
+    if any(word in prompt for word in rear_words):
+        return (
+            "Camera constraint: keep the visible character facing away from "
+            "the camera from the first frame; show back plating and rear "
+            "silhouette, not a front-facing portrait, hands-on-hips pose, "
+            "face, eyes, chest plate, or front torso."
+        )
+    return ""
 
 
 def _dialogue_visual_cue(shot: dict, project: dict) -> str:
