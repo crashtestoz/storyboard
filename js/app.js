@@ -3550,25 +3550,37 @@ async function chooseMedia(title, kind) {
           grid.appendChild(card);
         };
 
-        // A brand-new project's picker is otherwise indistinguishable from
-        // "this project's own references" — every card here that isn't
-        // already this project's own is something picking it will *copy*
-        // in, not something already attached, and that needs to be obvious
-        // at a glance rather than readable only in each card's fine print.
+        // Default to this project's own images. Reuse from elsewhere is
+        // still one click away, but it should never just be *there* on open
+        // — a project with its own references showing someone else's next
+        // to them, unlabeled context, is what reads as contamination, not a
+        // deliberate choice to go browse another project's library.
         const mine = shown.filter((img) => img.project === state.slug);
         const others = shown.filter((img) => img.project !== state.slug);
-        if (mine.length) {
-          if (others.length) grid.appendChild(el("div", "pick-group-header", "This project"));
-          mine.forEach(addCard);
-        }
+        mine.forEach(addCard);
+
         if (others.length) {
-          grid.appendChild(
-            el("div", "pick-group-header",
-               mine.length
-                 ? "From other projects — picking one copies it in"
-                 : "Nothing here yet — from your other projects, picking one copies it in")
+          if (!mine.length) {
+            grid.appendChild(
+              el("div", "empty-state", "No images in this project yet.")
+            );
+          }
+          const reveal = el(
+            "button", "pick-browse-others",
+            `Browse ${others.length} image${others.length === 1 ? "" : "s"} from other projects…`
           );
-          others.forEach(addCard);
+          reveal.addEventListener("click", () => {
+            reveal.remove();
+            grid.appendChild(
+              el("div", "pick-group-header", "From other projects — picking one copies it in")
+            );
+            others.forEach(addCard);
+          });
+          grid.appendChild(reveal);
+        } else if (!mine.length) {
+          grid.appendChild(
+            el("div", "empty-state", "No images in your projects yet — upload one.")
+          );
         }
       })
       .catch((err) => {

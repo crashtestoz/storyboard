@@ -1086,6 +1086,23 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   border-top: none;
 }
 
+.pick-browse-others {
+  grid-column: 1 / -1;
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  padding: var(--sp-3);
+  cursor: pointer;
+  text-align: center;
+}
+
+.pick-browse-others:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 .pick-usage {
   margin-top: 2px;
   color: var(--accent);
