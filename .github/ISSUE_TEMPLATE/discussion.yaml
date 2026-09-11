@@ -1,0 +1,42 @@
+name: Discussion
+description: Start an open-ended discussion, question, or idea — not a bug report or feature request.
+title: "[Discussion]: "
+labels: ["discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for a question, an idea worth talking through, or anything
+        that doesn't need a fix. For a bug or a concrete feature request,
+        open a plain issue instead.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What's on your mind?
+      description: The question, idea, or topic in a sentence or two.
+      placeholder: e.g. Should draft mode default to on for new boards?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the app is this about?
+      options:
+        - Storyboard editor / UI
+        - Rendering (vpipe backend)
+        - Dialogue / TTS
+        - Prompt rewriting / LLM
+        - Project & asset management
+        - Something else / general
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Anything that led here — a board you were working on, a decision you're weighing, a related issue.
+    validations:
+      required: false

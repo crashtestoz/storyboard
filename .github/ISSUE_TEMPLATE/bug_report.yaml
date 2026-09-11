@@ -1,0 +1,56 @@
+name: Bug report
+description: Something didn't work the way it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected instead.
+      placeholder: e.g. Render all skipped a shot marked done, even though I'd edited its prompt.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open board "..."
+        2. Edit shot 3's prompt
+        3. Click Render all
+    validations:
+      required: false
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Model / engine involved, if any
+      options:
+        - MiniMax H3 (text-to-video)
+        - MiniMax H3 Ref2VA
+        - Krea-2 Turbo (still)
+        - ComfyUI
+        - TTS / dubbing
+        - Prompt rewrite (LLM)
+        - Not model-specific
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: The shot's `run.log` / `speech.log`, the app's Backend output pane, or `server.log`.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: e.g. macOS 15, Python 3.12, vpipe workspace on Apple Silicon
+    validations:
+      required: false
