@@ -565,6 +565,46 @@ def test_unmixed_dialogue(tmp: Path) -> None:
           str(unmixed_dialogue(board, project)))
 
 
+def test_import_rehomes_media(tmp: Path) -> None:
+    section("import rehomes media")
+    store = Store(workspace=tmp, data_dir=tmp)
+
+    src_slug, src_board = store.create("Source Project")
+    refs_dir = store.refs_dir(src_slug)
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    (refs_dir / "mood.png").write_bytes(b"x" * 32)
+    src_board["styleRefs"] = [{
+        "path": f"projects/{src_slug}/refs/mood.png",
+        "url": f"/media/projects/{src_slug}/refs/mood.png",
+        "label": "mood.png",
+    }]
+    store.save(src_slug, src_board)
+
+    new_slug, new_board = store.import_board(
+        store.export(src_slug), name="Copy of Source"
+    )
+    check("import gives the copy its own slug", new_slug != src_slug, new_slug)
+
+    style = (new_board.get("styleRefs") or [None])[0] or {}
+    check("the imported style ref points into the new project",
+          style.get("path", "").startswith(f"projects/{new_slug}/"),
+          style.get("path"))
+    check("the style ref image was copied into the new project",
+          (tmp / "projects" / new_slug / "refs" / "mood.png").is_file())
+    check("the source project's own file is untouched",
+          (refs_dir / "mood.png").is_file())
+
+    # If the copy still pointed at the source's folder, deleting the source
+    # would take the copy's style reference down with it.
+    store.delete(src_slug, keep_outputs=False)
+    reloaded = store.load(new_slug)
+    style = (reloaded.get("styleRefs") or [None])[0] or {}
+    check("the copy's style ref survives the source project being deleted",
+          (tmp / "projects" / new_slug / "refs" / "mood.png").is_file()
+          and style.get("path", "").startswith(f"projects/{new_slug}/"),
+          style.get("path"))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -576,6 +616,7 @@ def main() -> int:
         test_clip_choice(tmp)
         test_final_staleness(tmp)
         test_unmixed_dialogue(tmp)
+        test_import_rehomes_media(tmp)
         test_assemble(tmp)
 
     print()

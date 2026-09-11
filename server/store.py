@@ -639,6 +639,59 @@ class Store:
             "label": dest.name,
         }
 
+    def _rehome_ref(self, slug: str, ref: Any) -> Any:
+        """``adopt`` a single reference into *slug*, in place.
+
+        A ref that carries no real file (a chain reference, an empty slot)
+        passes through untouched. One whose file no longer exists under
+        ``data_dir`` — an import from another machine — is dropped rather
+        than kept pointing at a path this project does not have, which would
+        just move the "points outside the project" bug from a resolvable
+        case to an unresolvable one.
+        """
+        rel = _ref_path(ref)
+        if not rel:
+            return ref
+        try:
+            adopted = self.adopt(slug, rel)
+        except FileNotFoundError:
+            return None
+        return {**ref, **adopted} if isinstance(ref, dict) else adopted
+
+    def _rehome_media(self, slug: str, board: dict[str, Any]) -> dict[str, Any]:
+        """Copy every reference image a board points at into *slug*'s own refs/.
+
+        A board loaded from JSON — imported, or duplicated by hand — can
+        still carry ``styleRefs``, cast portraits and shot references whose
+        ``path``/``url`` point into whatever project they were exported
+        from. Left alone, the new project silently depends on that other
+        project's folder: deleting or renaming it breaks references here,
+        and two projects end up sharing what look like independent style
+        references. Rehoming everything before the first save is what
+        ``adopt`` already does for a single picked image; this applies the
+        same treatment to a whole board at once.
+        """
+        board["styleRefs"] = [
+            r for r in (self._rehome_ref(slug, ref) for ref in board.get("styleRefs") or [])
+            if r is not None
+        ]
+        for ch in board.get("characters") or []:
+            if ch.get("image"):
+                ch["image"] = self._rehome_ref(slug, ch["image"])
+        for shot in board.get("shots") or []:
+            if shot.get("startRef"):
+                shot["startRef"] = self._rehome_ref(slug, shot["startRef"])
+            if shot.get("endRef"):
+                shot["endRef"] = self._rehome_ref(slug, shot["endRef"])
+            if isinstance(shot.get("referenceImages"), list):
+                shot["referenceImages"] = [
+                    r for r in (
+                        self._rehome_ref(slug, ref) for ref in shot["referenceImages"]
+                    )
+                    if r is not None
+                ]
+        return board
+
     # -- import / export -------------------------------------------------- #
 
     def export(self, slug: str) -> str:
@@ -668,6 +721,7 @@ class Store:
         while self.board_path(slug).exists():
             slug = f"{base}-{n}"
             n += 1
+        board = self._rehome_media(slug, board)
         self.save(slug, board)
         return slug, board
 
