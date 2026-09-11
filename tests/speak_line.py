@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from server.dubbing import (                                   # noqa: E402
+    _duration,
     dub_shot,
     polish_speech,
     speak_line,
@@ -261,6 +262,46 @@ def test_mux_when_clip_exists(tmp: Path) -> None:
     check("an overlong line is warned about", "cut off" in long.warning, long.warning)
 
 
+def test_replace_mode_drops_original_audio(tmp: Path) -> None:
+    print("\n-- dubMode: replace --")
+    if not shutil.which("ffmpeg"):
+        print("skip  ffmpeg not on PATH")
+        return
+
+    shot_dir = tmp / "shots" / "04"
+    shot_dir.mkdir(parents=True)
+    clip = shot_dir / "clip.mp4"
+    # 2s of video with a real (silent) audio track, same as the mux test above.
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=black:s=128x72:d=2",
+         "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+         "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", str(clip)],
+        check=True, capture_output=True, timeout=120,
+    )
+
+    # Mixed: the bed (2s) outlasts the 1s line, so the dub stays clip-length —
+    # this is what lets engine hum/ambience survive under a short line.
+    mixed = dub_shot(StubEngine(seconds=1.0), clip=clip, shot_dir=shot_dir,
+                      text="short line", keep_original_audio=True)
+    check("mixed dub succeeds", mixed.ok, mixed.error)
+    check("mixed dub keeps the clip's own length",
+          abs(_duration(mixed.video) - 2.0) < 0.2,
+          _duration(mixed.video))
+
+    # Replaced: no bed track to hold the video open, so -shortest cuts the
+    # dub down to the spoken line -- proof the original audio is really gone,
+    # not just quieted, which is the point when the clip's own generated
+    # audio already carries an unwanted voice.
+    replaced = dub_shot(StubEngine(seconds=1.0), clip=clip, shot_dir=shot_dir,
+                        text="short line", keep_original_audio=False)
+    check("replaced dub succeeds", replaced.ok, replaced.error)
+    check("replaced dub is cut to the spoken line, not the clip",
+          abs(_duration(replaced.video) - 1.0) < 0.2,
+          _duration(replaced.video))
+
+
 def test_speak_line_alone(tmp: Path) -> None:
     print("\n-- speak_line on its own --")
     eng = StubEngine(seconds=0.5)
@@ -277,6 +318,7 @@ def main() -> int:
         test_polish(tmp)
         test_preview_without_render(tmp)
         test_mux_when_clip_exists(tmp)
+        test_replace_mode_drops_original_audio(tmp)
         test_speak_line_alone(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

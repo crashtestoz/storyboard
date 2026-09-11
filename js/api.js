@@ -99,9 +99,9 @@ const API = {
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
 
   // `text` is sent so an unsaved line can still be previewed.
-  dub: (slug, shotId, text, style) =>
+  dub: (slug, shotId, text, style, dubMode) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`,
-        text === undefined ? {} : { text, style: style || "" }),
+        text === undefined ? {} : { text, style: style || "", dubMode: dubMode || "mix" }),
 
   render: (slug, shotIds, board) =>
     req("POST", "/api/render", { slug, shotIds, board }),

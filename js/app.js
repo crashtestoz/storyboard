@@ -1935,6 +1935,30 @@ function renderEditor() {
     const canClone = !!(engNow && engNow.supportsCloning);
     const willClone = !!(speaker && speaker.voice && speaker.voice.path && canClone);
 
+    // The video model is asked not to generate its own dialogue, but it does
+    // not always listen — leaving a second, mumbled voice under the real
+    // line. "Mix" is right when that instruction held (it keeps engine hum
+    // and wind alive under the spoken line); flip to "replace" for a shot
+    // where it didn't, and the dub becomes the clip's only audio.
+    const replaceToggle = el("label", "toggle");
+    const replaceBox = el("input");
+    replaceBox.type = "checkbox";
+    replaceBox.checked = raw.dubMode === "replace";
+    replaceBox.addEventListener("change", () => {
+      live().dubMode = replaceBox.checked ? "replace" : "mix";
+      markDirty();
+    });
+    replaceToggle.title =
+      "On: the dub replaces the clip's own audio entirely — use this if the " +
+      "clip's generated audio already has a (wrong) voice in it. " +
+      "Off: the dub is mixed over the clip's audio, keeping its ambience.";
+    replaceToggle.append(
+      replaceBox,
+      el("span", "toggle-track"),
+      el("span", null, "Replace clip audio with the dub")
+    );
+    dubRow.appendChild(replaceToggle);
+
     const dubBtn = el("button", "btn btn-sm", "Generate");
     dubBtn.disabled = !engNow || !engNow.healthy;
     dubBtn.title = !engNow || !engNow.healthy
@@ -1950,7 +1974,7 @@ function renderEditor() {
       try {
         // send the line as typed; it may not be saved yet
         const sh = live();
-        const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle);
+        const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle, sh.dubMode);
         sh.dialogueAudioUrl = r.audioUrl;
         if (r.dubUrl) sh.dubUrl = r.dubUrl;
         if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
@@ -1960,7 +1984,11 @@ function renderEditor() {
         else {
           toast(
             `Spoke ${r.seconds}s in ${r.cloned ? `${r.speaker}’s cloned voice` : "the engine voice"}` +
-              (r.muxed ? " and mixed it over the clip." : " — the clip is not rendered yet, so nothing was mixed.")
+              (r.muxed
+                ? sh.dubMode === "replace"
+                  ? " and replaced the clip's audio with it."
+                  : " and mixed it over the clip."
+                : " — the clip is not rendered yet, so nothing was mixed.")
           );
         }
         render();
@@ -2000,7 +2028,12 @@ function renderEditor() {
       dubRow.appendChild(dl);
     }
     if (raw.dubUrl) {
-      dubRow.appendChild(el("span", "field-note", "mixed over the clip — see Output"));
+      dubRow.appendChild(
+        el("span", "field-note",
+           raw.dubMode === "replace"
+             ? "replaced the clip's audio — see Output"
+             : "mixed over the clip — see Output")
+      );
     }
     panelDubRow = dubRow;
   }

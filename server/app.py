@@ -641,6 +641,9 @@ class Handler(BaseHTTPRequestHandler):
         if style is None:
             style = shot.get("dialogueStyle") or ""
         style = (style or "").strip()
+        dub_mode = payload.get("dubMode")
+        if dub_mode is None:
+            dub_mode = shot.get("dubMode") or "mix"
 
         engine = ctx.tts((board.get("defaults") or {}).get("tts"))
         shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1)
@@ -681,6 +684,7 @@ class Handler(BaseHTTPRequestHandler):
             reference=reference,
             reference_text=reference_text,
             style=style,
+            keep_original_audio=dub_mode != "replace",
         )
 
         def as_url(p: Path) -> str:
