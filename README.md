@@ -480,6 +480,78 @@ shows progress and the result waits for approval. For a service needing a key,
 use `apiKeyEnv` to name an environment variable rather than putting the key in
 this tracked file.
 
+## MCP: driving Storyboard from an AI assistant
+
+`mcp/server.py` is an [MCP](https://modelcontextprotocol.io) server that
+exposes every storyboard feature the web UI has — boards, shots, references,
+dubbing, rendering, settings — as tools an AI assistant (Claude Desktop,
+Claude Code, or any other MCP client) can call directly. It is a thin bridge
+to the same JSON API the browser uses (`server/app.py`); it has no logic of
+its own, so a board edited by an assistant is edited exactly the way the UI
+would edit it. Standard library only, same as the rest of this app — nothing
+to `pip install`.
+
+**Setup.** Point your MCP client at the script:
+
+```json
+{
+  "mcpServers": {
+    "storyboard": {
+      "command": "python3",
+      "args": ["/absolute/path/to/storyboard/mcp/server.py"]
+    }
+  }
+}
+```
+
+For Claude Code: `claude mcp add storyboard python3 /absolute/path/to/storyboard/mcp/server.py`.
+
+**It starts the app for you.** The MCP server doesn't run the storyboard app
+itself — it talks to it over HTTP at `http://127.0.0.1:9877`. But the first
+time a tool is called, it checks whether that server is already up and, if
+not, launches `start.sh` and waits for it, so simply having the MCP server
+configured is enough: you don't need to `./start.sh` first. Set `SBV_PORT` if
+you run the app on a non-default port, or `SBV_MCP_URL` to point at a host
+other than localhost.
+
+**What it can do.** One tool per API endpoint — the same list in
+`server/app.py`'s own routing table:
+
+| Tool | Same as the UI's... |
+| --- | --- |
+| `sbv_info` | startup banner — backend health, available models, speech/rewrite services |
+| `sbv_list_boards` | the **Open** dialog |
+| `sbv_get_board` / `sbv_save_board` | loading a board / every autosave while editing |
+| `sbv_create_board` / `sbv_import_board` | **New** / **Copy a board in** |
+| `sbv_delete_board` | deleting a project |
+| `sbv_rename_board` | renaming a project (moves its folder, rewrites its paths) |
+| `sbv_export_board` | downloading a board as JSON |
+| `sbv_add_shot` | **+ Shot** |
+| `sbv_upload_ref` / `sbv_adopt_ref` | uploading or picking a reference image or voice clip |
+| `sbv_list_library` / `sbv_delete_library_item` | the image/voice picker grid and its trash button |
+| `sbv_transcribe` | **Transcribe** on a reference clip |
+| `sbv_dub_shot` | **Generate** on the Dialogue tab |
+| `sbv_accept_take` | **Keep this take** |
+| `sbv_rewrite_prompt` | the 🪄 prompt rewrite button |
+| `sbv_describe_character` | drafting a character description from their portrait |
+| `sbv_start_render` / `sbv_stop_render` / `sbv_status` | **Render** / **Stop** / the live progress rail |
+| `sbv_assemble` | joining rendered clips into `final.mp4` on demand |
+| `sbv_set_data_dir` / `sbv_restart_server` | **⚙ Settings → Global projects folder** |
+
+Since a board is a single JSON document, most edits — the scene description,
+sound, cast, per-shot prompt/dialogue/model/reference fields — go through
+`sbv_get_board` → edit the object → `sbv_save_board`, exactly as the browser's
+own autosave does; the other tools are the actions the UI has as their own
+buttons (render, dub, rename, transcribe, and so on).
+
+**Example prompts**, once the tool is connected:
+
+- "List my storyboards and tell me which ones have unrendered shots."
+- "Open the 'Mustang' board, rewrite shot 2's prompt, and start rendering it."
+- "Add a new shot to `lara-croft-the-hunt` with this prompt: ..."
+- "Transcribe `refs/villain.wav` in the Mustang board, then generate the
+  dialogue for shot 3 using it."
+
 ## Tests
 
 ```sh
