@@ -23,6 +23,14 @@ UI_ROOT = Path(__file__).resolve().parent.parent
 # directory the models were prepared in — not merely the vpipe checkout.
 DEFAULT_WORKSPACE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe-work/sandbox")
 DEFAULT_VPIPE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe/build/apps/vpipe/vpipe")
+# Storyboards and uploads are the user's documents, not vpipe's runtime state,
+# so they live under one fixed root at the top of this machine's ai-diffusers
+# tree (Store keeps them at <data-dir>/projects/<slug>/, so this is the
+# *parent* of "projects", making the actual root /Volumes/KINGSTON/ai-diffusers/
+# projects/) rather than inside whichever workspace/sandbox vpipe happens to
+# be pointed at. Existing projects under the old default (vpipe-work/sandbox)
+# are left in place — this only changes where a fresh launch looks by default.
+DEFAULT_DATA_DIR = Path("/Volumes/KINGSTON/ai-diffusers")
 
 BANNER = r"""
   ______ _____  ____   ______  __ ______  ____  ___    ____  ____
@@ -52,9 +60,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=(Path(os.environ["SBV_DATA_DIR"])
-                 if os.environ.get("SBV_DATA_DIR") else None),
-        help="where storyboards and uploads live (default: the workspace)",
+        default=Path(os.environ.get("SBV_DATA_DIR", DEFAULT_DATA_DIR)),
+        help="where storyboards and uploads live "
+             f"(default: {DEFAULT_DATA_DIR})",
     )
     p.add_argument(
         "--vpipe",
@@ -96,8 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     # Two roots on purpose. The workspace is vpipe's — it resolves models/ and
     # its model registry relative to it, so it is not ours to choose. The data
     # directory is where the user's storyboards and uploads live, and defaults
-    # to the workspace so an existing install is untouched.
-    data_dir = (args.data_dir.expanduser() if args.data_dir else workspace)
+    # to DEFAULT_DATA_DIR (see above) rather than the workspace, so projects
+    # are not left inside whatever vpipe sandbox happens to be configured.
+    data_dir = args.data_dir.expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     backend = build_backend(
         args.backend,
