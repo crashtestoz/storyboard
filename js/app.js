@@ -334,12 +334,20 @@ async function boot() {
   try {
     const { boards } = await API.listBoards();
     state.boards = boards;
-    if (boards.length) {
-      await openBoard(boards[0].slug);
-    } else {
+    if (!boards.length) {
       const { slug, board } = await API.createBoard("My first storyboard");
       state.boards = [{ slug, name: board.name, shots: 0 }];
       setBoard(slug, board);
+      return;
+    }
+    const remembered = lastOpenedSlug();
+    if (remembered && boards.some((b) => b.slug === remembered)) {
+      await openBoard(remembered);
+    } else {
+      // Nothing remembered (first visit, cleared storage, or the last
+      // project is gone) — ask rather than guess which one to show.
+      renderBoardPicker();
+      await openDialog();
     }
   } catch (err) {
     toast(`Could not load storyboards: ${err.message}`, "error");
@@ -369,9 +377,32 @@ async function openBoard(slug) {
   setBoard(slug, res.board, res.stale);
 }
 
+// Remembered per browser, not per project: which storyboard to reopen next
+// time this page loads. Deliberately not sent to the server — "last opened"
+// is a fact about this browser tab, not about the project.
+const LAST_OPENED_KEY = "storyboardToVideo.lastOpenedSlug";
+
+function rememberLastOpened(slug) {
+  try {
+    localStorage.setItem(LAST_OPENED_KEY, slug);
+  } catch {
+    // Private browsing or storage disabled — reopening the same project
+    // next time is a convenience, not something worth failing over.
+  }
+}
+
+function lastOpenedSlug() {
+  try {
+    return localStorage.getItem(LAST_OPENED_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
 function setBoard(slug, board, stale) {
   state.slug = slug;
   state.board = board;
+  rememberLastOpened(slug);
   // Belongs to the board being installed, so switching boards cannot leave
   // the previous one's "changed since render" marks on screen.
   state.stale = stale || { shots: {}, final: "" };
