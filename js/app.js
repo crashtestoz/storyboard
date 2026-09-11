@@ -2209,8 +2209,10 @@ function renderEditor() {
     host.appendChild(castPanel);
   }
 
-  // anchors — only if the model supports them
-  if (cap && (cap.supportsStartAnchor || cap.supportsEndAnchor)) {
+  // Clip references: keep the user's intent on the shot even when the
+  // currently selected model only consumes part of it.
+  const isVideoShot = cap && cap.kind !== "image";
+  if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     const lbl = el("div", "section-label", "Frame anchors");
@@ -2218,10 +2220,8 @@ function renderEditor() {
     refPanel.appendChild(lbl);
 
     const slots = el("div", "ref-slots");
-    if (cap.supportsStartAnchor)
-      slots.appendChild(refSlot("Start frame", raw, "startRef"));
-    if (cap.supportsEndAnchor)
-      slots.appendChild(refSlot("End frame", raw, "endRef"));
+    slots.appendChild(refSlot("Start frame", raw, "startRef"));
+    slots.appendChild(refSlot("End frame", raw, "endRef"));
     refPanel.appendChild(slots);
 
     if (idx > 0) {
@@ -2244,23 +2244,36 @@ function renderEditor() {
       wrap.appendChild(t);
       refPanel.appendChild(wrap);
     }
+    if (!(cap.supportsStartAnchor || cap.supportsEndAnchor)) {
+      refPanel.appendChild(
+        el(
+          "div",
+          "hint-body",
+          `${cap.label.split("—")[0].trim()} stores these for continuity, ` +
+            `but does not enforce exact start/end frames during render.`
+        )
+      );
+    }
     host.appendChild(refPanel);
-  } else if (cap && cap.supportsStyleRefs) {
+  }
+
+  if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     refPanel.appendChild(el("div", "section-label", "Reference images"));
     refPanel.appendChild(shotReferenceImages(raw));
 
-    refPanel.appendChild(
-      el(
-        "div",
-        "hint-body",
-        `${cap.label.split("—")[0].trim()} uses reference images rather than ` +
-          `start/end frame anchors. Character portraits preserve identity, ` +
-          `shot images are treated as primary clip references, and ` +
-          `broad project style references are used only when no shot images are set.`
-      )
-    );
+    const supportsAnchors = cap.supportsStartAnchor || cap.supportsEndAnchor;
+    const note = cap.supportsStyleRefs
+      ? (supportsAnchors
+          ? `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
+            `Start/end frame anchors above still control exact opening and closing frames.`
+          : `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
+            `The start frame above is also sent as a primary shot reference.`)
+      : `${cap.label.split("—")[0].trim()} does not use shot reference images, ` +
+        `so these are stored with the clip but not used ` +
+        `until you switch to a reference-capable model.`;
+    refPanel.appendChild(el("div", "hint-body", note));
     host.appendChild(refPanel);
   }
 
@@ -3218,14 +3231,6 @@ function refSlot(label, shot, key, pickerTitle = null) {
 function shotReferenceImages(shot) {
   if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
   const wrap = el("div", "ref-slots");
-  wrap.appendChild(
-    refSlot(
-      "Primary reference",
-      shot,
-      "startRef",
-      "Choose the primary shot reference image"
-    )
-  );
 
   shot.referenceImages.forEach((ref, i) => {
     const slot = el("div", "ref-slot filled");

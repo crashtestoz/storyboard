@@ -83,7 +83,7 @@ def shot_clip(shot_dir: Path, shot: dict[str, Any] | None = None) -> Path | None
             spoken = (shot.get("dialogueSpokenText") or "").strip()
             style = (shot.get("dialogueStyle") or "").strip()
             spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
-            if line and (spoken != line or spoken_style != style):
+            if line and spoken and (spoken != line or spoken_style != style):
                 return clip
         return dubbed
     return clip
@@ -127,17 +127,20 @@ def final_stale_reason(board: dict[str, Any], project_dir: Path) -> str:
         if clip.stat().st_mtime > built:
             return "a shot has been re-rendered since this was assembled"
 
-    listed = len(record.get("parts") or [])
-    have = sum(
-        1
-        for i in range(len(board.get("shots") or []))
-        if shot_clip(
-            project_dir / "shots" / f"{i + 1:02d}",
-            (board.get("shots") or [])[i],
+    recorded = record.get("parts") or []
+    current = [
+        clip
+        for i, shot in enumerate(board.get("shots") or [])
+        if (
+            clip := shot_clip(project_dir / "shots" / f"{i + 1:02d}", shot)
         ) is not None
-    )
-    if have != listed:
-        return f"assembled from {listed} clip(s); {have} are available now"
+    ]
+    if len(current) != len(recorded):
+        return f"assembled from {len(recorded)} clip(s); {len(current)} are available now"
+    for clip, part in zip(current, recorded):
+        old = (part or {}).get("file") or ""
+        if old and old != clip.name:
+            return f"assembled with {old}; {clip.name} is available now"
     return ""
 
 
@@ -149,7 +152,8 @@ def unmixed_dialogue(board: dict[str, Any], project_dir: Path) -> dict[str, str]
     no video to mux into. A render finishing later now lays the take down (see
     ``Orchestrator._relay_speech``), but a clip rendered before that existed
     has a ``dialogue.wav`` beside it and silence in it, and the cut would go
-    out without the line. Nothing about the file says so, so it is said here.
+    out without the line. If the selected clip already has audio, do not guess:
+    without recognition we cannot prove the line is absent.
     """
     out: dict[str, str] = {}
     for i, shot in enumerate(board.get("shots") or []):
@@ -163,6 +167,8 @@ def unmixed_dialogue(board: dict[str, Any], project_dir: Path) -> dict[str, str]
             continue
         if shot_clip(shot_dir, shot) != clip:
             continue    # the dubbed clip is current, so the line is in the cut
+        if _has_audio(clip):
+            continue
         spoken = (shot.get("dialogueSpokenText") or "").strip()
         style = (shot.get("dialogueStyle") or "").strip()
         spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
