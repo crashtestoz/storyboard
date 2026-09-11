@@ -3331,9 +3331,30 @@ function refSlot(label, shot, key, pickerTitle = null) {
   if (ref) {
     slot.classList.add("filled");
     if (ref.kind === "chain") {
-      const l = el("div", "ref-slot-label");
-      l.append(el("strong", null, "⛓ chained"), el("span", null, ref.label || ""));
-      slot.appendChild(l);
+      // Only a chain ref has no user-picked image of its own to protect —
+      // it is resolved server-side from the source shot's own last render,
+      // so once that exists this is the one slot safe to preview.
+      if (ref.resolved) {
+        const img = el("img");
+        img.src = "/media/" + ref.resolved;
+        slot.appendChild(img);
+        const chainTag = el("span", "chain-badge");
+        chainTag.append(el("span", null, "⛓"), el("span", null, ref.label || "chained"));
+        slot.appendChild(chainTag);
+      } else {
+        const l = el("div", "ref-slot-label");
+        l.append(el("strong", null, "⛓ chained"), el("span", null, ref.label || ""));
+        slot.appendChild(l);
+      }
+      const srcWhy = staleWhy(ref.from);
+      if (srcWhy) {
+        const b = el("span", "stale-badge", "CHANGED");
+        const srcIdx = shots().findIndex((s) => s.id === ref.from);
+        b.title = srcIdx >= 0
+          ? `Shot ${srcIdx + 1}: ${srcWhy}`
+          : srcWhy;
+        slot.appendChild(b);
+      }
     } else {
       const img = el("img");
       img.src = ref.url || ref.path;
