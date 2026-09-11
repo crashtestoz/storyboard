@@ -660,6 +660,12 @@ output — and carries the caret across when it does.
   Images sitting elsewhere in the vpipe workspace are not offered; upload them
   or copy them into a project folder.
 
+## License
+
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) — see
+[`LICENSE`](LICENSE). Use it, modify it, contribute back — but not for
+commercial purposes, and not relabelled as someone else's own work.
+
 ## Author
 
 Peter Chodyra — [candco.com.au](https://candco.com.au)
