@@ -62,7 +62,7 @@ _\ \ / /  / /  / /_/ // /_/ /\  // /_/ / / /_/ / __ | / /_/ / /_/ /
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="storyboard-to-video")
+    p = argparse.ArgumentParser(prog="storyboard")
     p.add_argument("--port", type=int, default=int(os.environ.get("SBV_PORT", 9877)))
     p.add_argument("--bind", default=os.environ.get("SBV_BIND", "127.0.0.1"))
     p.add_argument("--lan", action="store_true", help="bind all interfaces")
