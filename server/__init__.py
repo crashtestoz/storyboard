@@ -1,1 +1,1 @@
-"""Storyboard → Video server package."""
+"""Storyboard server package."""

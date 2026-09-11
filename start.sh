@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start Storyboard -> Video with a Python version new enough for server/.
+# Start Storyboard with a Python version new enough for server/.
 #
 # Usage:
 #   ./start.sh
