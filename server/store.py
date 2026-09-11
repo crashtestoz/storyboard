@@ -520,7 +520,15 @@ class Store:
         if not bp.is_file():
             raise FileNotFoundError(f"no storyboard at {bp}")
         board = json.loads(bp.read_text())
-        return self.migrate(board)
+        board = self.migrate(board)
+        # Self-heal on the way out: a board saved before rehoming existed,
+        # or one hand-copied from another project's folder, can still point
+        # at media that lives elsewhere. Every read is a chance to notice
+        # and fix that before it's shown to anyone, not just the moment of
+        # import.
+        if self._rehome_media(slug, board):
+            board = self.save(slug, board)
+        return board
 
     def save(self, slug: str, board: dict[str, Any]) -> dict[str, Any]:
         board = self.migrate(board)
@@ -642,15 +650,18 @@ class Store:
     def _rehome_ref(self, slug: str, ref: Any) -> Any:
         """``adopt`` a single reference into *slug*, in place.
 
-        A ref that carries no real file (a chain reference, an empty slot)
-        passes through untouched. One whose file no longer exists under
-        ``data_dir`` — an import from another machine — is dropped rather
-        than kept pointing at a path this project does not have, which would
-        just move the "points outside the project" bug from a resolvable
-        case to an unresolvable one.
+        A ref that carries no real file (a chain reference, an empty slot),
+        or that already lives under *slug*'s own ``refs/``, is returned
+        completely untouched — same object, so a caller can tell by identity
+        whether anything needed fixing at all. Only a path pointing at some
+        other project's folder is actually copied in. One whose file no
+        longer exists under ``data_dir`` at all — an import from another
+        machine — is dropped rather than kept pointing at a path this
+        project does not have, which would just move the "points outside
+        the project" bug from a resolvable case to an unresolvable one.
         """
         rel = _ref_path(ref)
-        if not rel:
+        if not rel or rel.startswith(f"projects/{slug}/"):
             return ref
         try:
             adopted = self.adopt(slug, rel)
@@ -658,39 +669,49 @@ class Store:
             return None
         return {**ref, **adopted} if isinstance(ref, dict) else adopted
 
-    def _rehome_media(self, slug: str, board: dict[str, Any]) -> dict[str, Any]:
-        """Copy every reference image a board points at into *slug*'s own refs/.
+    def _rehome_media(self, slug: str, board: dict[str, Any]) -> bool:
+        """Copy every reference image a board points at into *slug*'s own refs/, in place.
 
-        A board loaded from JSON — imported, or duplicated by hand — can
-        still carry ``styleRefs``, cast portraits and shot references whose
-        ``path``/``url`` point into whatever project they were exported
-        from. Left alone, the new project silently depends on that other
-        project's folder: deleting or renaming it breaks references here,
-        and two projects end up sharing what look like independent style
-        references. Rehoming everything before the first save is what
-        ``adopt`` already does for a single picked image; this applies the
-        same treatment to a whole board at once.
+        A board can carry ``styleRefs``, cast portraits and shot references
+        whose ``path``/``url`` point into a *different* project's folder —
+        from an import, a hand-copied project directory, or a board edited
+        outside the app. Left alone, this project silently depends on that
+        other project's folder: deleting or renaming it breaks references
+        here, and two projects end up appearing to share what look like each
+        other's style references or cast portraits. This gives every
+        reference in the board the same treatment ``adopt`` already gives a
+        single picked image, and reports whether anything actually moved so
+        the caller knows whether the board needs re-saving.
         """
-        board["styleRefs"] = [
-            r for r in (self._rehome_ref(slug, ref) for ref in board.get("styleRefs") or [])
-            if r is not None
-        ]
+        slug = slugify(slug)
+        changed = False
+
+        def rehome_list(refs: list[Any]) -> list[Any]:
+            nonlocal changed
+            out = []
+            for ref in refs:
+                new = self._rehome_ref(slug, ref)
+                if new is not ref:
+                    changed = True
+                if new is not None:
+                    out.append(new)
+            return out
+
+        board["styleRefs"] = rehome_list(board.get("styleRefs") or [])
         for ch in board.get("characters") or []:
             if ch.get("image"):
-                ch["image"] = self._rehome_ref(slug, ch["image"])
+                new = self._rehome_ref(slug, ch["image"])
+                changed = changed or new is not ch["image"]
+                ch["image"] = new
         for shot in board.get("shots") or []:
-            if shot.get("startRef"):
-                shot["startRef"] = self._rehome_ref(slug, shot["startRef"])
-            if shot.get("endRef"):
-                shot["endRef"] = self._rehome_ref(slug, shot["endRef"])
+            for key in ("startRef", "endRef"):
+                if shot.get(key):
+                    new = self._rehome_ref(slug, shot[key])
+                    changed = changed or new is not shot[key]
+                    shot[key] = new
             if isinstance(shot.get("referenceImages"), list):
-                shot["referenceImages"] = [
-                    r for r in (
-                        self._rehome_ref(slug, ref) for ref in shot["referenceImages"]
-                    )
-                    if r is not None
-                ]
-        return board
+                shot["referenceImages"] = rehome_list(shot["referenceImages"])
+        return changed
 
     # -- import / export -------------------------------------------------- #
 
@@ -721,7 +742,7 @@ class Store:
         while self.board_path(slug).exists():
             slug = f"{base}-{n}"
             n += 1
-        board = self._rehome_media(slug, board)
+        self._rehome_media(slug, board)
         self.save(slug, board)
         return slug, board
 
