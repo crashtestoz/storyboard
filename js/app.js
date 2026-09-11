@@ -500,6 +500,25 @@ function wireChrome() {
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#settings").hidden) $("#settings").hidden = true;
+    if (e.key === "Escape" && !$("#helpDialog").hidden) $("#helpDialog").hidden = true;
+  });
+
+  // The logo doubles as a reference card for shot vocabulary used nowhere
+  // else in the UI — there is no other place in the app to look this up.
+  $("#btnHelp").addEventListener("click", () => {
+    $("#helpDialog").hidden = false;
+  });
+  $("#btnHelp").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      $("#helpDialog").hidden = false;
+    }
+  });
+  $("#helpClose").addEventListener("click", () => {
+    $("#helpDialog").hidden = true;
+  });
+  $("#helpDialog").addEventListener("click", (e) => {
+    if (e.target === $("#helpDialog")) $("#helpDialog").hidden = true;
   });
 
   $("#btnExport").addEventListener("click", () => {
