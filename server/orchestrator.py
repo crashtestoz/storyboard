@@ -432,7 +432,7 @@ class Orchestrator:
             return
         style = (shot.get("dialogueStyle") or "").strip()
         spoken_style = (shot.get("dialogueSpokenStyle") or "").strip()
-        if spoken_style != style:
+        if spoken and spoken_style != style:
             run.log.append(
                 {
                     "level": "WARN",

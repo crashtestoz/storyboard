@@ -24,6 +24,7 @@ Run:  python3 tests/render_all.py
 from __future__ import annotations
 
 import shutil
+import os
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,7 @@ from server.assemble import (                                  # noqa: E402
     final_stale_reason,
     frame_size,
     shot_clip,
+    unmixed_dialogue,
 )
 from server.orchestrator import Orchestrator                   # noqa: E402
 from server.store import (                                     # noqa: E402
@@ -470,7 +472,6 @@ def test_clip_choice(tmp: Path) -> None:
     check("the clip when that is all there is", shot_clip(d) == clip)
 
     dubbed.write_bytes(b"x" * 2048)
-    import os
     os.utime(dubbed, (clip.stat().st_mtime + 10,) * 2)
     check("the dubbed clip when it is newer", shot_clip(d) == dubbed,
           "the spoken line belongs in the cut")
@@ -487,6 +488,11 @@ def test_clip_choice(tmp: Path) -> None:
     check("a matching voice direction keeps the dub",
           shot_clip(d, shot) == dubbed,
           "clip-dubbed.mp4 matches the current delivery")
+    shot["dialogueSpokenText"] = ""
+    shot["dialogueSpokenStyle"] = ""
+    check("legacy dubbed clips without spoken metadata are trusted",
+          shot_clip(d, shot) == dubbed,
+          "older boards did not record dialogueSpokenText")
 
     os.utime(dubbed, (clip.stat().st_mtime - 10,) * 2)
     check("the plain clip when the dub predates a re-render",
@@ -512,12 +518,51 @@ def test_final_staleness(tmp: Path) -> None:
           final_stale_reason(board, project) == "",
           final_stale_reason(board, project))
 
-    import os
+    dubbed = project / "shots" / "01" / "clip-dubbed.mp4"
+    dubbed.write_bytes(b"x" * 2048)
+    os.utime(project / "shots" / "01" / "clip.mp4",
+             (final.stat().st_mtime - 20,) * 2)
+    os.utime(dubbed, (final.stat().st_mtime - 10,) * 2)
+    board["shots"][0]["dialogue"] = "Stay on target."
+    check("a better dubbed clip makes the cut stale by filename",
+          "clip-dubbed.mp4" in final_stale_reason(board, project),
+          final_stale_reason(board, project))
+    board["shots"][0]["dialogue"] = ""
+    dubbed.unlink()
+
     os.utime(project / "shots" / "01" / "clip.mp4",
              (final.stat().st_mtime + 10,) * 2)
     check("a re-rendered shot makes it stale",
           "re-rendered" in final_stale_reason(board, project),
           final_stale_reason(board, project))
+
+
+def test_unmixed_dialogue(tmp: Path) -> None:
+    section("dialogue warnings")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        print("skip  ffmpeg/ffprobe not on PATH")
+        return
+
+    project = tmp / "projects" / "dialogue"
+    board = default_board("Dialogue")
+    shot = default_shot(board["defaults"])
+    shot["id"] = "s1"
+    shot["dialogue"] = "Stay on target."
+    shot["dialogueSpokenText"] = "Stay on target."
+    board["shots"] = [shot]
+    (project / "shots" / "01").mkdir(parents=True)
+    (project / "shots" / "01" / "dialogue.wav").write_bytes(b"x" * 2048)
+
+    make_clip(project / "shots" / "01" / "clip.mp4", 1.0, "red", with_audio=True)
+    check("a clip that already has audio is not called silent",
+          unmixed_dialogue(board, project) == {},
+          str(unmixed_dialogue(board, project)))
+
+    (project / "shots" / "01" / "clip.mp4").unlink()
+    make_clip(project / "shots" / "01" / "clip.mp4", 1.0, "red", with_audio=False)
+    check("a soundless clip with a separate spoken line is warned",
+          "s1" in unmixed_dialogue(board, project),
+          str(unmixed_dialogue(board, project)))
 
 
 def main() -> int:
@@ -530,6 +575,7 @@ def main() -> int:
         test_soundscape_modes()
         test_clip_choice(tmp)
         test_final_staleness(tmp)
+        test_unmixed_dialogue(tmp)
         test_assemble(tmp)
 
     print()
