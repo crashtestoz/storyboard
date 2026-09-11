@@ -46,7 +46,13 @@ from server.store import (                                     # noqa: E402
     render_fingerprint,
     stale_reason,
 )
-from server.backends.vpipe_backend import _resolved_prompt      # noqa: E402
+from server.backends.base import ShotPaths                      # noqa: E402
+from server.backends.vpipe_backend import (                     # noqa: E402
+    _ref2va_references,
+    _resolved_prompt,
+)
+from server.app import _rewrite_reference_images                 # noqa: E402
+from server.llm import build_user_message                        # noqa: E402
 
 failures: list[str] = []
 
@@ -227,6 +233,7 @@ def test_dialogue_prompting() -> None:
             "id": "c1",
             "name": "Kira",
             "description": "Kira: a focused pilot in a worn flight jacket",
+            "image": {"kind": "upload", "path": "projects/x/refs/kira.jpg"},
         }
     ]
     shot = board["shots"][0]
@@ -243,6 +250,136 @@ def test_dialogue_prompting() -> None:
           "Generated audio contains ambient sound only" in prompt and
           "no intelligible dialogue" in prompt,
           prompt)
+
+    shot["model"] = "ref2va"
+    shot["startRef"] = {"kind": "upload", "path": "projects/x/refs/corridor.jpg"}
+    shot["prompt"] = "A tracking shot follows Kira from behind."
+    prompt = _resolved_prompt(shot, board, with_audio=True, model="ref2va")
+    check("a Ref2VA shot reference set is called out as primary visual context",
+          "shot reference image set is the primary visual reference" in prompt,
+          prompt)
+    check("a rear-view shot gets a first-frame camera constraint",
+          "keep the visible character facing away" in prompt,
+          prompt)
+    check("shot-local Ref2VA references suppress conflicting project scene text",
+          "An ocean at golden hour." not in prompt,
+          prompt)
+    check("shot-local Ref2VA references suppress conflicting project soundscape",
+          "Deep engine roar." not in prompt,
+          prompt)
+    check("image-backed Ref2VA characters do not copy portrait pose text",
+          "focused pilot in a worn flight jacket" not in prompt and
+          "use the character portrait for identity" in prompt,
+          prompt)
+
+
+def test_ref2va_reference_priority() -> None:
+    section("Ref2VA shot references outrank global style")
+    board = a_board(1)
+    board["characters"] = [
+        {
+            "id": "c1",
+            "name": "Kira",
+            "description": "pilot",
+            "image": {"kind": "upload", "path": "projects/x/refs/character.jpg"},
+            "voice": {"kind": "upload", "path": "projects/x/refs/voice.wav"},
+        }
+    ]
+    board["styleRefs"] = [
+        {"kind": "upload", "path": "projects/x/refs/global-1.jpg"},
+        {"kind": "upload", "path": "projects/x/refs/global-2.jpg"},
+    ]
+    shot = board["shots"][0]
+    shot["characterIds"] = ["c1"]
+    shot["startRef"] = {"kind": "upload", "path": "projects/x/refs/shot.jpg"}
+    shot["referenceImages"] = [
+        {"kind": "upload", "path": "projects/x/refs/cockpit-left.jpg"},
+        {"kind": "upload", "path": "projects/x/refs/cockpit-right.jpg"},
+    ]
+    paths = ShotPaths(
+        workspace=Path("/tmp/ws"),
+        abs_dir=Path("/tmp/ws/projects/x/shots/01"),
+        rel_dir="projects/x/shots/01",
+        data_dir=Path("/tmp/ws"),
+    )
+
+    refs = _ref2va_references(shot, board, paths)
+    names = [Path(r).name for r in refs]
+    check("shot-local images remain first",
+          names[:3] == [
+              "shot.jpg",
+              "cockpit-left.jpg",
+              "cockpit-right.jpg",
+          ],
+          str(names))
+    check("shot-local images suppress project style refs",
+          "global-1.jpg" not in names and "global-2.jpg" not in names,
+          str(names))
+    check("character identity comes after shot-local images",
+          names[3] == "character.jpg",
+          str(names))
+    check("voice references come after images", names[-1] == "voice.wav", str(names))
+    draft_refs = _ref2va_references(shot, board, paths, include_audio_refs=False)
+    draft_names = [Path(r).name for r in draft_refs]
+    check("draft Ref2VA skips audio references",
+          "voice.wav" not in draft_names,
+          str(draft_names))
+
+
+def test_rewrite_reference_context() -> None:
+    section("rewrite context includes reference images")
+    board = a_board(1)
+    board["characters"] = [
+        {
+            "id": "c1",
+            "name": "Kira",
+            "description": "pilot",
+            "image": {"kind": "upload", "path": "projects/x/refs/kira-portrait.jpg"},
+            "voice": {"kind": "upload", "path": "projects/x/refs/kira.wav"},
+        }
+    ]
+    shot = board["shots"][0]
+    shot["characterIds"] = ["c1"]
+    shot["startRef"] = {
+        "kind": "upload",
+        "path": "projects/x/refs/bright-white-corridor.jpeg",
+    }
+    shot["endRef"] = {
+        "kind": "upload",
+        "path": "projects/x/refs/final-frame.png",
+    }
+    shot["referenceImages"] = [
+        {"kind": "upload", "path": "projects/x/refs/black-ribbed-doorway.webp"},
+        {"kind": "upload", "path": "projects/x/refs/not-a-picture.mp3"},
+    ]
+    cast = [board["characters"][0]]
+
+    refs = _rewrite_reference_images(shot, cast)
+    labels = [r["label"] for r in refs]
+    check("rewrite references include shot and character images",
+          labels == [
+              "bright-white-corridor.jpeg",
+              "final-frame.png",
+              "black-ribbed-doorway.webp",
+              "kira-portrait.jpg",
+          ],
+          str(labels))
+    check("rewrite references skip voice clips",
+          "not-a-picture.mp3" not in labels and "kira.wav" not in labels,
+          str(labels))
+
+    msg = build_user_message(
+        "Kira walks forward.",
+        scene=board["sceneDescription"],
+        characters=cast,
+        reference_images=refs,
+    )
+    check("rewrite prompt names reference image context",
+          "Reference images attached to this shot" in msg,
+          msg)
+    check("rewrite prompt includes readable reference summaries",
+          "bright white corridor" in msg and "black ribbed doorway" in msg,
+          msg)
 
 
 def test_soundscape_modes() -> None:
@@ -388,6 +525,8 @@ def main() -> int:
         tmp = Path(td)
         test_pending(tmp)
         test_dialogue_prompting()
+        test_ref2va_reference_priority()
+        test_rewrite_reference_context()
         test_soundscape_modes()
         test_clip_choice(tmp)
         test_final_staleness(tmp)

@@ -424,6 +424,7 @@ class Handler(BaseHTTPRequestHandler):
                 text,
                 scene=board.get("sceneDescription") or "",
                 characters=cast,
+                reference_images=_rewrite_reference_images(shot, cast),
                 still=bool(cap and cap.kind == "image"),
             )
             return self._send_json(
@@ -847,6 +848,62 @@ class Handler(BaseHTTPRequestHandler):
         with target.open("rb") as fh:
             while chunk := fh.read(64 * 1024):
                 self.wfile.write(chunk)
+
+
+def _rewrite_reference_images(
+    shot: dict[str, Any],
+    cast: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+
+    def add(role: str, ref: Any) -> None:
+        if not _is_image_ref(ref):
+            return
+        label = _ref_label(ref)
+        if not label:
+            return
+        item = {
+            "role": role,
+            "label": label,
+            "summary": _label_summary(label),
+        }
+        if item not in refs:
+            refs.append(item)
+
+    add("Primary shot reference image", shot.get("startRef"))
+    add("Ending shot reference image", shot.get("endRef"))
+    for i, ref in enumerate(shot.get("referenceImages") or [], start=1):
+        add(f"Additional shot reference image {i}", ref)
+    for ch in cast:
+        name = (ch.get("name") or "").strip()
+        role = f"Character portrait for {name}" if name else "Character portrait"
+        add(role, ch.get("image"))
+    return refs
+
+
+def _is_image_ref(ref: Any) -> bool:
+    label = _ref_label(ref)
+    if not label:
+        return False
+    ctype, _ = mimetypes.guess_type(label)
+    return bool((ctype or "").startswith("image/"))
+
+
+def _ref_label(ref: Any) -> str:
+    if not ref:
+        return ""
+    if isinstance(ref, str):
+        return Path(ref).name
+    if not isinstance(ref, dict):
+        return ""
+    value = ref.get("label") or ref.get("path") or ref.get("resolved") or ""
+    return Path(str(value)).name
+
+
+def _label_summary(label: str) -> str:
+    stem = Path(label).stem
+    words = re.sub(r"[_-]+", " ", stem).strip()
+    return re.sub(r"\s+", " ", words)
 
 
 def build_server(bind: str, port: int, ctx: Context) -> ThreadingHTTPServer:
