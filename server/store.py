@@ -532,8 +532,11 @@ class Store:
         # or one hand-copied from another project's folder, can still point
         # at media that lives elsewhere. Every read is a chance to notice
         # and fix that before it's shown to anyone, not just the moment of
-        # import.
-        if self._rehome_media(slug, board):
+        # import. Same idea for a chain ref whose source already has frames
+        # but has never had its preview resolved.
+        healed = self._rehome_media(slug, board)
+        healed = self._resolve_chain_previews(slug, board) or healed
+        if healed:
             board = self.save(slug, board)
         return board
 
@@ -675,6 +678,41 @@ class Store:
         except FileNotFoundError:
             return None
         return {**ref, **adopted} if isinstance(ref, dict) else adopted
+
+    def _resolve_chain_previews(self, slug: str, board: dict[str, Any]) -> bool:
+        """Point every chain ref at its source shot's actual last frame.
+
+        The orchestrator also does this (``Orchestrator._resolve_chain``),
+        but only right before *this* shot next renders — so a board whose
+        source shot already has frames, rendered before that shot ever ran
+        or before this preview existed at all, would otherwise show the
+        Frame anchors panel's "⛓ chained" placeholder forever, with no
+        picture, despite the frame already sitting on disk. Every load is a
+        chance to catch it up, the same way ``_rehome_media`` self-heals
+        stale references.
+        """
+        changed = False
+        shots = board.get("shots") or []
+        index_by_id = {s.get("id"): i for i, s in enumerate(shots)}
+        for shot in shots:
+            for key in ("startRef", "endRef"):
+                ref = shot.get(key)
+                if not isinstance(ref, dict) or ref.get("kind") != "chain":
+                    continue
+                src_idx = index_by_id.get(ref.get("from"))
+                if src_idx is None:
+                    continue
+                frames_dir = (
+                    self.data_dir / self.shot_rel_dir(slug, src_idx + 1) / "frames"
+                )
+                frames = sorted(frames_dir.glob("*.png")) if frames_dir.exists() else []
+                if not frames:
+                    continue
+                resolved = str(frames[-1].relative_to(self.data_dir)).replace("\\", "/")
+                if ref.get("resolved") != resolved:
+                    ref["resolved"] = resolved
+                    changed = True
+        return changed
 
     def _rehome_media(self, slug: str, board: dict[str, Any]) -> bool:
         """Copy every reference image a board points at into *slug*'s own refs/, in place.
