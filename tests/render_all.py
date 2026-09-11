@@ -295,6 +295,7 @@ def test_ref2va_reference_priority() -> None:
     shot = board["shots"][0]
     shot["characterIds"] = ["c1"]
     shot["startRef"] = {"kind": "upload", "path": "projects/x/refs/shot.jpg"}
+    shot["endRef"] = {"kind": "upload", "path": "projects/x/refs/shot-end.jpg"}
     shot["referenceImages"] = [
         {"kind": "upload", "path": "projects/x/refs/cockpit-left.jpg"},
         {"kind": "upload", "path": "projects/x/refs/cockpit-right.jpg"},
@@ -309,8 +310,9 @@ def test_ref2va_reference_priority() -> None:
     refs = _ref2va_references(shot, board, paths)
     names = [Path(r).name for r in refs]
     check("shot-local images remain first",
-          names[:3] == [
+          names[:4] == [
               "shot.jpg",
+              "shot-end.jpg",
               "cockpit-left.jpg",
               "cockpit-right.jpg",
           ],
@@ -319,7 +321,7 @@ def test_ref2va_reference_priority() -> None:
           "global-1.jpg" not in names and "global-2.jpg" not in names,
           str(names))
     check("character identity comes after shot-local images",
-          names[3] == "character.jpg",
+          names[4] == "character.jpg",
           str(names))
     check("voice references come after images", names[-1] == "voice.wav", str(names))
     draft_refs = _ref2va_references(shot, board, paths, include_audio_refs=False)
