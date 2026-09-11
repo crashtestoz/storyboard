@@ -12,10 +12,10 @@
       "url": "http://127.0.0.1:8790"
     },
     {
-      "id": "mcc-sherpa",
-      "label": "MCC sherpa-onnx voice (plain, no cloning)",
-      "kind": "mcc-sherpa",
-      "url": "http://10.0.0.200:3000"
+      "id": "plain-sherpa",
+      "label": "Plain sherpa-onnx voice (no cloning)",
+      "kind": "plain-sherpa",
+      "url": "http://127.0.0.1:3000"
     }
   ]
 }

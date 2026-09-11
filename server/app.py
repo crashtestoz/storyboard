@@ -647,7 +647,8 @@ class Handler(BaseHTTPRequestHandler):
     def _transcribe(self) -> None:
         """Transcribe a reference clip so the transcript can be reviewed.
 
-        MCC's speech page makes this a visible step — upload, transcribe, then
+        The reference implementation's own speech page makes this a visible
+        step — upload, transcribe, then
         correct the text before it conditions the voice — because a
         mis-transcription silently degrades the clone. Same here rather than
         transcribing invisibly at dub time.

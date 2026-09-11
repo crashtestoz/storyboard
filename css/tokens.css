@@ -1,15 +1,14 @@
 /* ==========================================================================
    THEME TOKENS — the reskin surface.
    --------------------------------------------------------------------------
-   This is the ONLY file that should need changing to match MCC's look.
+   This is the ONLY file that should need changing to reskin the app.
    Every colour, radius, spacing step and font in the app resolves through a
    variable declared here; app.css contains no literal colours.
 
-   Current values are a neutral dark-dashboard placeholder, chosen to be
-   close in spirit to MCC (dark ground, panel tiles, one accent, semantic
-   status colours) so the swap is a value-for-value replacement rather than
-   a re-layout. Replace with MCC's real tokens when this repo has access to
-   them.
+   Current values are a neutral dark-dashboard placeholder (dark ground,
+   panel tiles, one accent, semantic status colours) so a swap to a
+   different theme is a value-for-value replacement rather than a re-layout.
+   Replace with your own design tokens as needed.
    ========================================================================== */
 
 :root {

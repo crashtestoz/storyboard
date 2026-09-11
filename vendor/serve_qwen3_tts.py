@@ -2,14 +2,14 @@
 """
 Qwen3-TTS voice-cloning inference server.
 
-Runs on the OptiPlex gateway itself (CPU-only, i7, 16GB RAM), alongside the MCC app
-that calls it over HTTP via /api/tts/clone (see src/lib/server/tts-clone.ts in the
-mcc project). Deliberately NOT offloaded to the Mac Mini the way image generation
-is - Qwen3-TTS-0.6B is a ~2.5GB model and this is a non-realtime "click generate,
-wait a bit" workload, so it doesn't need a GPU, and colocating with MCC avoids a
-cross-machine dependency on the Mac Mini being on and reachable. Ollama does not
-support TTS models at all regardless of host, so unlike image generation this is a
-small dedicated FastAPI server rather than an Ollama call.
+Originally written to run on a CPU-only gateway machine (i7, 16GB RAM),
+alongside the app that calls it over HTTP via /api/tts/clone. Deliberately NOT
+offloaded to a GPU machine the way image generation might be - Qwen3-TTS-0.6B
+is a ~2.5GB model and this is a non-realtime "click generate, wait a bit"
+workload, so it doesn't need a GPU, and colocating with the caller avoids a
+cross-machine dependency on that GPU machine being on and reachable. Ollama
+does not support TTS models at all regardless of host, so unlike image
+generation this is a small dedicated FastAPI server rather than an Ollama call.
 
 Model: Qwen/Qwen3-TTS-12Hz-0.6B-Base (Apache 2.0, ~2.5GB). This is the "Base"
 variant specifically - the sibling "CustomVoice" variant only picks from a fixed
@@ -22,14 +22,15 @@ https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice.
 
 Chosen over dots.tts (rednote-hilab, 2B params) because dots.tts's only serving
 path is vLLM-Omni, which targets CUDA and has no mature CPU story - a bad fit
-either way. Qwen3-TTS is smaller and lighter to run CPU-only on the OptiPlex.
+either way. Qwen3-TTS is smaller and lighter to run CPU-only on a modest host.
 
 generate_voice_clone() requires ref_text - a transcript of what the reference
 clip actually says, not just the clip itself. Typing that by hand is a chore, so
 this also runs faster-whisper (CPU-efficient CTranslate2 build of Whisper, not
 the heavier openai-whisper PyTorch package) to auto-transcribe the reference
-clip via POST /transcribe - MCC's /tts page calls this right after upload and
-pre-fills the transcript field, which stays editable since ASR isn't perfect.
+clip via POST /transcribe - the caller's own /tts page calls this right after
+upload and pre-fills the transcript field, which stays editable since ASR
+isn't perfect.
 Whisper is a well-established, thoroughly documented model/package - used here
 deliberately instead of anything newer/less certain, after the Qwen3-TTS model
 ID/API mismatches that came up getting the cloning path itself working.
@@ -111,9 +112,9 @@ def load_model(model_id: str):
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    # OptiPlex has no GPU, so this normally resolves to the cpu branch - the
-    # cuda/mps branches are just so this still does the right thing if ever run
-    # somewhere with a GPU.
+    # The original CPU-only host has no GPU, so this normally resolves to the
+    # cpu branch - the cuda/mps branches are just so this still does the
+    # right thing if ever run somewhere with a GPU.
     #
     # History on the cpu branch's dtype, because it's bounced around twice:
     # 1. Originally float32 (this box's only proven-good config for a long
@@ -130,7 +131,8 @@ def load_model(model_id: str):
     #    confirmed live, a 6-word test sentence that should take ~20-70s (the
     #    documented float32 baseline) took 384s under bfloat16. Combined with
     #    the deploy pipeline's unconditional `systemctl restart` of this
-    #    service whenever its own files change (see optiplex-autopull.sh),
+    #    service whenever its own files change (see that host's autopull
+    #    script),
     #    a generation that now runs 5-10x longer is far more likely to still
     #    be in flight when the next deploy restarts the process out from
     #    under it, dropping the connection - this is what actually produced
@@ -150,7 +152,7 @@ def load_model(model_id: str):
     # 2 bytes/value, full 8-bit exponent so it doesn't overflow the same
     # way"), which is also why the cuda branch already picks it.
     #
-    # The objection that sank bfloat16 on OptiPlex does not apply: that was an
+    # The objection that sank bfloat16 on that host does not apply: that was an
     # i7-8700T with no native bf16, falling back to a slow emulated path.
     # Apple Silicon GPUs support bf16 natively, so this keeps both the
     # correctness and the speed. --device / --dtype override if needed.
@@ -212,7 +214,7 @@ def _apply_speed(audio_array, speed: float):
     return librosa.effects.time_stretch(audio_array.astype("float32"), rate=speed)
 
 
-# MCC's UI/API use short ISO codes (matching TTS_CLONE_LANGUAGES in tts-clone.ts),
+# The caller's UI/API use short ISO codes (matching TTS_CLONE_LANGUAGES in tts-clone.ts),
 # but generate_voice_clone() rejects those - confirmed live: passing language="en"
 # raises "Unsupported languages: ['en']. Supported: ['auto', 'chinese', 'english',
 # ...]". Translated here, at the model boundary, so the rest of the stack (UI, API,

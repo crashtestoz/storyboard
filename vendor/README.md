@@ -1,14 +1,14 @@
 # vendor/
 
-`serve_qwen3_tts.py` is a copy of the Qwen3-TTS voice-clone server that lives
-on OptiPlex at
-`~/.openclaw/workspace/skills/tts-voice-clone/scripts/serve_qwen3_tts.py`,
-with one change made here.
+`serve_qwen3_tts.py` is a copy of the Qwen3-TTS voice-clone server that
+normally lives alongside a separate TTS-hosting project's own
+`tts-voice-clone` skill, with one change made here.
 
 ## The change: bfloat16 on Apple Silicon, not float16
 
-The `mps` branch had never actually run — OptiPlex has no GPU, so it always
-took the `cpu` path, and the comment in the original says as much. Exercised
+The `mps` branch had never actually run — the CPU-only host it was written
+for always took the `cpu` path, and the comment in the original says as
+much. Exercised
 for the first time on a Mac mini M4 Pro, `mps` + `float16` failed every
 request with:
 
@@ -29,4 +29,4 @@ Measured after the change: 2.5s of speech in 6.6s wall, against the CPU path's
 `--device` / `--dtype` were added to override the automatic choice.
 
 **This fix is worth carrying back upstream**, though it changes nothing on
-OptiPlex itself, which has no GPU to take the branch.
+the original CPU-only host, which has no GPU to take the branch.

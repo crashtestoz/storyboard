@@ -139,12 +139,13 @@ reuses vpipe's own percent-complete semantics. Preview is just serving the
 resulting `.mp4`/`.jpeg` directly — no need to reimplement vpipe-web-ui's
 live pipeline graph or profiler.
 
-**Visual style should match MCC** (the visual-office dashboard on
-OptiPlex) rather than invent a new look — same panel/dashboard language,
-so this reads as one more tile in that system instead of a bolted-on
-third-party tool. Concretely means pulling MCC's actual component library
-and design tokens (colors, spacing, panel chrome) from that repo rather
-than guessing at them here.
+**Visual style should match your own dashboard**, if you have one, rather
+than invent a new look — same panel/dashboard language, so this reads as
+one more tile in that system instead of a bolted-on third-party tool.
+Concretely means pulling that dashboard's actual component library and
+design tokens (colors, spacing, panel chrome) from its repo rather than
+guessing at them here; see [`css/tokens.css`](../css/tokens.css) for the
+placeholder values shipped in the meantime.
 
 ## Relationship to vpipe's own web UI
 

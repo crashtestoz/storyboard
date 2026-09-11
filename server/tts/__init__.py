@@ -1,8 +1,8 @@
 """Speech engines, described by a config file rather than hardcoded.
 
 A voice model in this network is usually **already running somewhere with an
-owner** — Qwen3-TTS as a FastAPI process next to MCC, MCC's own endpoint
-driving a sherpa-onnx binary from that app's environment. So this project
+owner** — Qwen3-TTS as a FastAPI process on another box, that box's own
+endpoint driving a sherpa-onnx binary from its environment. So this project
 links to services by name and URL instead of installing models of its own.
 That keeps one copy of the weights, one lifecycle to maintain, and this
 project's "nothing to install" property.
@@ -12,10 +12,10 @@ sensible defaults on first run and meant to be edited::
 
     {
       "services": [
-        {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone (OptiPlex)",
+        {"id": "qwen3-clone", "label": "Qwen3-TTS voice clone",
          "kind": "qwen3-clone", "url": "http://127.0.0.1:8790"},
-        {"id": "mcc-sherpa",  "label": "MCC sherpa-onnx voice",
-         "kind": "mcc-sherpa", "url": "http://127.0.0.1:3000"},
+        {"id": "plain-sherpa",  "label": "Plain sherpa-onnx voice",
+         "kind": "plain-sherpa", "url": "http://127.0.0.1:3000"},
         {"id": "vpipe-moss",  "label": "MOSS-TTS via vpipe (local)",
          "kind": "vpipe-moss"}
       ]
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import SpeechResult, TTSEngine, Voice
-from .http_services import MccSherpaTTS, Qwen3CloneTTS
+from .http_services import PlainSherpaTTS, Qwen3CloneTTS
 from .vpipe_moss import VpipeMossTTS
 
 __all__ = [
@@ -51,18 +51,18 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
     },
     {
         "id": "qwen3-clone",
-        "label": "Qwen3-TTS voice clone (same server MCC uses)",
+        "label": "Qwen3-TTS voice clone",
         "kind": "qwen3-clone",
-        # OptiPlex, where MCC and this server run. Still binds 127.0.0.1
-        # there, so it needs rebinding to 0.0.0.0 (or a tunnel) before this
-        # address answers.
-        "url": "http://10.0.0.200:8790",
+        # Wherever you run serve_qwen3_tts.py (see vendor/README.md). Binds
+        # 127.0.0.1 by default there, so it needs rebinding to 0.0.0.0 (or a
+        # tunnel) before a remote address like this answers.
+        "url": "http://127.0.0.1:8790",
     },
     {
-        "id": "mcc-sherpa",
-        "label": "MCC sherpa-onnx voice (plain, no cloning)",
-        "kind": "mcc-sherpa",
-        "url": "http://10.0.0.200:3000",
+        "id": "plain-sherpa",
+        "label": "Plain sherpa-onnx voice (no cloning)",
+        "kind": "plain-sherpa",
+        "url": "http://127.0.0.1:3000",
     },
 ]
 
@@ -124,12 +124,12 @@ def build_one(entry: dict[str, Any], *, vpipe_binary: Path,
         return eng
     if kind == "qwen3-clone":
         return Qwen3CloneTTS(sid, label, url)
-    if kind == "mcc-sherpa":
-        return MccSherpaTTS(sid, label, url)
+    if kind == "plain-sherpa":
+        return PlainSherpaTTS(sid, label, url)
     return BrokenTTS(
         sid, label,
         f"unknown service kind {kind!r} in {CONFIG_NAME} "
-        "(expected vpipe-moss, qwen3-clone or mcc-sherpa)",
+        "(expected vpipe-moss, qwen3-clone or plain-sherpa)",
     )
 
 

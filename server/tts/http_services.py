@@ -1,12 +1,12 @@
 """Speech engines that call a service someone else already runs.
 
 Why link rather than vendor: the voice models in this network are already
-running as services with an owner. Qwen3-TTS is a FastAPI process alongside
-MCC; MCC's plain endpoint drives a sherpa-onnx binary configured by that app's
-environment. Copying either into this project would mean a second set of
-weights, a second lifecycle to maintain, and two processes competing for the
-same box — for no gain, since a storyboard needs a few seconds of speech, not
-a dedicated instance.
+running as services with an owner elsewhere — Qwen3-TTS as its own FastAPI
+process, a plain sherpa-onnx endpoint driven by another app's environment.
+Copying either into this project would mean a second set of weights, a second
+lifecycle to maintain, and two processes competing for the same box — for no
+gain, since a storyboard needs a few seconds of speech, not a dedicated
+instance.
 
 So a service is described by a name and a URL in ``tts-services.json``, and
 this project keeps its "nothing to install" property.
@@ -17,10 +17,10 @@ Two engines, because the two endpoints are genuinely different:
     reference clip **and a transcript of what that clip says**: its
     ``generate_voice_clone()`` conditions on both, so a clip alone is not
     enough. It can produce the transcript itself via ``/transcribe``.
-*   :class:`MccSherpaTTS` — MCC's ``/api/tts``, a sherpa-onnx VITS voice. Text
-    in, wav out, no cloning and no voice choice.
+*   :class:`PlainSherpaTTS` — a sherpa-onnx VITS voice served over a plain
+    ``/api/tts`` endpoint. Text in, wav out, no cloning and no voice choice.
 
-Both contracts were read from MCC's source rather than guessed.
+Both contracts were read from the target service's source rather than guessed.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def _reachable(url: str) -> tuple[bool, str]:
 
 
 class Qwen3CloneTTS(TTSEngine):
-    """Qwen3-TTS voice cloning, as MCC's /api/tts/clone calls it."""
+    """Qwen3-TTS voice cloning, as a /api/tts/clone endpoint calls it."""
 
     supports_cloning = True
     # the same service exposes /transcribe (faster-whisper)
@@ -116,7 +116,7 @@ class Qwen3CloneTTS(TTSEngine):
             return False, (
                 f"cannot reach {self.base_url} ({exc}). The Qwen3-TTS server binds "
                 "127.0.0.1, so it only answers on the machine it runs on. To use it "
-                "from here, on that host (OptiPlex) start it with "
+                "from here, on that host start it with "
                 "--host 0.0.0.0 (uvicorn's default is 127.0.0.1), open port 8790, "
                 "then set this service's url to http://<that-host>:8790 in "
                 "tts-services.json. Alternatively tunnel it "
@@ -258,8 +258,8 @@ class Qwen3CloneTTS(TTSEngine):
                             engine=self.id, voice="clone", log=log)
 
 
-class MccSherpaTTS(TTSEngine):
-    """MCC's /api/tts — a sherpa-onnx VITS voice. Text in, wav out."""
+class PlainSherpaTTS(TTSEngine):
+    """A plain /api/tts endpoint — a sherpa-onnx VITS voice. Text in, wav out."""
 
     supports_cloning = False
 
@@ -272,8 +272,8 @@ class MccSherpaTTS(TTSEngine):
     def health(self) -> tuple[bool, str]:
         """Actually try to synthesise, briefly cached.
 
-        Probing only that the host answers is misleading here: MCC's web app
-        replies 200 on / while its speech endpoint returns 503 because
+        Probing only that the host answers is misleading here: the host's web
+        app can reply 200 on / while its speech endpoint returns 503 because
         sherpa-onnx is not configured on that machine. A green light that
         fails at the first dub is worse than a red one, so this asks the
         endpoint itself and repeats the server's own explanation.
@@ -296,7 +296,7 @@ class MccSherpaTTS(TTSEngine):
         return ok, msg
 
     def voices(self) -> list[Voice]:
-        return [Voice(id="default", label="MCC sherpa-onnx voice", kind="preset")]
+        return [Voice(id="default", label="Plain sherpa-onnx voice", kind="preset")]
 
     def synth(self, text, out_path, *, voice=None, reference=None, **_) -> SpeechResult:
         ok, msg = self.health()
