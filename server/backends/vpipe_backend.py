@@ -110,6 +110,17 @@ SKETCH_STYLE_PREFIX = (
     "drawing, not a photograph."
 )
 
+# Activates Krea-2's in-context reference-edit path (the ComfyUI-Krea2Edit
+# node's mechanism) — see _still_spec()'s identity_ref_path handling. Fetched
+# once via a plain model-fetch vpipeline into the workspace; not bundled or
+# auto-downloaded, same footing as every other model this app links to
+# rather than installs. The directory holds three rank variants — v1_2 is
+# the publisher's recommended full-rank one, so the path is explicit rather
+# than a bare registered name (which would be ambiguous with three files).
+KREA2_IDENTITY_EDIT_LORA = (
+    "models/conradlocke/krea2-identity-edit/krea2_identity_edit_v1_2.safetensors"
+)
+
 # stdout patterns that mean "this run failed even though it will exit 0"
 SILENT_FAILURE_PATTERNS = [
     (r"video decode failed", "VAE decode refused the request and skipped"),
@@ -323,33 +334,38 @@ class VpipeBackend(Backend):
         height = _align_up(height, cap.size_align)
 
         if cap.kind == "image":
-            # A still with a Start Ref treats it as an img2img source rather
-            # than ignoring it — the same field the Frame Anchors panel
-            # already exposes, just read differently by a model with no
-            # keyframe concept of its own. "Create Stills" uses this to
-            # chain start -> mid -> end from each other's own pixels instead
-            # of three independent rolls that only share a prompt; it is
-            # also just a real way to make Krea-2 build on a photo, which is
-            # otherwise not possible for a pure text-to-image model.
-            still_ref_path = _ref_source(shot.get("startRef"), paths)
-            if not still_ref_path:
-                # No explicit anchor — fall back to the first selected
-                # character's own portrait, so a still at least starts from
-                # a real likeness instead of leaning on text description
-                # alone (which "Create Stills" showed is not enough: cast
-                # appearance is otherwise never shown to Krea-2 at all, only
-                # described in words). Krea-2 takes exactly one img2img
-                # reference, so this is the first one found, not all of them.
-                wanted = set(shot.get("characterIds") or [])
-                for ch in project.get("characters") or []:
-                    if ch.get("id") in wanted and ch.get("image"):
-                        still_ref_path = _ref_source(ch.get("image"), paths)
-                        if still_ref_path:
-                            break
-            still_strength = float(shot.get("imgStrength") or 0.6) if still_ref_path else 0.0
+            # Two distinct reference mechanisms, not one:
+            #
+            # 1. Chain continuation ("_chainRef", set only by "Create
+            #    Stills" for its mid/end phases) — plain img2img from the
+            #    previous phase's own output. A pixel-level continuation,
+            #    not an edit, so it stays on the ordinary ref-latent path.
+            #
+            # 2. Identity reference (this shot's own Start Ref, or the
+            #    first selected character's portrait when no anchor is
+            #    set) — routed through Krea-2's identity-edit LoRA instead
+            #    of plain img2img. Cast appearance is otherwise never
+            #    shown to Krea-2 at all, only described in words, which
+            #    "Create Stills" showed is not enough on its own.
+            #
+            # Krea-2 takes exactly one reference either way, so only the
+            # first candidate found is used, never a blend of several.
+            chain_ref_path = _ref_source(shot.get("_chainRef"), paths)
+            identity_ref_path = None
+            if not chain_ref_path:
+                identity_ref_path = _ref_source(shot.get("startRef"), paths)
+                if not identity_ref_path:
+                    wanted = set(shot.get("characterIds") or [])
+                    for ch in project.get("characters") or []:
+                        if ch.get("id") in wanted and ch.get("image"):
+                            identity_ref_path = _ref_source(ch.get("image"), paths)
+                            if identity_ref_path:
+                                break
+            chain_strength = float(shot.get("imgStrength") or 0.6) if chain_ref_path else 0.0
             spec, outputs = self._still_spec(
                 shot, paths, prompt, width, height, steps, seed,
-                still_ref_path, still_strength,
+                chain_ref_path=chain_ref_path, chain_strength=chain_strength,
+                identity_ref_path=identity_ref_path,
             )
             expected_seconds = 150.0
             frames_dir = None
@@ -538,20 +554,47 @@ class VpipeBackend(Backend):
                _outputs(paths)
 
     def _still_spec(self, shot, paths, prompt, w, h, steps, seed,
-                    ref_path=None, strength=0.0):
-        """Krea-2 Turbo single image.
+                    chain_ref_path=None, chain_strength=0.0,
+                    identity_ref_path=None):
+        """Krea-2 Turbo single image, in one of three modes.
 
-        ``ref_path`` + ``strength`` turn this into an img2img pass instead of
-        text-to-image from noise: the reference is vae-encoded and wired onto
+        Plain text-to-image when neither reference is set.
+
+        ``chain_ref_path`` + ``chain_strength`` (> 0) make this an ordinary
+        img2img pass: the reference is vae-encoded and wired onto
         generate-image's ref-latent iport, which for Krea-2 doubles as the
-        img2img init (see generate-image-stage.h) — this is what lets
-        "Create Stills" chain start -> mid -> end from each other's own pixels
-        instead of three unrelated rolls of the dice that happen to share a
-        prompt. Unset (the normal single-shot-still case) behaves exactly as
-        before: text-to-image from pure noise.
+        img2img init (see generate-image-stage.h). This is a pixel-level
+        continuation — "Create Stills" uses it to chain mid/end from the
+        previous phase's own output instead of three unrelated rolls that
+        happen to share a prompt.
+
+        ``identity_ref_path`` instead routes through Krea-2's identity-edit
+        LoRA (conradlocke/krea2-identity-edit, fetched into
+        models/conradlocke/krea2-identity-edit/): the reference goes to
+        *both* generate-image's ref-latent iport (at strength 0 — a clean
+        anchor, not an img2img blend, per the model catalogue's own wiring
+        note) and diffusion-conditioner's ref_image iport, where Krea-2's
+        Qwen3-VL tower grounds the prompt in what the reference actually
+        shows. This is what lets a still start from an actual character
+        portrait instead of only a text description of one. The two modes
+        are mutually exclusive by construction (prepare() never sets both).
         """
         out_rel = f"{paths.pipe_dir}/still.jpeg"
-        use_ref = bool(ref_path) and strength > 0.0
+        use_chain = bool(chain_ref_path) and chain_strength > 0.0
+        use_identity = bool(identity_ref_path) and not use_chain
+
+        krea2_config = {"lora": "mgwr/M87", "lora_scale": 1.0}
+        if use_identity:
+            # The identity/few-step slot takes the edit adapter; the style
+            # slot keeps the existing aesthetic LoRA active alongside it —
+            # the pairing krea2-model-config's own docs describe.
+            krea2_config = {
+                "lora": KREA2_IDENTITY_EDIT_LORA,
+                "lora_scale": 1.0,
+                "lora2": "mgwr/M87",
+                "lora2_scale": 1.0,
+            }
+
         stages = [
             _model_select("krea/Krea-2-Turbo"),
             _text_prompt(prompt),
@@ -559,7 +602,7 @@ class VpipeBackend(Backend):
                 "id": "krea2-model-config",
                 "type": "krea2-model-config",
                 "iports": [],
-                "config": {"lora": "mgwr/M87", "lora_scale": 1.0},
+                "config": krea2_config,
             },
             {
                 "id": "scheduler-select",
@@ -567,23 +610,48 @@ class VpipeBackend(Backend):
                 "iports": [],
                 "config": {"steps": steps, "shift": 0.3},
             },
-            {
-                "id": "diffusion-conditioner",
-                "type": "diffusion-conditioner",
-                "iports": [
-                    {"src": "text-prompt", "oport": 0},
-                    {"src": "", "oport": 0},
-                    {"src": "model-select", "oport": 0},
-                    {"src": "", "oport": 0},
-                    {"src": "", "oport": 0},
-                    {"src": "krea2-model-config", "oport": 0},
-                ],
-                "config": {},
-            },
         ]
 
+        cond_ref_iport = {"src": "", "oport": 0}
+        if use_identity:
+            stages += [
+                {
+                    "id": "load-identity-ref",
+                    "type": "load-image",
+                    "iports": [],
+                    "config": {"url": [identity_ref_path]},
+                },
+                {
+                    "id": "resample-identity-ref",
+                    "type": "image-resample",
+                    "iports": [{"src": "load-identity-ref", "oport": 0}],
+                    "config": {
+                        "width": w,
+                        "height": h,
+                        "fit": "crop",
+                        "algorithm": "lanczos",
+                    },
+                },
+            ]
+            cond_ref_iport = {"src": "resample-identity-ref", "oport": 0}
+
+        stages.append({
+            "id": "diffusion-conditioner",
+            "type": "diffusion-conditioner",
+            "iports": [
+                {"src": "text-prompt", "oport": 0},
+                {"src": "", "oport": 0},
+                {"src": "model-select", "oport": 0},
+                cond_ref_iport,
+                {"src": "", "oport": 0},
+                {"src": "krea2-model-config", "oport": 0},
+            ],
+            "config": {},
+        })
+
         ref_iport = {"src": "", "oport": 0}
-        if use_ref:
+        ref_strength = None
+        if use_chain:
             # Same load -> resample -> vae-encode shape FL2VA uses for its
             # frame anchors — resampled to this render's own size so the
             # latent geometry matches, the same reason that matters there.
@@ -592,7 +660,7 @@ class VpipeBackend(Backend):
                     "id": "load-still-ref",
                     "type": "load-image",
                     "iports": [],
-                    "config": {"url": [ref_path]},
+                    "config": {"url": [chain_ref_path]},
                 },
                 {
                     "id": "resample-still-ref",
@@ -616,6 +684,19 @@ class VpipeBackend(Backend):
                 },
             ]
             ref_iport = {"src": "vae-encode-still-ref", "oport": 0}
+            ref_strength = chain_strength
+        elif use_identity:
+            stages.append({
+                "id": "vae-encode-identity-ref",
+                "type": "vae-encode",
+                "iports": [
+                    {"src": "resample-identity-ref", "oport": 0},
+                    {"src": "model-select", "oport": 0},
+                ],
+                "config": {},
+            })
+            ref_iport = {"src": "vae-encode-identity-ref", "oport": 0}
+            ref_strength = 0.0
 
         generate_config = {
             "height": h,
@@ -624,8 +705,8 @@ class VpipeBackend(Backend):
             "seed": seed,
             "i8_gemm": False,
         }
-        if use_ref:
-            generate_config["strength"] = strength
+        if ref_strength is not None:
+            generate_config["strength"] = ref_strength
 
         stages += [
             {

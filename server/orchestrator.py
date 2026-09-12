@@ -122,6 +122,19 @@ class Orchestrator:
         # and "end" too.
         self._stills_results: dict[str, Any] = {}
 
+        # Batch Render — render several projects back to back, each with
+        # its own board's own settings, for an overnight run. Reuses the
+        # single-project _prime_batch/_run_batch machinery project by
+        # project on self._thread (so "busy" spans the whole queue, not
+        # just one project — still one GPU job at a time); this is just
+        # the bookkeeping for which project is up next.
+        self._project_queue_total: list[str] = []
+        self._project_queue_remaining: list[str] = []
+        self._project_queue_done: list[str] = []
+        self._project_queue_current: str | None = None
+        self._project_queue_errors: dict[str, str] = {}
+        self._project_batch_active: bool = False
+
     # ------------------------------------------------------------------ #
     # status
     # ------------------------------------------------------------------ #
@@ -159,6 +172,14 @@ class Orchestrator:
                     "log": self._stills_log[-MAX_LOG_LINES:],
                     "results": dict(self._stills_results),
                 },
+                "projectBatch": {
+                    "active": self._project_batch_active,
+                    "current": self._project_queue_current,
+                    "total": list(self._project_queue_total),
+                    "remaining": list(self._project_queue_remaining),
+                    "done": list(self._project_queue_done),
+                    "errors": dict(self._project_queue_errors),
+                },
             }
 
     # ------------------------------------------------------------------ #
@@ -175,6 +196,21 @@ class Orchestrator:
         if not ok:
             raise RuntimeError(msg)
 
+        whole_board = self._prime_batch(slug, shot_ids)
+
+        self._thread = threading.Thread(
+            target=self._run_batch, args=(slug, whole_board),
+            name="render-queue", daemon=True,
+        )
+        self._thread.start()
+        return self.status()
+
+    def _prime_batch(self, slug: str, shot_ids: list[str] | None) -> bool:
+        """Load *slug*, pick its targets, and set up the run state that
+        ``_run_batch`` expects — the part of ``start()`` that a single
+        project's render and a multi-project batch both need, unchanged
+        either way. Returns ``whole_board`` (whether to assemble after).
+        """
         board = self.store.load(slug)
         shots = board.get("shots") or []
         # An explicit list is exactly that — the user asked for these shots.
@@ -221,13 +257,61 @@ class Orchestrator:
                         {"level": "INFO", "text": f"queued — {why}"}
                     )
         self.store.save(slug, board)
+        return whole_board
+
+    def start_project_batch(self, slugs: list[str]) -> dict[str, Any]:
+        """Render several projects back to back — each one's own "Render
+        all", automatically, in the order given — for an overnight run.
+        """
+        if self.busy:
+            raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("still previews are generating — one GPU job at a time")
+        slugs = [s for s in dict.fromkeys(slugs) if s]  # de-dup, keep order
+        if not slugs:
+            raise RuntimeError("no projects selected")
+
+        ok, msg = self.backend.health()
+        if not ok:
+            raise RuntimeError(msg)
+
+        with self._lock:
+            self._cancel.clear()
+            self._project_queue_total = list(slugs)
+            self._project_queue_remaining = list(slugs)
+            self._project_queue_done = []
+            self._project_queue_current = None
+            self._project_queue_errors = {}
+            self._project_batch_active = True
 
         self._thread = threading.Thread(
-            target=self._run_batch, args=(slug, whole_board),
-            name="render-queue", daemon=True,
+            target=self._run_project_queue, name="project-batch", daemon=True,
         )
         self._thread.start()
         return self.status()
+
+    def _run_project_queue(self) -> None:
+        try:
+            for slug in list(self._project_queue_total):
+                if self._cancel.is_set():
+                    break
+                with self._lock:
+                    self._project_queue_current = slug
+                try:
+                    whole_board = self._prime_batch(slug, None)
+                    self._run_batch(slug, whole_board)
+                except Exception as exc:  # noqa: BLE001 - one bad project
+                    # should not sink the rest of an overnight queue
+                    with self._lock:
+                        self._project_queue_errors[slug] = str(exc)
+                with self._lock:
+                    if slug in self._project_queue_remaining:
+                        self._project_queue_remaining.remove(slug)
+                    self._project_queue_done.append(slug)
+        finally:
+            with self._lock:
+                self._project_queue_current = None
+                self._project_batch_active = False
 
     def _pending(self, board: dict) -> tuple[list[dict], dict[str, str]]:
         """The shots a whole-board run should render, in board order.
@@ -388,17 +472,17 @@ class Orchestrator:
                     extracted or f"{phase_hint}. {shot.get('prompt') or ''}".strip()
                 )
                 if prev_still is not None:
-                    # Build each later still from the one before it (img2img,
-                    # see prepare()'s startRef handling for krea2-still)
-                    # instead of three independent rolls that only share a
-                    # prompt — that was producing a different-looking Falcon
-                    # each time. Moderate strength: enough freedom to move
-                    # toward this phase's prompt, not enough to redesign the
-                    # subject. The *first* still keeps dict(shot)'s own
-                    # startRef untouched — if the shot already has a Frame
-                    # Anchor image set, that is a deliberate seed for the
-                    # opening still, not something to discard.
-                    still_shot["startRef"] = str(prev_still)
+                    # Build each later still from the one before it — plain
+                    # img2img continuation, a separate field from startRef
+                    # (see prepare()'s krea2-still branch) so it never gets
+                    # confused with a real anchor/identity reference, which
+                    # uses a different mechanism (the identity-edit LoRA).
+                    # Moderate strength: enough freedom to move toward this
+                    # phase's prompt, not enough to redesign the subject.
+                    # The *first* still keeps dict(shot)'s own startRef and
+                    # characterIds untouched — those drive the identity-edit
+                    # path instead (see prepare()).
+                    still_shot["_chainRef"] = str(prev_still)
                     still_shot["imgStrength"] = 0.55
                 paths = ShotPaths(
                     workspace=self.workspace,

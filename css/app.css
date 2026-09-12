@@ -1820,6 +1820,28 @@ textarea.ta-compact {
 }
 
 #openDialog { z-index: 115; }
+#batchDialog { z-index: 115; }
+
+.batch-row-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+.batch-row-label input[type="checkbox"] { flex: none; }
+.batch-row-label .open-name { margin-bottom: 0; }
+
+.batch-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-sunken));
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.batch-banner #batchBannerText { color: var(--text); }
 
 /* --- speak this line ------------------------------------------------------ */
 

@@ -117,6 +117,9 @@ const API = {
   // Start/mid/end Krea-2 stills for one shot — a fast preview, not a render.
   stills: (slug, shotId) => req("POST", "/api/stills", { slug, shotId }),
 
+  // Render several projects in sequence, each with its own saved settings.
+  renderBatch: (slugs) => req("POST", "/api/render-batch", { slugs }),
+
   // Join the rendered clips into one video. A whole-board render does this at
   // the end; this is the same pass on demand, for when nothing needs
   // re-rendering and only the cut is out of date.

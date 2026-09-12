@@ -21,6 +21,7 @@ Routes
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/render``            start ``{slug, shotIds?}``
+``POST /api/render-batch``      render several projects in sequence ``{slugs}``
 ``POST /api/stills``            start/mid/end Krea-2 previews ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
@@ -564,6 +565,13 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(payload.get("board"), dict):
                 ctx.store.save(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
+
+        if path == "/api/render-batch":
+            payload = self._read_json()
+            slugs = payload.get("slugs")
+            if not isinstance(slugs, list) or not slugs:
+                raise ValueError("slugs (a non-empty list) is required")
+            return self._send_json(ctx.orch.start_project_batch(slugs))
 
         if path == "/api/stills":
             payload = self._read_json()
