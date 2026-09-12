@@ -637,6 +637,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   margin-top: var(--sp-2);
 }
 
+.toggle.disabled { opacity: 0.5; cursor: default; }
+.toggle.disabled .toggle-track { cursor: default; }
+
 /* ==========================================================================
    Queue list (rail)
    ========================================================================== */
@@ -875,6 +878,68 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   text-align: center;
   padding: var(--sp-6) var(--sp-4);
   line-height: 1.6;
+}
+
+/* --- stills --------------------------------------------------------------- */
+.stills-status {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: var(--sp-4);
+  text-align: center;
+}
+.stills-status.stills-error { color: var(--err); }
+
+.stills-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-3);
+}
+.stills-cell { display: flex; flex-direction: column; gap: var(--sp-2); }
+.stills-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+.stills-missing { display: block; }
+.stills-pending {
+  display: block;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-sunken));
+  animation: stage-tile-pulse 1.6s ease-in-out infinite;
+}
+.stills-thumb-clickable { cursor: zoom-in; }
+
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-6);
+  z-index: 1000;
+  cursor: zoom-out;
+}
+.lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+.stills-label {
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+@media (max-width: 640px) {
+  .stills-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 1180px) {
@@ -1397,6 +1462,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .help-tick line { stroke: var(--text-faint); stroke-width: 1; }
 .help-tick text { fill: var(--text-dim); font-size: 12px; font-weight: 600; }
 
+.help-move-arrow { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; }
+.help-move-arrow-head { fill: var(--accent); }
+
 .help-legend {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1439,6 +1507,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   margin-bottom: var(--sp-3);
 }
 
+.output-tabs { margin-top: var(--sp-2); }
+
 .tab {
   appearance: none;
   background: none;
@@ -1474,6 +1544,75 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 .tab-pane[hidden] { display: none !important; }
+
+/* --- stage tiles: a plain-language view of what the render is doing ------ */
+
+.stage-tiles {
+  display: flex;
+  gap: 6px;
+  margin: var(--sp-3) 0;
+}
+
+.stage-tile {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--sp-2) 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  text-align: center;
+  transition: border-color 0.2s, background 0.2s, opacity 0.2s;
+}
+
+.stage-tile-icon { display: block; width: 20px; height: 20px; color: var(--text-faint); }
+.stage-tile[data-state="active"] .stage-tile-icon,
+.stage-tile[data-state="done"] .stage-tile-icon { color: var(--text); }
+.stage-tile[data-state="failed"] .stage-tile-icon { color: var(--err); }
+
+.stage-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.stage-icon-dot { fill: currentColor; stroke: none; }
+.stage-icon-solid { fill: currentColor; stroke: none; }
+
+.stage-tile-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+  line-height: 1.25;
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.stage-tile[data-state="pending"] { opacity: 0.45; }
+
+.stage-tile[data-state="active"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-raised));
+  animation: stage-tile-pulse 1.6s ease-in-out infinite;
+}
+.stage-tile[data-state="active"] .stage-tile-label { color: var(--text); }
+
+.stage-tile[data-state="done"] { border-color: var(--accent); opacity: 0.8; }
+.stage-tile[data-state="done"] .stage-tile-label { color: var(--text-dim); }
+
+.stage-tile[data-state="failed"] { border-color: var(--err); opacity: 1; }
+.stage-tile[data-state="failed"] .stage-tile-label { color: var(--err); }
+
+@keyframes stage-tile-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
 
 .pane-head {
   display: flex;
@@ -1755,6 +1894,15 @@ textarea.ta-compact {
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
   margin-bottom: var(--sp-3);
+}
+
+/* The CHANGED badge already says this clip is stale — this variant is just
+   the dismiss action, so it drops the warning-box treatment entirely. */
+.stale-note-compact {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-bottom: var(--sp-2);
 }
 
 /* --- final video -------------------------------------------------------- */

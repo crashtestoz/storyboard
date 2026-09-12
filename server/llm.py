@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import base64
 import mimetypes
 import urllib.error
@@ -111,6 +112,126 @@ prompt.
 - Write only the prompt itself. Your entire reply is used verbatim.
 """
 
+SCENE_SYSTEM_PROMPT = """\
+You rewrite a storyboard's project-wide scene description — the \
+surroundings and overall visual style that stay true across every shot, \
+prepended automatically to each shot's own prompt before it reaches the \
+video model.
+
+Rules:
+- Describe only the environment and setting: location, materials, \
+weather, time of day, light, atmosphere, and the overall rendering style \
+(e.g. "photorealistic, cinematic"). Concrete physical detail over vague \
+adjectives — prefer "battered, weathered metal plating" over "cool-looking \
+ship".
+- Do not describe any character — no appearance, build, clothing, or \
+presence. Characters have their own separate descriptions elsewhere, and \
+repeating them here would say the same thing twice in two different \
+places.
+- Do not describe camera moves, specific actions, individual shots, or \
+sound — those belong to each shot's own prompt and are added separately.
+- Keep every concrete thing the writer specified about the surroundings. \
+Do not invent new locations or settings, and do not remove any they named.
+- If reference images are listed in the context, treat them as visual \
+constraints on the environment. Add a compact natural-language summary of \
+their relevant visual cues. Do not include filenames or paths in the \
+final text.
+- One paragraph. No headings, no bullet points, no preamble, no \
+explanation, no quotation marks around the whole thing.
+- Aim for 40 to 90 words.
+- Write only the scene description itself. Your entire reply is used \
+verbatim.
+"""
+
+SOUNDSCAPE_SYSTEM_PROMPT = """\
+You rewrite a storyboard's project-wide background sound — the ambient \
+audio bed that can be rendered into every shot, or held out and mixed over \
+the finished cut separately.
+
+Rules:
+- Ground the sound in the scene description given as context. Read what \
+the surroundings actually are — location, materials, weather, activity \
+implied by the setting — and propose concrete, plausible sound effects \
+that belong there, not an abstract mood. A garage scene implies things \
+like a dripping fluid, a ticking cooling engine, distant street traffic; a \
+desert scene implies wind, shifting sand, the heat-tick of metal. Name \
+what is actually heard, grounded in that environment, rather than \
+describing how it feels.
+- Describe only what is heard: ambience, room tone, weather, distant \
+activity, machinery, music or drone — layered and separated by commas.
+- Do not describe anything visual: no camera moves, no actions, no \
+lighting, no characters' appearance.
+- Do not describe spoken dialogue or intelligible words — this is an \
+ambient bed, not a voice.
+- Keep every concrete thing the writer specified. Do not invent sound \
+sources that contradict the scene, and do not remove any the writer \
+named.
+- One paragraph, or a short comma-separated phrase. No headings, no \
+bullet points, no preamble, no explanation, no quotation marks around the \
+whole thing.
+- Aim for 15 to 45 words.
+- Write only the background sound description itself. Your entire reply \
+is used verbatim.
+"""
+
+SOUND_ACCENT_SYSTEM_PROMPT = """\
+You rewrite a single shot's sound accents — the local sound effects specific \
+to this one clip (switches, impacts, footsteps, spray, and similar), layered \
+on top of the project's constant background bed.
+
+Rules:
+- Ground the accents in the shot's own prompt, given as context: read what \
+happens in it — the action, the environment, the materials involved — and \
+propose concrete, plausible sound effects that belong to that action, not an \
+abstract mood. A door slamming implies a sharp wooden or metallic impact; a \
+landing on gravel implies a crunch and a scuff; a switch flicked implies a \
+small mechanical click. Name what is actually heard, tied to what is \
+actually happening in the shot.
+- Describe only local, momentary effects tied to this shot's action — not \
+the constant ambient bed (that is a separate, project-wide field) and not \
+music.
+- Do not describe anything visual: no camera moves, no lighting, no \
+characters' appearance.
+- Do not describe spoken dialogue, or any words being said, in any form — \
+dialogue is a separate field and must never appear here, even as a \
+suggestion.
+- Keep every concrete thing the writer specified. Do not invent effects \
+that contradict the shot, and do not remove any the writer named.
+- One paragraph, or a short comma-separated phrase. No headings, no bullet \
+points, no preamble, no explanation, no quotation marks around the whole \
+thing.
+- Aim for 10 to 35 words.
+- Write only the sound accents themselves. Your entire reply is used \
+verbatim.
+"""
+
+STILL_PHASES_SYSTEM_PROMPT = """\
+You read a single shot's camera/action description and identify what is \
+actually visible at three distinct instants within it, for someone who will \
+render each instant as a separate still image: the very START of the \
+described action, its MIDDLE, and its very END.
+
+Rules:
+- Use only what the shot description itself establishes — distance, \
+position, pose, camera framing, lighting, motion direction. Never invent \
+detail it does not support.
+- The three moments must be visibly different from each other whenever the \
+description supports that: e.g. distant vs. close, high vs. low, diving vs. \
+level, upright vs. banked, approaching vs. departing. Do not describe the \
+same composition three times with different words — if the description \
+depicts real movement from one place/pose to another, each instant should \
+show where the subject actually is at that point.
+- Each description stands alone: it will be rendered with no memory of the \
+other two, so it must fully specify position, framing and pose for that \
+instant rather than saying "as before" or "continuing from".
+- Never describe dialogue, sound, or anything not visible in a single frame.
+- Reply with exactly three short paragraphs (one or two sentences each), no \
+preamble, no extra commentary, in exactly this format:
+START: <description>
+MIDDLE: <description>
+END: <description>
+"""
+
 CHARACTER_IMAGE_SYSTEM_PROMPT = """\
 You write compact, production-ready character descriptions for a storyboard to \
 video generator, using the supplied reference image as visual evidence.
@@ -133,14 +254,22 @@ def build_user_message(
     text: str,
     *,
     scene: str = "",
+    context: str = "",
+    context_label: str = "",
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
+    instruction: str = "Rewrite this shot description:",
 ) -> str:
-    """The shot to rewrite, plus the context it has to stay consistent with.
+    """The text to rewrite, plus the context it has to stay consistent with.
 
     The scene description and cast are given as *context, not as material to
     fold in* — they are already prepended to every shot when the full prompt
     is assembled, so repeating them here would say everything twice.
+
+    *context* is a second, generic slot for whatever else the text being
+    rewritten has to stay grounded in but must not repeat — a shot's own
+    prompt, say, when rewriting that shot's sound accents. *context_label*
+    names what it is; without one a generic label is used.
     """
     blocks = []
     if scene.strip():
@@ -148,6 +277,12 @@ def build_user_message(
             "The project's scene description, already applied to every shot. "
             "Do not repeat it; stay consistent with it:\n" + scene.strip()
         )
+    if context.strip():
+        label = context_label or (
+            "Context this must stay consistent with, already written "
+            "elsewhere and not to be repeated:"
+        )
+        blocks.append(label + "\n" + context.strip())
     for ch in characters or []:
         name = (ch.get("name") or "").strip()
         desc = (ch.get("description") or "").strip()
@@ -175,7 +310,7 @@ def build_user_message(
             "visual cues into the prompt. Do not mention filenames or paths in "
             "the rewritten prompt:\n" + "\n".join(lines)
         )
-    blocks.append("Rewrite this shot description:\n" + text.strip())
+    blocks.append(instruction + "\n" + text.strip())
     return "\n\n".join(blocks)
 
 
@@ -498,31 +633,75 @@ def load_services(project_root: Path) -> dict[str, LLMService]:
 # --------------------------------------------------------------------------- #
 
 
+#: What is being rewritten, and how to talk about it — the system prompt to
+#: use, the label for error/instruction text, and the instruction line handed
+#: to the model as the last block of `build_user_message`.
+_REWRITE_KINDS: dict[str, dict[str, str]] = {
+    "shot": {
+        "system": SYSTEM_PROMPT,
+        "label": "shot prompt",
+        "instruction": "Rewrite this shot description:",
+    },
+    "still": {
+        "system": STILL_SYSTEM_PROMPT,
+        "label": "shot prompt",
+        "instruction": "Rewrite this shot description:",
+    },
+    "scene": {
+        "system": SCENE_SYSTEM_PROMPT,
+        "label": "scene description",
+        "instruction": "Rewrite this project's scene description:",
+    },
+    "soundscape": {
+        "system": SOUNDSCAPE_SYSTEM_PROMPT,
+        "label": "background sound",
+        "instruction": "Rewrite this project's background sound:",
+    },
+    "soundNote": {
+        "system": SOUND_ACCENT_SYSTEM_PROMPT,
+        "label": "sound accents",
+        "instruction": "Rewrite this shot's sound accents:",
+    },
+}
+
+
 def rewrite_prompt(
     service: LLMService,
     text: str,
     *,
     scene: str = "",
+    context: str = "",
+    context_label: str = "",
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
-    still: bool = False,
+    kind: str = "shot",
 ) -> str:
-    """Ask *service* to restyle *text*. Returns the proposal, never applies it."""
+    """Ask *service* to restyle *text*. Returns the proposal, never applies it.
+
+    *kind* picks both the system prompt and how the text is described to the
+    model and in error messages — "shot" or "still" for a per-shot prompt,
+    "scene" for the project's scene description, "soundscape" for its
+    background sound bed, "soundNote" for one shot's own sound accents.
+    """
+    spec = _REWRITE_KINDS.get(kind, _REWRITE_KINDS["shot"])
     text = (text or "").strip()
     if not text:
-        raise ValueError("There is nothing in the shot prompt to rewrite yet.")
+        raise ValueError(f"There is nothing in the {spec['label']} to rewrite yet.")
 
     ok, msg = service.health()
     if not ok:
         raise RuntimeError(msg)
 
     out = service.complete(
-        STILL_SYSTEM_PROMPT if still else SYSTEM_PROMPT,
+        spec["system"],
         build_user_message(
             text,
             scene=scene,
+            context=context,
+            context_label=context_label,
             characters=characters,
             reference_images=reference_images,
+            instruction=spec["instruction"],
         ),
     )
     out = _strip_wrapping(out)
@@ -569,6 +748,47 @@ def describe_character(
             f"{service.label} returned an empty character description."
         )
     return out
+
+
+_STILL_PHASE_RE = re.compile(
+    r"START:\s*(?P<start>.+?)\s*(?=\bMIDDLE:)\bMIDDLE:\s*(?P<mid>.+?)\s*"
+    r"(?=\bEND:)\bEND:\s*(?P<end>.+)",
+    re.S | re.I,
+)
+
+
+def describe_still_phases(service: LLMService, shot_prompt: str) -> dict[str, str]:
+    """Three short, distinct visual descriptions — start, middle, end — of
+    what *shot_prompt* itself establishes, for "Create Stills" to render
+    separately instead of the same single moment three times.
+
+    Best-effort: an unconfigured/unhealthy service, a network error, or a
+    reply that does not parse all come back as an empty dict rather than a
+    raised error, since the caller's fallback (a generic phase label glued
+    onto the shot's own prompt) is a fine second choice, not a failure.
+    """
+    text = (shot_prompt or "").strip()
+    if not text:
+        return {}
+    try:
+        ok, _msg = service.health()
+        if not ok:
+            return {}
+        raw = service.complete(STILL_PHASES_SYSTEM_PROMPT, text, timeout=45.0)
+    except Exception:  # noqa: BLE001 - a missing phase description is fine
+        return {}
+    m = _STILL_PHASE_RE.search(raw or "")
+    if not m:
+        return {}
+    return {
+        key: value.strip()
+        for key, value in (
+            ("start", m.group("start")),
+            ("mid", m.group("mid")),
+            ("end", m.group("end")),
+        )
+        if value.strip()
+    }
 
 
 def _strip_wrapping(text: str) -> str:

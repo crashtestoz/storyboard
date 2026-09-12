@@ -29,12 +29,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ..dubbing import speaker_for
 from .base import (
     Backend,
     Check,
@@ -88,6 +90,25 @@ ALL_RESOLUTIONS = [r for group in ASPECT_TABLE.values() for r in group]
 # ALL_RESOLUTIONS is offered but untested.
 H3_TESTED = ["960x544", "832x480", "1344x768"]
 KREA_TESTED = ["1024x1024"]
+
+# Prepended to the prompt in sketch mode (see the "sketch" local in
+# prepare()) — a plain style instruction, not a technical trick, so it goes
+# in the same text every other visual instruction already travels through.
+# H3 is guidance-distilled (no negative prompt, no CFG scale — see the vpipe
+# docs), so it has no lever to push *away* from its photoreal default; text
+# alone only ever nudges it, it does not override it. That is what
+# _sketchify_ref() is for on the Ref2VA path — an edge-detected reference
+# image is a much stronger signal than any wording here, since the model's
+# whole job with a reference is to reproduce what it shows. This text still
+# matters for a shot with no reference images to sketch (plain FL2VA) and as
+# a second push alongside a sketchified reference.
+SKETCH_STYLE_PREFIX = (
+    "STYLE: black-and-white hand-drawn pencil storyboard sketch — heavy, "
+    "dark graphite contour lines on plain white paper, loose scratchy "
+    "linework, flat monotone, absolutely no color, no photographic detail, "
+    "no rendered lighting, shading or reflections. A rough animatic "
+    "drawing, not a photograph."
+)
 
 # stdout patterns that mean "this run failed even though it will exit 0"
 SILENT_FAILURE_PATTERNS = [
@@ -263,12 +284,32 @@ class VpipeBackend(Backend):
         )
         width, height = _wh(res)
         draft = bool((project.get("defaults") or {}).get("draft"))
+        # Sketch is a draft-only sub-option — it means nothing on its own,
+        # since it exists to make an already-fast draft faster still.
+        sketch = draft and bool((project.get("defaults") or {}).get("sketch"))
+        # Draft trades visual fidelity for speed (a small frame, fewer
+        # steps) — it does not mean silent. Dialogue, sound accents and the
+        # background bed are exactly what a draft exists to let someone
+        # check quickly, alongside the motion, before spending the time on a
+        # full-quality render. Sketch is the one exception: it is a silent,
+        # motion-only pass (see the frame-count comment below), so there is
+        # no dialogue or sound to generate in the first place.
+        with_audio = cap.supports_audio and not sketch
         prompt = _resolved_prompt(
             shot,
             project,
-            with_audio=cap.supports_audio and not draft,
+            with_audio=with_audio,
             model=model,
         )
+        if sketch:
+            prompt = f"{SKETCH_STYLE_PREFIX} {prompt}"
+        # Whether this render will speak its own dialogue in the cloned
+        # voice — the orchestrator needs to know this so it does not also
+        # relay a leftover TTS take onto the clip afterwards, which is
+        # exactly the "second voice" bug this replaced. False whenever audio
+        # is not being generated at all (draft mode), since there is then no
+        # voice for H3 to clone anything into.
+        voice_cloned_natively = with_audio and _clones_voice(shot, project, model)
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
 
@@ -282,25 +323,61 @@ class VpipeBackend(Backend):
         height = _align_up(height, cap.size_align)
 
         if cap.kind == "image":
-            spec, outputs = self._still_spec(shot, paths, prompt, width, height, steps, seed)
+            # A still with a Start Ref treats it as an img2img source rather
+            # than ignoring it — the same field the Frame Anchors panel
+            # already exposes, just read differently by a model with no
+            # keyframe concept of its own. "Create Stills" uses this to
+            # chain start -> mid -> end from each other's own pixels instead
+            # of three independent rolls that only share a prompt; it is
+            # also just a real way to make Krea-2 build on a photo, which is
+            # otherwise not possible for a pure text-to-image model.
+            still_ref_path = _ref_source(shot.get("startRef"), paths)
+            if not still_ref_path:
+                # No explicit anchor — fall back to the first selected
+                # character's own portrait, so a still at least starts from
+                # a real likeness instead of leaning on text description
+                # alone (which "Create Stills" showed is not enough: cast
+                # appearance is otherwise never shown to Krea-2 at all, only
+                # described in words). Krea-2 takes exactly one img2img
+                # reference, so this is the first one found, not all of them.
+                wanted = set(shot.get("characterIds") or [])
+                for ch in project.get("characters") or []:
+                    if ch.get("id") in wanted and ch.get("image"):
+                        still_ref_path = _ref_source(ch.get("image"), paths)
+                        if still_ref_path:
+                            break
+            still_strength = float(shot.get("imgStrength") or 0.6) if still_ref_path else 0.0
+            spec, outputs = self._still_spec(
+                shot, paths, prompt, width, height, steps, seed,
+                still_ref_path, still_strength,
+            )
             expected_seconds = 150.0
             frames_dir = None
             frames = 0
+            render_frames = 0
+            stretch_factor = 1.0
             save_frames = False
         else:
             frames = cap.frame_rule.snap(int(shot.get("frames") or cap.frame_rule.minimum))
+            # Sketch renders the fewest frames the model can decode at all —
+            # real motion from the real model, just far fewer samples of it —
+            # then run() stretches the clip back out to this shot's actual
+            # length by holding frames, so it drops into the cut at the
+            # right duration without costing anything to regenerate.
+            render_frames = cap.frame_rule.minimum if sketch else frames
+            stretch_factor = (frames / render_frames) if sketch else 1.0
             save_frames = (not draft) or _has_downstream_chain(shot, project)
             if model == "ref2va":
                 spec, outputs = self._ref2va_spec(
-                    shot, project, paths, prompt, width, height, frames, steps,
-                    seed, draft, save_frames
+                    shot, project, paths, prompt, width, height, render_frames,
+                    steps, seed, draft, save_frames, with_audio, sketch
                 )
             else:
                 spec, outputs = self._fl2va_spec(
-                    shot, paths, prompt, width, height, frames, steps, seed,
-                    draft, save_frames
+                    shot, paths, prompt, width, height, render_frames, steps,
+                    seed, draft, save_frames, with_audio, sketch
                 )
-            expected_seconds = _estimate_seconds(width, height, frames, steps, model)
+            expected_seconds = _estimate_seconds(width, height, render_frames, steps, model)
             frames_dir = paths.abs_frames if save_frames else None
 
         spec_path = paths.abs_dir / "shot.vpipeline"
@@ -310,29 +387,32 @@ class VpipeBackend(Backend):
             shot_id=shot["id"],
             expected_outputs=outputs,
             frames_dir=frames_dir,
-            expected_frames=frames if save_frames else 0,
+            expected_frames=render_frames if save_frames else 0,
             expected_seconds=expected_seconds,
             payload={
                 "spec_path": str(spec_path),
                 "rel_spec": f"{paths.pipe_dir}/shot.vpipeline",
                 "cwd": str(self.workspace),
                 "model": model,
-                "frames": frames,
+                "frames": render_frames,
                 "draft": draft,
                 "save_frames": save_frames,
+                "voiceClonedNatively": voice_cloned_natively,
+                "sketch": sketch,
+                "sketchStretchFactor": stretch_factor,
             },
             summary=(
                 f"{cap.label.split('—')[0].strip()} · {width}x{height}"
                 + (f" · {frames}f" if cap.kind == "video" else "")
                 + f" · {steps} steps"
-                + (" · DRAFT" if draft else "")
+                + (" · SKETCH" if sketch else " · DRAFT" if draft else "")
             ),
         )
 
     # -- templates ------------------------------------------------------ #
 
     def _fl2va_spec(self, shot, paths, prompt, w, h, frames, steps, seed,
-                    draft=False, save_frames=True):
+                    draft=False, save_frames=True, with_audio=True, sketch=False):
         """Text-to-video, plus optional first/last frame anchors on ports 5/6."""
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-FL2VA-8bit"),
@@ -359,6 +439,11 @@ class VpipeBackend(Backend):
             src = _ref_source(ref, paths)
             if not src:
                 continue
+            if sketch:
+                # A pinned frame is vae-encoded pixel-for-pixel, so a
+                # sketchified anchor guarantees that exact frame is a line
+                # drawing rather than hoping the text carries it there.
+                src = _sketchify_ref(src, paths.abs_dir / "sketch-refs")
             stages += [
                 {
                     "id": f"load-{sid}",
@@ -397,15 +482,26 @@ class VpipeBackend(Backend):
         iports[9] = {"src": "minimax-h3-model-config", "oport": 0}
 
         stages.append(_generate_video(iports, w, h, frames, steps, seed))
-        stages += _decode_and_save(paths, audio=not draft, save_frames=save_frames)
+        # Audio decodes whenever this render is generating audio at all — see
+        # the with_audio comment in prepare(): draft trims the picture, not
+        # the sound; sketch is the one case that trims both.
+        stages += _decode_and_save(paths, audio=with_audio, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
     def _ref2va_spec(self, shot, project, paths, prompt, w, h, frames, steps,
-                     seed, draft=False, save_frames=True):
+                     seed, draft=False, save_frames=True, with_audio=True,
+                     sketch=False):
         """Reference-conditioned video via video-ref-encoder's file list."""
-        refs = _ref2va_references(shot, project, paths,
-                                  include_audio_refs=not draft)
+        # Voice/style audio references still go in during a draft — without
+        # them H3 has nothing to clone a character's voice from, and a
+        # draft is exactly when someone wants to hear whether that voice is
+        # right before spending full-quality render time on it. Sketch is
+        # silent by design, so there is no voice to clone into and no point
+        # sending the reference at all.
+        refs = _ref2va_references(
+            shot, project, paths, include_audio_refs=with_audio, sketch=sketch
+        )
 
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-Ref2VA-8bit"),
@@ -437,13 +533,25 @@ class VpipeBackend(Backend):
         iports[9] = {"src": "minimax-h3-model-config", "oport": 0}
 
         stages.append(_generate_video(iports, w, h, frames, steps, seed))
-        stages += _decode_and_save(paths, audio=not draft, save_frames=save_frames)
+        stages += _decode_and_save(paths, audio=with_audio, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
-    def _still_spec(self, shot, paths, prompt, w, h, steps, seed):
-        """Krea-2 Turbo single image."""
+    def _still_spec(self, shot, paths, prompt, w, h, steps, seed,
+                    ref_path=None, strength=0.0):
+        """Krea-2 Turbo single image.
+
+        ``ref_path`` + ``strength`` turn this into an img2img pass instead of
+        text-to-image from noise: the reference is vae-encoded and wired onto
+        generate-image's ref-latent iport, which for Krea-2 doubles as the
+        img2img init (see generate-image-stage.h) — this is what lets
+        "Create Stills" chain start -> mid -> end from each other's own pixels
+        instead of three unrelated rolls of the dice that happen to share a
+        prompt. Unset (the normal single-shot-still case) behaves exactly as
+        before: text-to-image from pure noise.
+        """
         out_rel = f"{paths.pipe_dir}/still.jpeg"
+        use_ref = bool(ref_path) and strength > 0.0
         stages = [
             _model_select("krea/Krea-2-Turbo"),
             _text_prompt(prompt),
@@ -472,6 +580,54 @@ class VpipeBackend(Backend):
                 ],
                 "config": {},
             },
+        ]
+
+        ref_iport = {"src": "", "oport": 0}
+        if use_ref:
+            # Same load -> resample -> vae-encode shape FL2VA uses for its
+            # frame anchors — resampled to this render's own size so the
+            # latent geometry matches, the same reason that matters there.
+            stages += [
+                {
+                    "id": "load-still-ref",
+                    "type": "load-image",
+                    "iports": [],
+                    "config": {"url": [ref_path]},
+                },
+                {
+                    "id": "resample-still-ref",
+                    "type": "image-resample",
+                    "iports": [{"src": "load-still-ref", "oport": 0}],
+                    "config": {
+                        "width": w,
+                        "height": h,
+                        "fit": "crop",
+                        "algorithm": "lanczos",
+                    },
+                },
+                {
+                    "id": "vae-encode-still-ref",
+                    "type": "vae-encode",
+                    "iports": [
+                        {"src": "resample-still-ref", "oport": 0},
+                        {"src": "model-select", "oport": 0},
+                    ],
+                    "config": {},
+                },
+            ]
+            ref_iport = {"src": "vae-encode-still-ref", "oport": 0}
+
+        generate_config = {
+            "height": h,
+            "width": w,
+            "steps": steps,
+            "seed": seed,
+            "i8_gemm": False,
+        }
+        if use_ref:
+            generate_config["strength"] = strength
+
+        stages += [
             {
                 "id": "generate-image",
                 "type": "generate-image",
@@ -481,17 +637,11 @@ class VpipeBackend(Backend):
                     {"src": "model-select", "oport": 0},
                     {"src": "", "oport": 0},
                     {"src": "scheduler-select", "oport": 0},
-                    {"src": "", "oport": 0},
+                    ref_iport,
                     {"src": "", "oport": 0},
                     {"src": "krea2-model-config", "oport": 0},
                 ],
-                "config": {
-                    "height": h,
-                    "width": w,
-                    "steps": steps,
-                    "seed": seed,
-                    "i8_gemm": False,
-                },
+                "config": generate_config,
             },
             {
                 "id": "vae-decode",
@@ -578,6 +728,21 @@ class VpipeBackend(Backend):
             result.exit_code = proc.returncode
             result.ended_at = time.time()
             self._proc = None
+
+        # Sketch rendered the fewest frames the model can decode, not this
+        # shot's actual length — stretch the clip back out now, once, rather
+        # than at every later place something reads its duration (assembly,
+        # the player, a future dub pass).
+        factor = float(spec.payload.get("sketchStretchFactor") or 1.0)
+        if (
+            not result.cancelled
+            and not result.error
+            and result.exit_code == 0
+            and spec.payload.get("sketch")
+            and factor > 1.01
+            and spec.expected_outputs
+        ):
+            _stretch_clip(spec.expected_outputs[0], factor, result.log)
 
         return result
 
@@ -791,6 +956,46 @@ def _outputs(paths: ShotPaths) -> list[Path]:
     return [paths.abs_dir / "clip.mp4"]
 
 
+def _stretch_clip(path: Path, factor: float, log: list[tuple[str, str]]) -> None:
+    """Hold sketch mode's frames to fill this shot's real duration.
+
+    Sketch renders at 24fps same as any other clip — it just asks for far
+    fewer of them (see the frame-count comment in prepare()). ``setpts``
+    slows the timeline by ``factor`` and the matching output ``-r`` makes
+    ffmpeg fill it back in by holding each rendered frame rather than
+    inventing motion between them, which is exactly what a low-sample
+    preview should look like: choppy, not smoothed over.
+
+    Best-effort: a clip left at its short, rendered length is still usable
+    (just shorter than the shot calls for), so a failure here is a warning
+    in the log, not a reason to fail the render.
+    """
+    if not path.exists():
+        return
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        log.append(("WARN", "ffmpeg not on PATH — sketch clip left at its "
+                             "rendered length, not stretched to match the "
+                             "shot's full duration"))
+        return
+    tmp = path.with_suffix(".stretch.mp4")
+    cmd = [
+        ffmpeg, "-y", "-i", str(path),
+        "-vf", f"setpts={factor:.6f}*PTS",
+        "-r", "24", "-an",
+        str(tmp),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        tmp.replace(path)
+        log.append(("INFO", f"sketch clip held {factor:.2f}x to match this "
+                             f"shot's full length"))
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not fatal
+        log.append(("WARN", f"could not stretch sketch clip to full "
+                             f"duration: {exc}"))
+        tmp.unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # misc helpers
 # ---------------------------------------------------------------------------
@@ -867,7 +1072,9 @@ def _resolved_prompt(
     1b. the cast this shot uses — "Name: description", so the shot prompt can
         refer to them by name
     2. this shot's prompt — action, camera and mood, this shot only
-    3. the dialogue as a visual lip-movement cue, not generated speech
+    3. the dialogue — spoken outright when H3 has the speaker's own voice
+       clip to clone from (Ref2VA only), otherwise a silent lip-movement cue
+       for TTS to dub in afterwards
     4. the project soundscape — the constant ambient bed, every shot
     5. this shot's sound note — the accents specific to this clip
 
@@ -878,9 +1085,13 @@ def _resolved_prompt(
     same denoise loop as the picture rather than dubbing it on afterwards —
     so the sound description is conditioning, not metadata.
 
-    Dialogue is kept out of the shot prompt field but still reaches the video
-    model as a visual cue. That gives the model a chance to animate a mouth
-    while the real voice is generated by TTS and muxed in afterwards.
+    Ref2VA already sends the speaking character's voice clip in as a
+    soundtrack reference (see ``_ref2va_references``) — verified to be
+    enough on its own for H3 to reproduce a line accurately, so asking it to
+    speak is asking for something it can already do, not hoping for a happy
+    accident. FL2VA has no mechanism to tell H3 what anyone sounds like, so
+    there dialogue stays a silent cue and TTS is still the only source of a
+    voice.
 
     Sound parts are dropped for a model with no audio (a still), where they
     would only compete with the visual description.
@@ -920,16 +1131,18 @@ def _resolved_prompt(
             parts.append(character)
 
     parts.append((shot.get("prompt") or "").strip())
+    line = (shot.get("dialogue") or "").strip()
+    clones_voice = bool(line) and _clones_voice(shot, project, model)
     if with_audio:
-        cue = _dialogue_visual_cue(shot, project)
+        cue = _dialogue_visual_cue(shot, project, clones_voice=clones_voice)
         if cue:
             parts.append(cue)
 
     if with_audio:
-        if project.get("soundscapeInShots", True) and not has_shot_refs:
+        if project.get("soundscapeInShots", True):
             parts.append((project.get("soundscape") or "").strip())
         parts.append((shot.get("soundNote") or "").strip())
-        if (shot.get("dialogue") or "").strip():
+        if line and not clones_voice:
             parts.append(
                 "Generated audio contains ambient sound only: no spoken words, "
                 "no voice, and no intelligible dialogue; the voice line is "
@@ -943,6 +1156,7 @@ def _ref2va_references(
     project: dict,
     paths: ShotPaths,
     include_audio_refs: bool = True,
+    sketch: bool = False,
 ) -> list[str]:
     """Reference order for Ref2VA, strongest shot-local signals first.
 
@@ -955,6 +1169,8 @@ def _ref2va_references(
 
     def add_image(ref: Any) -> None:
         src = _ref_source(ref, paths)
+        if sketch and src:
+            src = _sketchify_ref(src, paths.abs_dir / "sketch-refs")
         if src and src not in images and len(images) < 9:
             images.append(src)
 
@@ -977,9 +1193,14 @@ def _ref2va_references(
         for r in project.get("styleRefs") or []:
             add_image(r)
 
-    if include_audio_refs:
-        for ch in _shot_characters(shot, project):
-            add_sound(ch.get("voice"))
+    # Only the character who actually speaks this shot's line — every other
+    # cast member's voice clip would just be a second, unlabelled candidate
+    # voice for the same line, which is exactly the kind of ambiguity that
+    # caused H3 to blend/duplicate a voice instead of cloning one cleanly.
+    if include_audio_refs and (shot.get("dialogue") or "").strip():
+        speaker = speaker_for(shot, project)
+        if speaker:
+            add_sound(speaker.get("voice"))
 
     # "audio can never be the only kind": a voice clip with no picture
     # alongside it is not a request Ref2VA accepts, so drop the sound rather
@@ -1022,11 +1243,36 @@ def _view_constraint(shot: dict) -> str:
     return ""
 
 
-def _dialogue_visual_cue(shot: dict, project: dict) -> str:
+def _clones_voice(shot: dict, project: dict, model: str) -> bool:
+    """True when this render can hand H3 the speaking character's own voice
+    clip as an audio reference, so it can be asked to actually say the line
+    instead of only moving its mouth to it.
+
+    Only Ref2VA takes soundtrack references at all (see
+    ``_ref2va_references``) — FL2VA has no mechanism to tell H3 what anyone
+    sounds like, so asking it to "speak in their own voice" there would be
+    asking it to invent one, not clone one.
+    """
+    if model != "ref2va":
+        return False
+    speaker = speaker_for(shot, project)
+    return bool(speaker and (speaker.get("voice") or {}).get("path"))
+
+
+def _dialogue_visual_cue(
+    shot: dict, project: dict, clones_voice: bool = False
+) -> str:
     line = (shot.get("dialogue") or "").strip()
     if not line:
         return ""
     speaker = _speaker_name(shot, project)
+    if clones_voice:
+        style = (shot.get("dialogueStyle") or "").strip()
+        delivery = f" Delivery: {style}." if style else ""
+        return (
+            f"{speaker} speaks aloud, in their own voice from the reference "
+            f"clip, saying exactly: \"{line}\"{delivery}"
+        )
     return (
         f"{speaker} speaks the line with natural jaw and lip movement: "
         f"\"{line}\""
@@ -1099,6 +1345,38 @@ def _ref_source(ref: Any, paths: ShotPaths) -> str | None:
     if not rel:
         return None
     return rel if Path(rel).is_absolute() else paths.pipe_path(rel)
+
+
+def _sketchify_ref(src: str, sketch_dir: Path) -> str:
+    """An edge-detected, line-art copy of a reference image, for sketch mode.
+
+    A style word in the prompt is a nudge; what a reference image shows is
+    close to a mandate — Ref2VA's whole job is reproducing it (see
+    SKETCH_STYLE_PREFIX). So handing it a photo and asking in text for a
+    sketch fights the mechanism; handing it an actual line drawing does not.
+
+    A blur before edge-detection is what keeps this looking like loose
+    pencil strokes rather than a speckle of every JPEG artefact — verified
+    by hand against these boards' own reference photos.
+
+    Best-effort: falls back to the original photo if ffmpeg is missing or
+    the pass fails, since a photoreal reference still beats no reference.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not Path(src).exists():
+        return src
+    sketch_dir.mkdir(parents=True, exist_ok=True)
+    out = sketch_dir / f"{Path(src).stem}.png"
+    cmd = [
+        ffmpeg, "-y", "-i", src,
+        "-vf", "gblur=sigma=1.8,format=gray,edgedetect=mode=wires:high=0.35:low=0.12,negate",
+        "-frames:v", "1", str(out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
+        return str(out)
+    except Exception:  # noqa: BLE001 - a photo reference is a fine fallback
+        return src
 
 
 def _estimate_seconds(w: int, h: int, frames: int, steps: int,

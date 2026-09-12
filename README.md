@@ -417,6 +417,26 @@ thought to write. The scene description and the shot's cast go along as
 context marked *do not repeat*, since both are already prepended when the full
 prompt is assembled.
 
+The same 🪄 button rewrites three other fields, each with its own house
+style so the model does not blur what belongs where: the project's **scene
+description** (surroundings and visual style only — characters have their
+own separate description, so it is never asked to describe one), the
+project's **background sound** (grounded in the scene description, proposing
+concrete effects suited to that setting rather than a vague mood), and a
+shot's own **sound accents** (grounded in that shot's own prompt — the
+action, environment and materials in it — and explicitly never dialogue).
+
+**Dialogue, cloned twice over — once for real.** On a Ref2VA shot, the
+speaking character's own voice clip is already sent in as a soundtrack
+reference (see "A cast" below), and verified to be enough on its own for H3
+to speak a line correctly. So there, the shot is asked to speak the line
+aloud in that voice directly, and the Dialogue tab shows a note instead of
+the dub controls — a separate TTS take would be a second, independently
+synthesised copy of the same line, which is exactly the doubled-voice bug
+this replaced. FL2VA has no mechanism to tell H3 what anyone sounds like, so
+dialogue there stays a silent lip-movement cue for TTS to dub in afterwards,
+same as before.
+
 **Tabbed prompt editing.** Shot prompt, dialogue, sound accents and the
 resolved prompt share one tall pane rather than stacking four short boxes.
 Each tab carries a dot when its field has content, so tabbing away never hides
