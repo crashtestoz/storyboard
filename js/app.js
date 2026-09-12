@@ -4128,6 +4128,54 @@ function select(options, value, onChange) {
   return s;
 }
 
+// Match the library picker: a small trash icon, with the image opening replacement.
+function referenceActions(slot, label, replace, remove) {
+  slot.title = `Click to replace ${label}`;
+  slot.addEventListener("click", async () => {
+    try {
+      await replace();
+    } catch (err) {
+      toast(`Could not update reference: ${err.message}`, "error");
+    }
+  });
+  const button = el("button", "pick-delete", "🗑");
+  button.type = "button";
+  button.title = `Remove ${label}`;
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      await remove();
+    } catch (err) {
+      toast(`Could not update reference: ${err.message}`, "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function imageDrop(slot, upload) {
+  slot.ondragover = (event) => {
+    event.preventDefault();
+    slot.classList.add("dropping");
+  };
+  slot.ondragleave = () => slot.classList.remove("dropping");
+  slot.ondrop = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    slot.classList.remove("dropping");
+    const file = [...(event.dataTransfer.files || [])].find((f) => f.type.startsWith("image/"));
+    if (!file) return;
+    try {
+      await upload(file);
+    } catch (err) {
+      toast(`Upload failed: ${err.message}`, "error");
+    }
+  };
+}
+
 function refSlot(label, shot, key, pickerTitle = null) {
   const ref = shot[key];
   const slot = el("div", "ref-slot");
@@ -4163,39 +4211,33 @@ function refSlot(label, shot, key, pickerTitle = null) {
       img.src = ref.url || ref.path;
       slot.appendChild(img);
     }
-    const x = el("button", "clear-ref", "✕");
-    x.addEventListener("click", (e) => {
-      e.stopPropagation();
-      shot[key] = null;
-      markDirty();
-      render();
-    });
-    slot.appendChild(x);
+    slot.appendChild(referenceActions(slot, label,
+      () => pickRef(shot, key, pickerTitle),
+      async () => {
+        const current = shotById(shot.id);
+        if (!current) return;
+        current[key] = null;
+        markDirty();
+        render();
+        await saveNow();
+      }));
   } else {
     const l = el("div", "ref-slot-label");
     l.append(el("strong", null, label), el("span", null, "click to choose · or drop an image"));
     slot.appendChild(l);
     slot.addEventListener("click", () => pickRef(shot, key, pickerTitle));
-    slot.ondragover = (e) => {
-      e.preventDefault();
-      slot.classList.add("dropping");
-    };
-    slot.ondragleave = () => slot.classList.remove("dropping");
-    slot.ondrop = async (e) => {
-      e.preventDefault();
-      slot.classList.remove("dropping");
-      const f = [...(e.dataTransfer.files || [])].find((x) => x.type.startsWith("image/"));
-      if (!f) return;
-      try {
-        shot[key] = await API.uploadRef(state.slug, f);
-        markDirty();
-        await saveNow();
-        render();
-      } catch (err) {
-        toast(`Upload failed: ${err.message}`, "error");
-      }
-    };
   }
+  imageDrop(slot, async (file) => {
+    const slug = state.slug;
+    const chosen = await API.uploadRef(slug, file);
+    if (state.slug !== slug) return;
+    const current = shotById(shot.id);
+    if (!current) return;
+    current[key] = chosen;
+    markDirty();
+    render();
+    await saveNow();
+  });
   return slot;
 }
 
@@ -4208,14 +4250,33 @@ function shotReferenceImages(shot) {
     const img = el("img");
     img.src = ref.url || ref.path;
     slot.appendChild(img);
-    const x = el("button", "clear-ref", "✕");
-    x.addEventListener("click", (e) => {
-      e.stopPropagation();
-      shot.referenceImages.splice(i, 1);
+    const replace = async (chosen) => {
+      const current = shotById(shot.id);
+      if (!current || !current.referenceImages?.[i]) return;
+      current.referenceImages[i] = chosen;
       markDirty();
       render();
+      await saveNow();
+    };
+    slot.appendChild(referenceActions(slot, `reference image ${i + 1}`,
+      async () => {
+        const slug = state.slug;
+        const chosen = await chooseImage("Replace shot reference image");
+        if (chosen && state.slug === slug) await replace(chosen);
+      },
+      async () => {
+        const current = shotById(shot.id);
+        if (!current) return;
+        current.referenceImages.splice(i, 1);
+        markDirty();
+        render();
+        await saveNow();
+      }));
+    imageDrop(slot, async (file) => {
+      const slug = state.slug;
+      const chosen = await API.uploadRef(slug, file);
+      if (state.slug === slug) await replace(chosen);
     });
-    slot.appendChild(x);
     wrap.appendChild(slot);
   });
 
@@ -4499,11 +4560,14 @@ async function chooseMedia(title, kind) {
 }
 
 async function pickRef(shot, key, pickerTitle = null) {
+  const slug = state.slug;
   const chosen = await chooseImage(
     pickerTitle || (key === "startRef" ? "Choose a start frame" : "Choose an end frame")
   );
-  if (!chosen) return;
-  shot[key] = chosen;
+  if (!chosen || state.slug !== slug) return;
+  const current = shotById(shot.id);
+  if (!current) return;
+  current[key] = chosen;
   markDirty();
   await saveNow();
   render();

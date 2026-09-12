@@ -534,6 +534,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .ref-slot.filled { border-style: solid; border-color: var(--border); }
 
+.ref-slot .pick-delete { top: 4px; right: 4px; bottom: auto; z-index: 2; }
+
 .ref-slot .clear-ref {
   position: absolute;
   top: 4px;
