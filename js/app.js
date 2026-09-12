@@ -804,10 +804,16 @@ async function openBatchDialog() {
     return;
   }
   if (!state.batchSelection) state.batchSelection = new Set();
-  // Prune any selection left over from projects that no longer exist.
+  if (!state.batchOrder) state.batchOrder = [];
+  // Prune any selection/order left over from projects that no longer exist,
+  // then append any new ones at the end so a fresh board always shows up.
   const known = new Set(state.boards.map((b) => b.slug));
   [...state.batchSelection].forEach((slug) => {
     if (!known.has(slug)) state.batchSelection.delete(slug);
+  });
+  state.batchOrder = state.batchOrder.filter((slug) => known.has(slug));
+  state.boards.forEach((b) => {
+    if (!state.batchOrder.includes(b.slug)) state.batchOrder.push(b.slug);
   });
   paintBatchList();
 }
@@ -819,8 +825,16 @@ function paintBatchList() {
     host.appendChild(el("div", "empty-state", "No storyboards yet — use New."));
     return;
   }
-  state.boards.forEach((b) => {
-    const row = el("div", "open-row");
+  wireBatchDragList(host);
+  const bySlug = new Map(state.boards.map((b) => [b.slug, b]));
+  state.batchOrder.forEach((slug, i) => {
+    const b = bySlug.get(slug);
+    if (!b) return;
+    const row = el("div", "open-row batch-row");
+    row.dataset.slug = b.slug;
+    row.draggable = true;
+    row.appendChild(el("span", "batch-num", String(i + 1)));
+
     const main = el("div", "open-main");
 
     const titleRow = el("label", "batch-row-label");
@@ -849,12 +863,110 @@ function paintBatchList() {
       cb.checked = !cb.checked;
       cb.dispatchEvent(new Event("change"));
     });
+    wireBatchDrag(row, b.slug);
     host.appendChild(row);
   });
 }
 
+const BATCH_DRAG_TYPE = "application/x-storyboard-batch-project";
+let activeBatchDragSlug = null;
+
+function moveBatchRow(dragSlug, targetSlug = null, after = false) {
+  if (!dragSlug || !Array.isArray(state.batchOrder)) return false;
+  const from = state.batchOrder.indexOf(dragSlug);
+  if (from < 0) return false;
+
+  let to = targetSlug ? state.batchOrder.indexOf(targetSlug) : state.batchOrder.length;
+  if (to < 0) return false;
+  if (targetSlug && after) to += 1;
+  if (from < to) to -= 1;
+  if (from === to) return false;
+
+  const [moved] = state.batchOrder.splice(from, 1);
+  state.batchOrder.splice(to, 0, moved);
+  paintBatchList();
+  return true;
+}
+
+function draggedBatchSlug(e) {
+  return (
+    e.dataTransfer.getData(BATCH_DRAG_TYPE) ||
+    e.dataTransfer.getData("text/plain") ||
+    activeBatchDragSlug
+  );
+}
+
+function hasBatchDrag(e) {
+  return (
+    !!activeBatchDragSlug ||
+    Array.from(e.dataTransfer.types || []).includes(BATCH_DRAG_TYPE)
+  );
+}
+
+function wireBatchDrag(node, slug) {
+  node.addEventListener("dragstart", (e) => {
+    activeBatchDragSlug = slug;
+    node.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(BATCH_DRAG_TYPE, slug);
+    e.dataTransfer.setData("text/plain", slug);
+  });
+  node.addEventListener("dragend", () => {
+    activeBatchDragSlug = null;
+    clearDropClasses($("#batchList"));
+  });
+  node.addEventListener("dragover", (e) => {
+    if (!hasBatchDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const after = dropAfter(node, "y", e);
+    node.classList.add("drop-target");
+    node.classList.toggle("drop-before", !after);
+    node.classList.toggle("drop-after", after);
+  });
+  node.addEventListener("dragleave", () => {
+    node.classList.remove("drop-target", "drop-before", "drop-after");
+  });
+  node.addEventListener("drop", (e) => {
+    if (!hasBatchDrag(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const dragSlug = draggedBatchSlug(e);
+    const after = dropAfter(node, "y", e);
+    activeBatchDragSlug = null;
+    clearDropClasses($("#batchList"));
+    if (!dragSlug || dragSlug === slug) return;
+    moveBatchRow(dragSlug, slug, after);
+  });
+}
+
+function wireBatchDragList(list) {
+  if (list.dataset.dragListWired === "1") return;
+  list.dataset.dragListWired = "1";
+  list.addEventListener("dragover", (e) => {
+    if (!hasBatchDrag(e)) return;
+    if (e.target.closest(".batch-row")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    list.classList.add("dropping");
+  });
+  list.addEventListener("dragleave", (e) => {
+    if (!list.contains(e.relatedTarget)) list.classList.remove("dropping");
+  });
+  list.addEventListener("drop", (e) => {
+    if (!hasBatchDrag(e)) return;
+    if (e.target.closest(".batch-row")) return;
+    e.preventDefault();
+    const dragSlug = draggedBatchSlug(e);
+    activeBatchDragSlug = null;
+    clearDropClasses(list);
+    moveBatchRow(dragSlug);
+  });
+}
+
 async function startProjectBatch() {
-  const slugs = Array.from(state.batchSelection || []);
+  const order = state.batchOrder || [];
+  const slugs = order.filter((slug) => state.batchSelection && state.batchSelection.has(slug));
   if (!slugs.length) {
     toast("Select at least one project first.", "warn");
     return;

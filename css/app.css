@@ -1831,6 +1831,28 @@ textarea.ta-compact {
 .batch-row-label input[type="checkbox"] { flex: none; }
 .batch-row-label .open-name { margin-bottom: 0; }
 
+/* Batch rows are draggable to set render order — grab anywhere on the row
+   except the checkbox/label, which still toggles selection. */
+.batch-row { cursor: grab; }
+.batch-row.dragging { opacity: 0.4; cursor: grabbing; }
+.batch-row.drop-target { border-color: var(--accent); }
+.batch-row.drop-before { box-shadow: 0 -3px 0 var(--accent), var(--shadow-lg); }
+.batch-row.drop-after { box-shadow: 0 3px 0 var(--accent), var(--shadow-lg); }
+
+.batch-num {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  width: 15px;
+  flex: none;
+  text-align: center;
+}
+
+#batchList.dropping {
+  outline: 1px dashed var(--accent);
+  outline-offset: 3px;
+}
+
 .batch-banner {
   display: flex;
   align-items: center;
