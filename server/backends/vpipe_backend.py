@@ -278,10 +278,23 @@ class VpipeBackend(Backend):
     def prepare(self, shot: dict, project: dict, paths: ShotPaths) -> JobSpec:
         paths.ensure()
         model = shot.get("model") or "fl2va"
+        # Resolve every reference source before choosing the pipeline. Ref2VA
+        # skips an empty request; FL2VA can render that shot from text instead.
+        # Keep the board's choice intact so later chained shots still use it.
+        reference_fallback = model == "ref2va" and not _ref2va_references(
+            shot, project, paths, include_audio_refs=False
+        )
+        if reference_fallback:
+            model = "fl2va"
         cap = self.capability(model)
         if cap is None:
             raise ValueError(f"unknown model: {model}")
         if not cap.available:
+            if reference_fallback:
+                raise ValueError(
+                    "Ref2VA has no references and its FL2VA fallback is unavailable: "
+                    + (cap.unavailable_reason or "FL2VA is not available")
+                )
             raise ValueError(cap.unavailable_reason or f"{model} is not available")
 
         # Resolution is a project setting, not a per-shot one: a storyboard
@@ -422,6 +435,7 @@ class VpipeBackend(Backend):
                 + (f" · {frames}f" if cap.kind == "video" else "")
                 + f" · {steps} steps"
                 + (" · SKETCH" if sketch else " · DRAFT" if draft else "")
+                + (" · no references: using FL2VA" if reference_fallback else "")
             ),
         )
 

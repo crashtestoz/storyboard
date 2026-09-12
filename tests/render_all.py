@@ -51,6 +51,7 @@ from server.store import (                                     # noqa: E402
 )
 from server.backends.base import ShotPaths                      # noqa: E402
 from server.backends.vpipe_backend import (                     # noqa: E402
+    VpipeBackend,
     _ref2va_references,
     _resolved_prompt,
 )
@@ -329,6 +330,51 @@ def test_ref2va_reference_priority() -> None:
     check("draft Ref2VA skips audio references",
           "voice.wav" not in draft_names,
           str(draft_names))
+
+
+def test_ref2va_fallback(tmp: Path) -> None:
+    section("Ref2VA without references renders through FL2VA")
+    workspace = tmp / "fallback"
+    for model in ("FL2VA", "Ref2VA"):
+        (workspace / "models" / "local" / f"MiniMax-H3-{model}-8bit").mkdir(parents=True)
+    backend = VpipeBackend(workspace / "vpipe", workspace)
+    paths = ShotPaths(workspace=workspace, abs_dir=workspace / "shots/01",
+                      rel_dir="shots/01", data_dir=workspace)
+    board = a_board(1)
+    shot = board["shots"][0]
+    shot["model"] = "ref2va"
+    before = json.dumps(board, sort_keys=True)
+    job = backend.prepare(shot, board, paths)
+    pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
+    check("empty references select the text-to-video pipeline",
+          job.payload["model"] == "fl2va"
+          and any(s["type"] == "diffusion-conditioner" for s in pipeline["stages"])
+          and not any(s["type"] == "video-ref-encoder" for s in pipeline["stages"]))
+    check("fallback is explained and does not change the board",
+          "no references: using FL2VA" in job.summary
+          and json.dumps(board, sort_keys=True) == before)
+    for source in ("startRef", "endRef", "referenceImages", "character", "style", "chain"):
+        candidate = json.loads(before)
+        target = candidate["shots"][0]
+        ref = {"kind": "upload", "path": "refs/image.png"}
+        if source == "character":
+            candidate["characters"] = [{"id": "c1", "image": ref}]
+            target["characterIds"] = ["c1"]
+        elif source == "style":
+            candidate["styleRefs"] = [ref]
+        elif source == "chain":
+            target["startRef"] = {"kind": "chain", "resolved": "shots/00/frames/last.png"}
+        else:
+            target[source] = [ref] if source == "referenceImages" else ref
+        job = backend.prepare(target, candidate, paths)
+        check(f"{source} preserves Ref2VA", job.payload["model"] == "ref2va")
+    (workspace / "models/local/MiniMax-H3-FL2VA-8bit").rmdir()
+    try:
+        backend.prepare(shot, board, paths)
+    except ValueError as exc:
+        check("missing fallback model has a clear error", "FL2VA fallback is unavailable" in str(exc))
+    else:
+        check("missing fallback model has a clear error", False)
 
 
 def test_rewrite_reference_context() -> None:
@@ -660,6 +706,7 @@ def main() -> int:
         test_pending(tmp)
         test_dialogue_prompting()
         test_ref2va_reference_priority()
+        test_ref2va_fallback(tmp)
         test_rewrite_reference_context()
         test_soundscape_modes()
         test_clip_choice(tmp)
