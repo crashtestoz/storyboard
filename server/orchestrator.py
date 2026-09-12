@@ -107,6 +107,21 @@ class Orchestrator:
         # has not finished the job.
         self._assembly: dict[str, Any] | None = None
 
+        # "Create Stills" — a separate, much shorter job (three Krea-2 stills,
+        # not a shot render), but it still shares the one GPU vpipe drives, so
+        # it gets its own thread and its own small piece of status rather than
+        # reusing _runs/_order, which are shaped around a whole render batch.
+        self._stills_thread: threading.Thread | None = None
+        self._stills_shot_id: str | None = None
+        self._stills_phase: str = ""
+        self._stills_progress: float = 0.0
+        self._stills_error: str = ""
+        self._stills_log: list[dict[str, str]] = []
+        # Filled in as each phase finishes, not just at the end — so the UI
+        # can show "start" the moment it is done instead of waiting on "mid"
+        # and "end" too.
+        self._stills_results: dict[str, Any] = {}
+
     # ------------------------------------------------------------------ #
     # status
     # ------------------------------------------------------------------ #
@@ -114,6 +129,11 @@ class Orchestrator:
     @property
     def busy(self) -> bool:
         t = self._thread
+        return t is not None and t.is_alive()
+
+    @property
+    def stills_busy(self) -> bool:
+        t = self._stills_thread
         return t is not None and t.is_alive()
 
     def status(self) -> dict[str, Any]:
@@ -130,6 +150,15 @@ class Orchestrator:
                 "cancelRequested": self._cancel.is_set(),
                 "queuedBecause": dict(self._queued_because),
                 "assembly": self._assembly,
+                "stills": {
+                    "busy": self.stills_busy,
+                    "shotId": self._stills_shot_id,
+                    "phase": self._stills_phase,
+                    "progress": round(self._stills_progress, 1),
+                    "error": self._stills_error,
+                    "log": self._stills_log[-MAX_LOG_LINES:],
+                    "results": dict(self._stills_results),
+                },
             }
 
     # ------------------------------------------------------------------ #
@@ -139,6 +168,8 @@ class Orchestrator:
     def start(self, slug: str, shot_ids: list[str] | None = None) -> dict[str, Any]:
         if self.busy:
             raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("still previews are generating — one GPU job at a time")
 
         ok, msg = self.backend.health()
         if not ok:
@@ -256,6 +287,166 @@ class Orchestrator:
         return self.status()
 
     # ------------------------------------------------------------------ #
+    # stills ("Create Stills" — start/mid/end previews, not a shot render)
+    # ------------------------------------------------------------------ #
+
+    # Order matters here: it is also the order shown in the UI.
+    STILL_PHASES = (
+        ("start", "The very start of this shot, before the described action "
+                  "gets underway — the opening pose and composition"),
+        ("mid", "The midpoint of this shot, in the middle of the described "
+                "action"),
+        ("end", "The very end of this shot, the instant the described "
+                "action finishes — the closing pose and composition"),
+    )
+
+    def create_stills(
+        self, slug: str, shot_id: str, phase_prompts: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        if self.busy:
+            raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("stills are already generating for this board")
+
+        ok, msg = self.backend.health()
+        if not ok:
+            raise RuntimeError(msg)
+
+        board = self.store.load(slug)
+        shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
+        if shot is None:
+            raise RuntimeError("shot not found")
+        if not (shot.get("prompt") or "").strip():
+            raise RuntimeError("nothing to sketch — this shot has no prompt yet")
+
+        with self._lock:
+            self._cancel.clear()
+            self._stills_shot_id = shot_id
+            self._stills_phase = "starting"
+            self._stills_progress = 0.0
+            self._stills_error = ""
+            self._stills_log = []
+            self._stills_results = {}
+
+        self._stills_thread = threading.Thread(
+            target=self._run_stills, args=(slug, shot_id, phase_prompts or {}),
+            name="create-stills", daemon=True,
+        )
+        self._stills_thread.start()
+        return self.status()
+
+    def _run_stills(
+        self, slug: str, shot_id: str, phase_prompts: dict[str, str]
+    ) -> None:
+        try:
+            board = self.store.load(slug)
+            idx = next(
+                (i for i, s in enumerate(board["shots"]) if s["id"] == shot_id), None
+            )
+            if idx is None:
+                raise RuntimeError("shot not found")
+            shot = board["shots"][idx]
+            base_rel = f"{self.store.shot_rel_dir(slug, idx + 1)}/stills"
+            results: dict[str, Any] = {}
+
+            # "Small" (the default) always uses draft geometry regardless of
+            # this board's own draft toggle — fast, and fine for judging
+            # composition. "Large" renders at the project's real resolution
+            # and step count instead, slower but big enough to feed back in
+            # as a reference image. Sketch's line-art styling is a separate,
+            # opt-in concern this button does not imply either way.
+            large = ((board.get("defaults") or {}).get("stillsSize") or "small") == "large"
+            still_project = dict(board)
+            still_project["defaults"] = {
+                **(board.get("defaults") or {}), "draft": not large, "sketch": False,
+            }
+
+            prev_still: Path | None = None
+            for i, (key, phase_hint) in enumerate(self.STILL_PHASES):
+                if self._cancel.is_set():
+                    raise RuntimeError("stopped before completion")
+                with self._lock:
+                    self._stills_phase = key
+                    self._stills_progress = (i / len(self.STILL_PHASES)) * 100
+
+                # A synthetic shot, not a real one: always Krea-2 regardless
+                # of what this shot is set to render as, since stills are a
+                # fast preview, not the shot's own model. Scene, cast and any
+                # style refs still come from _resolved_prompt via prepare().
+                still_shot = dict(shot)
+                still_shot["model"] = "krea2-still"
+                still_shot["steps"] = 8 if large else 4
+                # An LLM-extracted description of what THIS shot's own prompt
+                # actually establishes at this point in the action (see
+                # llm.describe_still_phases) beats a generic phase label —
+                # "the start of this shot" means nothing to a model with no
+                # sense of time, but "a distant shape high above the ocean"
+                # does. Falls back to the old generic hint per-phase if the
+                # extraction is unavailable or didn't cover this one.
+                extracted = (phase_prompts or {}).get(key)
+                still_shot["prompt"] = (
+                    extracted or f"{phase_hint}. {shot.get('prompt') or ''}".strip()
+                )
+                if prev_still is not None:
+                    # Build each later still from the one before it (img2img,
+                    # see prepare()'s startRef handling for krea2-still)
+                    # instead of three independent rolls that only share a
+                    # prompt — that was producing a different-looking Falcon
+                    # each time. Moderate strength: enough freedom to move
+                    # toward this phase's prompt, not enough to redesign the
+                    # subject. The *first* still keeps dict(shot)'s own
+                    # startRef untouched — if the shot already has a Frame
+                    # Anchor image set, that is a deliberate seed for the
+                    # opening still, not something to discard.
+                    still_shot["startRef"] = str(prev_still)
+                    still_shot["imgStrength"] = 0.55
+                paths = ShotPaths(
+                    workspace=self.workspace,
+                    abs_dir=self.data_dir / base_rel / key,
+                    rel_dir=f"{base_rel}/{key}",
+                    data_dir=self.data_dir,
+                )
+                spec = self.backend.prepare(still_shot, still_project, paths)
+
+                def on_event(ev: ProgressEvent, key=key) -> None:
+                    if ev.log_line:
+                        with self._lock:
+                            self._stills_log.append(
+                                {"level": ev.log_level, "text": f"[{key}] {ev.log_line}"}
+                            )
+
+                result = self.backend.run(spec, on_event, self._cancel.is_set)
+                if result.cancelled or self._cancel.is_set():
+                    raise RuntimeError("stopped before completion")
+                if result.error or result.exit_code != 0:
+                    raise RuntimeError(
+                        result.error or f"vpipe exited {result.exit_code}"
+                    )
+                out = next((p for p in spec.expected_outputs if p.exists()), None)
+                if out is None:
+                    raise RuntimeError(f"{key} still did not produce an image")
+                results[key] = {"url": self._as_url(out)}
+                prev_still = out
+
+                # Save and publish this phase's result now, not just at the
+                # end — so "start" shows up the moment it is done instead of
+                # waiting on "mid" and "end" too, and so a cancel or crash
+                # partway through still leaves whatever finished in place.
+                with self._lock:
+                    self._stills_results = dict(results)
+                fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+                if fresh_shot is not None:
+                    fresh_shot["stills"] = dict(results)
+                    self.store.save(slug, fresh_board)
+
+            with self._lock:
+                self._stills_progress = 100.0
+                self._stills_phase = "done"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            with self._lock:
+                self._stills_error = str(exc)
+
+    # ------------------------------------------------------------------ #
     # the batch
     # ------------------------------------------------------------------ #
 
@@ -275,6 +466,26 @@ class Orchestrator:
             with self._lock:
                 self._current = None
                 self._batch_ended = time.time()
+
+    def _reload_shot(self, slug: str, shot_id: str) -> tuple[dict, dict | None]:
+        """The board and this shot, re-read from disk — not the copy this run
+        started from.
+
+        A render can run for tens of minutes, and every save before this one
+        saved *the whole board*. Writing back the in-memory copy loaded at
+        the top of ``_run_one`` would silently discard any edit made
+        anywhere on the board while it was in flight: a different shot's
+        prompt, the scene description, a shot added from the UI mid-render —
+        all of it, gone the moment this shot's result was saved. Re-reading
+        right before every save, and updating only the fields a render
+        actually owns, is what keeps a long render from clobbering work that
+        happened beside it. Returns ``(board, None)`` if the shot was
+        deleted from under a running render — nothing to attach the result
+        to, but the board itself still needs to come back to the caller.
+        """
+        board = self.store.load(slug)
+        shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
+        return board, shot
 
     def _run_one(self, slug: str, shot_id: str) -> None:
         board = self.store.load(slug)
@@ -298,8 +509,10 @@ class Orchestrator:
                             "shot and re-run to release this one",
                 }
             )
-            shot.update(status="blocked", progress=0)
-            self.store.save(slug, board)
+            fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+            if fresh_shot is not None:
+                fresh_shot.update(status="blocked", progress=0)
+                self.store.save(slug, fresh_board)
             return
 
         # ---- prepare ---------------------------------------------------
@@ -315,8 +528,10 @@ class Orchestrator:
             run.status = "failed"
             run.reason = f"could not prepare: {exc}"
             run.log.append({"level": "ERROR", "text": run.reason})
-            shot.update(status="failed", progress=0)
-            self.store.save(slug, board)
+            fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+            if fresh_shot is not None:
+                fresh_shot.update(status="failed", progress=0)
+                self.store.save(slug, fresh_board)
             return
 
         # Stamp the start so validation can tell this run's outputs from an
@@ -330,8 +545,10 @@ class Orchestrator:
         run.started_at = time.time()
         with self._lock:
             self._current = shot_id
-        shot.update(status="running", progress=0)
-        self.store.save(slug, board)
+        fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+        if fresh_shot is not None:
+            fresh_shot.update(status="running", progress=0)
+            self.store.save(slug, fresh_board)
 
         # ---- run -------------------------------------------------------
         def on_event(ev: ProgressEvent) -> None:
@@ -352,8 +569,10 @@ class Orchestrator:
             run.status = "interrupted"
             run.reason = "Stopped before completion."
             run.log.append({"level": "INFO", "text": run.reason})
-            shot.update(status="interrupted", progress=round(run.progress))
-            self.store.save(slug, board)
+            fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+            if fresh_shot is not None:
+                fresh_shot.update(status="interrupted", progress=round(run.progress))
+                self.store.save(slug, fresh_board)
             return
 
         # Persist the log next to the outputs before validating, so a run that
@@ -371,24 +590,50 @@ class Orchestrator:
         outputs = [p for p in spec.expected_outputs if p.exists()]
         run.outputs = [self._as_url(p) for p in outputs]
 
-        shot.update(
-            status=validation.verdict,
-            progress=round(run.progress),
-            runtimeSeconds=round(result.seconds, 1),
-            outputs=run.outputs,
-            validation=run.validation,
-            thumb=self._pick_thumb(spec),
-            logUrl=log_url,
-            # so a draft is never mistaken for a finished shot later
-            renderedAs="draft" if spec.payload.get("draft") else "final",
-            # What this run was of. Recorded whatever the verdict, because it
-            # describes the inputs rather than the outcome — a failed run is
-            # picked up again by its status, not by looking changed.
-            renderFingerprint=render_fingerprint(shot, board),
-        )
-        if validation.ok:
-            self._relay_speech(shot, paths.abs_dir, run)
-        self.store.save(slug, board)
+        # Computed from *this run's own* board and shot — the snapshot it was
+        # actually rendered against, never a freshly re-read copy. The whole
+        # point of a fingerprint is catching a clip that no longer matches
+        # what the board currently says; computing it from a post-render
+        # reload would make an edit made *during* the render look like it was
+        # already accounted for, and hide exactly the staleness this exists
+        # to catch.
+        fingerprint = render_fingerprint(shot, board)
+
+        # True when this render asked H3 to speak the dialogue itself, in the
+        # cloned voice, instead of staying silent for TTS to dub in
+        # afterwards (see vpipe_backend.py's _clones_voice). Relaying a
+        # leftover TTS take onto a clip that already speaks the line is
+        # exactly the "second voice" bug that feature exists to remove —
+        # so here it must not run, no matter how old a dialogue.wav is
+        # sitting in the shot's folder from before that shot ever cloned its
+        # own voice.
+        voice_cloned_natively = bool(spec.payload.get("voiceClonedNatively"))
+
+        fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
+        if fresh_shot is not None:
+            fresh_shot.update(
+                status=validation.verdict,
+                progress=round(run.progress),
+                runtimeSeconds=round(result.seconds, 1),
+                outputs=run.outputs,
+                validation=run.validation,
+                thumb=self._pick_thumb(spec),
+                logUrl=log_url,
+                # so a draft is never mistaken for a finished shot later
+                renderedAs="draft" if spec.payload.get("draft") else "final",
+                renderFingerprint=fingerprint,
+            )
+            if voice_cloned_natively:
+                # A dub from before this shot cloned its own voice would
+                # otherwise keep winning in the preview (it is preferred over
+                # the shot's own outputs) and look like the fresh render is
+                # still doubled, when the clip itself is clean. The old
+                # dialogue.wav / clip-dubbed.mp4 files are left on disk —
+                # harmless, just no longer referenced.
+                fresh_shot["dubUrl"] = None
+            elif validation.ok:
+                self._relay_speech(fresh_shot, paths.abs_dir, run)
+            self.store.save(slug, fresh_board)
 
         level = "OK" if validation.ok else "ERROR"
         run.log.append(
@@ -503,8 +748,13 @@ class Orchestrator:
             return
 
         url = self._as_url(result.path)
-        board["finalVideo"] = result.to_json(url)
-        self.store.save(slug, board)
+        # Re-read rather than reuse the copy loaded at the top of this
+        # method: assembling can take a while for a long board, and saving
+        # that stale copy would discard any edit made anywhere on the board
+        # while the clips were being joined.
+        fresh_board = self.store.load(slug)
+        fresh_board["finalVideo"] = result.to_json(url)
+        self.store.save(slug, fresh_board)
 
         message = (
             f"{len(result.parts)} clip(s), {result.seconds:.1f}s"

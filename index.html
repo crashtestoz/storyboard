@@ -59,19 +59,25 @@
       <section>
         <div class="section-label">
           Scene description
-          <span class="hint">— reused every shot</span>
+          <div class="header-spacer"></div>
+          <span id="sceneWandSlot"></span>
         </div>
+        <div class="field-note">— reused every shot</div>
         <textarea id="sceneDescription" rows="7"
           placeholder="Subject appearance and overall style — what should stay true across every shot."></textarea>
+        <div class="proposal-slot" id="sceneProposalSlot"></div>
       </section>
 
       <section>
         <div class="section-label">
           Background sound
-          <span class="hint">— reused every shot</span>
+          <div class="header-spacer"></div>
+          <span id="soundscapeWandSlot"></span>
         </div>
+        <div class="field-note">— reused every shot</div>
         <textarea id="soundscape" rows="4"
           placeholder="The ambient bed under every clip — e.g. “Deep engine roar, rushing wind, the hiss of spray off the water.” Appended after each shot's own description, which is where H3 expects sound cues."></textarea>
+        <div class="proposal-slot" id="soundscapeProposalSlot"></div>
         <label class="toggle rail-toggle">
           <input type="checkbox" id="soundscapeInShots" checked>
           <span class="toggle-track"></span>
@@ -244,6 +250,27 @@
           <span>Render drafts</span>
         </label>
         <div class="cast-note" id="draftNote" style="margin-top:var(--sp-2)"></div>
+        <label class="toggle" id="sketchToggleWrap" style="margin-top:var(--sp-3)">
+          <input type="checkbox" id="sketchToggle">
+          <span class="toggle-track"></span>
+          <span>Sketch preview <span class="hint-inline">— pencil outlines, silent, fastest</span></span>
+        </label>
+        <div class="cast-note" id="sketchNote" style="margin-top:var(--sp-2)"></div>
+        </section>
+
+        <section>
+        <div class="section-label">
+          Create Stills
+          <span class="hint">— the start/mid/end preview button</span>
+        </div>
+        <div class="field">
+          <label>Size</label>
+          <select id="stillsSize">
+            <option value="small">Small — fast preview</option>
+            <option value="large">Large — reference quality (slower)</option>
+          </select>
+        </div>
+        <div class="field-note" id="stillsSizeNote"></div>
         </section>
 
         <section>
@@ -322,7 +349,7 @@
   <div id="helpDialog" class="modal" hidden>
     <div class="modal-card" style="width:min(920px,100%)">
       <div class="modal-head">
-        <span>Camera angles &amp; shot sizes</span>
+        <span>Camera angles, shot sizes &amp; moves</span>
         <div class="header-spacer"></div>
         <button class="btn btn-ghost btn-sm" id="helpClose">Close</button>
       </div>
@@ -398,30 +425,36 @@
           </div>
           <svg class="help-diagram" viewBox="0 0 640 480" role="img"
                aria-label="A standing figure with seven nested crop lines, from an extreme close-up on the head down to a full shot of the whole body.">
-            <circle class="help-fig" cx="220" cy="60" r="32"/>
-            <rect class="help-fig" x="212" y="92" width="16" height="14"/>
-            <polygon class="help-fig" points="180,106 260,106 245,270 195,270"/>
-            <polygon class="help-fig" points="195,270 220,270 214,455 192,455"/>
-            <polygon class="help-fig" points="220,270 245,270 248,455 226,455"/>
-            <ellipse class="help-fig" cx="200" cy="458" rx="15" ry="6"/>
-            <ellipse class="help-fig" cx="238" cy="458" rx="15" ry="6"/>
+            <!-- The whole composition is drawn off-center (bunched toward
+                 x=85..405) so the crop-size tick labels have room to the
+                 right; shifted here so it reads centered in the viewBox
+                 instead of left-heavy. -->
+            <g transform="translate(75,0)">
+              <circle class="help-fig" cx="220" cy="60" r="32"/>
+              <rect class="help-fig" x="212" y="92" width="16" height="14"/>
+              <polygon class="help-fig" points="180,106 260,106 245,270 195,270"/>
+              <polygon class="help-fig" points="195,270 220,270 214,455 192,455"/>
+              <polygon class="help-fig" points="220,270 245,270 248,455 226,455"/>
+              <ellipse class="help-fig" cx="200" cy="458" rx="15" ry="6"/>
+              <ellipse class="help-fig" cx="238" cy="458" rx="15" ry="6"/>
 
-            <rect class="help-crop" x="175" y="15" width="90" height="80"/>
-            <rect class="help-crop" x="162" y="15" width="116" height="130"/>
-            <rect class="help-crop" x="150" y="15" width="140" height="180"/>
-            <rect class="help-crop" x="125" y="15" width="190" height="255"/>
-            <rect class="help-crop" x="110" y="15" width="220" height="325"/>
-            <rect class="help-crop" x="100" y="15" width="240" height="375"/>
-            <rect class="help-crop" x="85" y="15" width="270" height="445"/>
+              <rect class="help-crop" x="175" y="15" width="90" height="80"/>
+              <rect class="help-crop" x="162" y="15" width="116" height="130"/>
+              <rect class="help-crop" x="150" y="15" width="140" height="180"/>
+              <rect class="help-crop" x="125" y="15" width="190" height="255"/>
+              <rect class="help-crop" x="110" y="15" width="220" height="325"/>
+              <rect class="help-crop" x="100" y="15" width="240" height="375"/>
+              <rect class="help-crop" x="85" y="15" width="270" height="445"/>
 
-            <g class="help-tick">
-              <line x1="265" y1="95" x2="290" y2="95"/><text x="296" y="99">ECU</text>
-              <line x1="278" y1="145" x2="303" y2="145"/><text x="309" y="149">CU</text>
-              <line x1="290" y1="195" x2="315" y2="195"/><text x="321" y="199">MCU</text>
-              <line x1="315" y1="270" x2="340" y2="270"/><text x="346" y="274">MS</text>
-              <line x1="330" y1="340" x2="355" y2="340"/><text x="361" y="344">CS</text>
-              <line x1="340" y1="390" x2="365" y2="390"/><text x="371" y="394">MFS</text>
-              <line x1="355" y1="460" x2="380" y2="460"/><text x="386" y="464">FS</text>
+              <g class="help-tick">
+                <line x1="265" y1="95" x2="290" y2="95"/><text x="296" y="99">ECU</text>
+                <line x1="278" y1="145" x2="303" y2="145"/><text x="309" y="149">CU</text>
+                <line x1="290" y1="195" x2="315" y2="195"/><text x="321" y="199">MCU</text>
+                <line x1="315" y1="270" x2="340" y2="270"/><text x="346" y="274">MS</text>
+                <line x1="330" y1="340" x2="355" y2="340"/><text x="361" y="344">CS</text>
+                <line x1="340" y1="390" x2="365" y2="390"/><text x="371" y="394">MFS</text>
+                <line x1="355" y1="460" x2="380" y2="460"/><text x="386" y="464">FS</text>
+              </g>
             </g>
           </svg>
           <dl class="help-legend">
@@ -435,14 +468,130 @@
           </dl>
         </section>
 
+        <section class="help-section">
+          <div class="section-label">
+            Camera movement
+            <span class="hint">— how the camera itself moves during the shot, not what it sees</span>
+          </div>
+          <svg class="help-diagram" viewBox="0 0 640 320" role="img"
+               aria-label="Six camera moves: dolly, pedestal and truck move the camera itself through space; pan, tilt and roll rotate it in place.">
+
+            <!-- dolly: move forward/back along where the lens points -->
+            <use href="#move-cam-icon" class="help-cam" transform="translate(96.5,46)"/>
+            <line class="help-move-arrow" x1="55" y1="110" x2="165" y2="110"
+                  marker-start="url(#move-arrow-head)" marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="110" y="170" text-anchor="middle">DOLLY</text>
+
+            <!-- pedestal: raise/lower the whole camera -->
+            <use href="#move-cam-icon" class="help-cam" transform="translate(306.5,46)"/>
+            <line class="help-move-arrow" x1="320" y1="80" x2="320" y2="140"
+                  marker-start="url(#move-arrow-head)" marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="320" y="170" text-anchor="middle">PEDESTAL</text>
+
+            <!-- truck: move sideways, perpendicular to where the lens points
+                 (icon rotated 90° so the lens direction reads against the
+                 horizontal arrow, the same way dolly's arrow reads with it) -->
+            <g transform="translate(530,55) rotate(-90)">
+              <use href="#move-cam-icon" class="help-cam" x="-13.5" y="-9"/>
+            </g>
+            <line class="help-move-arrow" x1="475" y1="110" x2="585" y2="110"
+                  marker-start="url(#move-arrow-head)" marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="530" y="170" text-anchor="middle">TRUCK</text>
+
+            <!-- pan: swivel left/right from a fixed position -->
+            <use href="#move-cam-icon" class="help-cam" transform="translate(96.5,236)"/>
+            <path class="help-move-arrow" d="M60,235 Q110,195 160,235"
+                  marker-start="url(#move-arrow-head)" marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="110" y="285" text-anchor="middle">PAN</text>
+
+            <!-- tilt: swivel up/down from a fixed position -->
+            <use href="#move-cam-icon" class="help-cam" transform="translate(306.5,236)"/>
+            <path class="help-move-arrow" d="M350,225 Q385,245 350,265"
+                  marker-start="url(#move-arrow-head)" marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="320" y="285" text-anchor="middle">TILT</text>
+
+            <!-- roll: rotate around the lens axis -->
+            <use href="#move-cam-icon" class="help-cam" transform="translate(516.5,236)"/>
+            <path class="help-move-arrow" d="M543,229 A16,16 0 1 1 527,245"
+                  marker-end="url(#move-arrow-head)"/>
+            <text class="help-label" x="530" y="285" text-anchor="middle">ROLL</text>
+
+            <defs>
+              <g id="move-cam-icon">
+                <rect x="0" y="3" width="20" height="12" rx="2"/>
+                <polygon points="20,6 27,3 27,15 20,12"/>
+                <circle cx="6" cy="9" r="3.4" class="help-cam-lens"/>
+              </g>
+              <marker id="move-arrow-head" viewBox="0 0 10 10" refX="5" refY="5"
+                      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" class="help-move-arrow-head"/>
+              </marker>
+            </defs>
+          </svg>
+          <dl class="help-legend">
+            <div><dt>Dolly</dt><dd>move the whole camera toward or away from the subject — not a zoom, the camera itself travels.</dd></div>
+            <div><dt>Pedestal</dt><dd>raise or lower the whole camera, keeping it level.</dd></div>
+            <div><dt>Truck</dt><dd>move the whole camera sideways, left or right, at the same distance from the subject.</dd></div>
+            <div><dt>Pan</dt><dd>swivel the camera left or right from a fixed spot, like turning your head.</dd></div>
+            <div><dt>Tilt</dt><dd>swivel the camera up or down from a fixed spot, like nodding.</dd></div>
+            <div><dt>Roll</dt><dd>rotate the camera around the lens axis, tilting the horizon — used sparingly, for disorientation or a stylised look.</dd></div>
+          </dl>
+        </section>
+
       </div>
       <div class="modal-foot">
         These describe how a shot's prompt is framed — mention them in the shot
-        prompt itself (e.g. "a cowboy shot, hip level") the same way you'd
-        describe a camera move.
+        prompt itself (e.g. "a cowboy shot, hip level, a slow dolly in") the
+        same way you'd describe any other camera move.
       </div>
     </div>
   </div>
+
+  <!-- Stage-tile icons: hand-drawn to match this app's existing inline-SVG
+       style (see the help dialog above) rather than pulling in Font Awesome
+       or another icon font. This app runs fully offline with no build step
+       and no external assets (see README "Installation") — a CDN-hosted
+       icon font would be the first thing here that stops working without a
+       network connection, and the app already has its own house style for
+       icons (stroke-based, single colour, inherits currentColor) that these
+       just extend. Referenced via <use href="#stage-icon-KEY"> in js/app.js. -->
+  <svg style="position:absolute;width:0;height:0" aria-hidden="true">
+    <defs>
+      <g id="stage-icon-prep" class="stage-icon">
+        <path d="M3 8l1.4-4h4l-1 4M8.6 8l1-4h4l-1 4M14.6 8l1-4h4l-1.4 4"/>
+        <rect x="3" y="8" width="18" height="12" rx="1.2"/>
+      </g>
+      <g id="stage-icon-refs" class="stage-icon">
+        <rect x="3" y="4.5" width="18" height="15" rx="1.5"/>
+        <circle class="stage-icon-dot" cx="8.5" cy="9.5" r="1.4"/>
+        <path d="M21 15.5l-5.2-5-3.8 4-2.8-2.8L3 16"/>
+      </g>
+      <g id="stage-icon-gen" class="stage-icon stage-icon-solid">
+        <path d="M12 3.5l1.5 4.6 4.6 1.5-4.6 1.5-1.5 4.6-1.5-4.6L6 9.6l4.5-1.5z"/>
+        <path d="M18.5 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/>
+      </g>
+      <g id="stage-icon-dev" class="stage-icon">
+        <rect x="6" y="3" width="12" height="18" rx="1"/>
+        <circle class="stage-icon-dot" cx="3.3" cy="6" r="0.9"/><circle class="stage-icon-dot" cx="3.3" cy="10" r="0.9"/>
+        <circle class="stage-icon-dot" cx="3.3" cy="14" r="0.9"/><circle class="stage-icon-dot" cx="3.3" cy="18" r="0.9"/>
+        <circle class="stage-icon-dot" cx="20.7" cy="6" r="0.9"/><circle class="stage-icon-dot" cx="20.7" cy="10" r="0.9"/>
+        <circle class="stage-icon-dot" cx="20.7" cy="14" r="0.9"/><circle class="stage-icon-dot" cx="20.7" cy="18" r="0.9"/>
+      </g>
+      <g id="stage-icon-voice" class="stage-icon">
+        <rect x="9.3" y="2.5" width="5.4" height="11" rx="2.7"/>
+        <path d="M5.5 11a6.5 6.5 0 0 0 13 0"/>
+        <path d="M12 17.5v3.2M9 20.7h6"/>
+      </g>
+      <g id="stage-icon-check" class="stage-icon">
+        <circle cx="10.3" cy="10.3" r="6.3"/>
+        <path d="M20 20l-4.6-4.6"/>
+      </g>
+      <g id="stage-icon-done" class="stage-icon">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M7.7 12.5l2.6 2.6 5.6-6.2"/>
+      </g>
+    </defs>
+  </svg>
 
   <div id="toast" class="toast" hidden></div>
 

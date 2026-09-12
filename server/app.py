@@ -13,13 +13,15 @@ Routes
 ``PUT  /api/boards/<slug>``     save one board
 ``DELETE /api/boards/<slug>``   remove the board file (keeps rendered media)
 ``POST /api/boards/<slug>/rename``   rename ``{name}`` — moves the folder too
-``POST /api/rewrite``          restyle a shot prompt with a local language model
+``POST /api/rewrite``          restyle a shot prompt, the scene description, or the
+                                background sound with a local language model
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/render``            start ``{slug, shotIds?}``
+``POST /api/stills``            start/mid/end Krea-2 previews ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
 ``POST /api/server-settings``   set the global projects folder ``{dataDir}`` —
@@ -46,8 +48,10 @@ from . import assemble as assembly
 from .backends.base import Backend
 from .dubbing import dub_shot, speaker_for
 from .orchestrator import Orchestrator
-from .llm import LLMService, describe_character, rewrite_prompt
+from .llm import LLMService, describe_character, describe_still_phases, rewrite_prompt
+from .llm import load_services as load_llm_services
 from .store import Store, default_shot, render_fingerprint, stale_reason
+from .tts import load_engines as load_tts_engines
 from .tts.base import TTSEngine
 
 MAX_UPLOAD = 32 * 1024 * 1024
@@ -99,9 +103,8 @@ class Context:
                  backend: Backend, orch: Orchestrator, *,
                  data_dir: Path | None = None,
                  data_dir_source: str = "default",
-                 tts_engines: dict[str, TTSEngine] | None = None,
+                 vpipe_binary: Path | None = None,
                  default_tts: str = "none",
-                 llm_services: dict[str, LLMService] | None = None,
                  default_llm: str = "none"):
         self.ui_root = ui_root.resolve()
         self.workspace = workspace.resolve()
@@ -117,18 +120,33 @@ class Context:
         self.store = store
         self.backend = backend
         self.orch = orch
-        self.tts_engines = tts_engines or {}
+        self.vpipe_binary = vpipe_binary
         self.default_tts = default_tts
-        self.llm_services = llm_services or {}
         self.default_llm = default_llm
         # Set by the /restart endpoint; main() checks this after the server
         # loop exits to decide whether to exec a fresh process or just stop.
         self.restart_requested = False
 
-    def llm(self, sid: str | None) -> LLMService:
-        return self.llm_services.get(sid or self.default_llm) or self.llm_services.get(
-            "none"
+    # tts-services.json and llm-services.json are the "linked, not
+    # installed" configs this app explicitly documents as editable without
+    # a code change — but until now that edit still needed a full server
+    # restart to take effect, because the services were built once at
+    # startup and cached for the process's lifetime. Re-reading here instead
+    # means editing either file takes effect on the very next dub, rewrite,
+    # transcribe or render — not after a restart. Both files are small and
+    # these classes do no eager I/O at construction, so re-parsing on every
+    # call is not worth caching.
+    def tts_engines(self) -> dict[str, TTSEngine]:
+        return load_tts_engines(
+            self.ui_root, vpipe_binary=self.vpipe_binary, workspace=self.workspace
         )
+
+    def llm_services(self) -> dict[str, LLMService]:
+        return load_llm_services(self.ui_root)
+
+    def llm(self, sid: str | None) -> LLMService:
+        services = self.llm_services()
+        return services.get(sid or self.default_llm) or services.get("none")
 
     def transcriber(self, kind: str | None) -> TTSEngine | None:
         """A healthy engine that can transcribe — the asked-for one if it can.
@@ -139,18 +157,18 @@ class Context:
         pointless when another configured service could do the job. So this
         prefers what was asked for and otherwise finds one that works.
         """
-        wanted = self.tts_engines.get(kind or self.default_tts)
+        engines = self.tts_engines()
+        wanted = engines.get(kind or self.default_tts)
         if wanted and wanted.supports_transcription and wanted.health()[0]:
             return wanted
-        for eng in self.tts_engines.values():
+        for eng in engines.values():
             if eng.supports_transcription and eng.health()[0]:
                 return eng
         return None
 
     def tts(self, kind: str | None) -> TTSEngine:
-        return self.tts_engines.get(kind or self.default_tts) or self.tts_engines.get(
-            "none"
-        )
+        engines = self.tts_engines()
+        return engines.get(kind or self.default_tts) or engines.get("none")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -281,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
                     "llm": {
                         "default": ctx.default_llm,
-                        "services": [s.to_json() for s in ctx.llm_services.values()],
+                        "services": [s.to_json() for s in ctx.llm_services().values()],
                     },
                     "tts": {
                         "default": ctx.default_tts,
@@ -295,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "supportsTranscription": eng.supports_transcription,
                                 "voices": [v.to_json() for v in eng.voices()],
                             }
-                            for kind, eng in ctx.tts_engines.items()
+                            for kind, eng in ctx.tts_engines().items()
                         ],
                     },
                 }
@@ -418,36 +436,95 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._read_json() or {}
             slug = payload.get("slug")
             shot_id = payload.get("shotId")
-            if not slug or not shot_id:
-                raise ValueError("slug and shotId are required")
+            field = payload.get("field")
+            if not slug:
+                raise ValueError("slug is required")
+            if not shot_id and field not in ("sceneDescription", "soundscape"):
+                raise ValueError(
+                    "shotId, or field ('sceneDescription' or 'soundscape'), is required"
+                )
 
             board = ctx.store.load(slug)
-            shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
-            if shot is None:
-                raise FileNotFoundError(f"no shot {shot_id} in {slug}")
-
-            # The text is taken from the request, not from the stored shot: the
-            # user may not have saved the words they just typed.
-            text = payload.get("text")
-            if text is None:
-                text = shot.get("prompt") or ""
-
             service = ctx.llm(payload.get("service") or board.get("defaults", {}).get("llm"))
-            cap = next(
-                (c for c in ctx.backend.capabilities() if c.id == shot.get("model")),
-                None,
-            )
-            wanted = set(shot.get("characterIds") or [])
-            cast = [c for c in (board.get("characters") or []) if c.get("id") in wanted]
 
-            proposal = rewrite_prompt(
-                service,
-                text,
-                scene=board.get("sceneDescription") or "",
-                characters=cast,
-                reference_images=_rewrite_reference_images(shot, cast),
-                still=bool(cap and cap.kind == "image"),
-            )
+            if shot_id and field == "soundNote":
+                shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+                if shot is None:
+                    raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+
+                text = payload.get("text")
+                if text is None:
+                    text = shot.get("soundNote") or ""
+
+                # Grounded in this shot's own prompt (the action, environment,
+                # materials), not the project scene description — an accent is
+                # local to what happens in this one clip.
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    context=shot.get("prompt") or "",
+                    context_label=(
+                        "This shot's own prompt (action, camera, mood), already "
+                        "written and not to be repeated here. Ground the sound "
+                        "accents in what actually happens in it:"
+                    ),
+                    kind="soundNote",
+                )
+            elif shot_id:
+                shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+                if shot is None:
+                    raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+
+                # The text is taken from the request, not from the stored shot:
+                # the user may not have saved the words they just typed.
+                text = payload.get("text")
+                if text is None:
+                    text = shot.get("prompt") or ""
+
+                cap = next(
+                    (c for c in ctx.backend.capabilities() if c.id == shot.get("model")),
+                    None,
+                )
+                wanted = set(shot.get("characterIds") or [])
+                cast = [c for c in (board.get("characters") or []) if c.get("id") in wanted]
+
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    scene=board.get("sceneDescription") or "",
+                    characters=cast,
+                    reference_images=_rewrite_reference_images(shot, cast),
+                    kind="still" if (cap and cap.kind == "image") else "shot",
+                )
+            elif field == "sceneDescription":
+                # No cast context here: the scene description is the
+                # surroundings only, and each character already has its own
+                # separate description — repeating them here would tempt the
+                # model into describing people, which this field is not for.
+                text = payload.get("text")
+                if text is None:
+                    text = board.get("sceneDescription") or ""
+
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    reference_images=_rewrite_reference_images(
+                        None, [], board.get("styleRefs")
+                    ),
+                    kind="scene",
+                )
+            else:  # field == "soundscape"
+                text = payload.get("text")
+                if text is None:
+                    text = board.get("soundscape") or ""
+
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    scene=board.get("sceneDescription") or "",
+                    kind="soundscape",
+                )
+
             return self._send_json(
                 {"text": proposal, "service": service.label, "model": service.model}
             )
@@ -487,6 +564,28 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(payload.get("board"), dict):
                 ctx.store.save(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
+
+        if path == "/api/stills":
+            payload = self._read_json()
+            slug = payload.get("slug")
+            shot_id = payload.get("shotId")
+            if not slug or not shot_id:
+                raise ValueError("slug and shotId are required")
+            # A generic "the start of this shot" means nothing to a model
+            # with no sense of time — asking the configured rewrite model to
+            # extract what the shot's own prompt actually says happens at
+            # each of the three points gives Create Stills something concrete
+            # to render instead of the same single moment three times. Best-
+            # effort: create_stills() falls back to a generic phase label per
+            # phase when this comes back empty (no service configured, or it
+            # errored) rather than blocking the button on it.
+            board = ctx.store.load(slug)
+            shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
+            phase_prompts = {}
+            if shot is not None:
+                service = ctx.llm((board.get("defaults") or {}).get("llm"))
+                phase_prompts = describe_still_phases(service, shot.get("prompt") or "")
+            return self._send_json(ctx.orch.create_stills(slug, shot_id, phase_prompts))
 
         if path == "/api/stop":
             return self._send_json(ctx.orch.stop())
@@ -667,7 +766,7 @@ class Handler(BaseHTTPRequestHandler):
         engine = self.ctx.transcriber(engine_id)
         if engine is None:
             configured = [
-                e.label for e in self.ctx.tts_engines.values()
+                e.label for e in self.ctx.tts_engines().values()
                 if e.supports_transcription
             ]
             return self._err(
@@ -923,8 +1022,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _rewrite_reference_images(
-    shot: dict[str, Any],
+    shot: dict[str, Any] | None,
     cast: list[dict[str, Any]],
+    style_refs: list[Any] | None = None,
 ) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
 
@@ -942,10 +1042,13 @@ def _rewrite_reference_images(
         if item not in refs:
             refs.append(item)
 
-    add("Primary shot reference image", shot.get("startRef"))
-    add("Ending shot reference image", shot.get("endRef"))
-    for i, ref in enumerate(shot.get("referenceImages") or [], start=1):
-        add(f"Additional shot reference image {i}", ref)
+    if shot is not None:
+        add("Primary shot reference image", shot.get("startRef"))
+        add("Ending shot reference image", shot.get("endRef"))
+        for i, ref in enumerate(shot.get("referenceImages") or [], start=1):
+            add(f"Additional shot reference image {i}", ref)
+    for i, ref in enumerate(style_refs or [], start=1):
+        add(f"Project style reference image {i}", ref)
     for ch in cast:
         name = (ch.get("name") or "").strip()
         role = f"Character portrait for {name}" if name else "Character portrait"

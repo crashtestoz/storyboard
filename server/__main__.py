@@ -162,8 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                         data_dir=data_dir)
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
                   data_dir=data_dir, data_dir_source=data_dir_source,
-                  tts_engines=tts_engines, default_tts=args.tts,
-                  llm_services=llm_services, default_llm=args.llm)
+                  vpipe_binary=args.vpipe.expanduser(), default_tts=args.tts,
+                  default_llm=args.llm)
 
     try:
         httpd = build_server(bind, args.port, ctx)

@@ -55,10 +55,11 @@ const API = {
   importBoard: (board, name) => req("POST", "/api/boards", { board, name }),
   deleteBoard: (slug) => req("DELETE", `/api/boards/${encodeURIComponent(slug)}`),
 
-  // A rewrite proposal. `text` is sent explicitly because the user may not
-  // have saved the words they just typed.
-  rewrite: (slug, shotId, text, service) =>
-    req("POST", "/api/rewrite", { slug, shotId, text, service }),
+  // A rewrite proposal, for a shot prompt (`shotId`) or a project-level
+  // field (`field`: "sceneDescription" | "soundscape"). `text` is sent
+  // explicitly because the user may not have saved the words they just typed.
+  rewrite: (slug, { shotId, field, text, service } = {}) =>
+    req("POST", "/api/rewrite", { slug, shotId, field, text, service }),
 
   describeCharacter: (image, name, description, service) =>
     req("POST", "/api/describe-character", { image, name, description, service }),
@@ -112,6 +113,9 @@ const API = {
 
   render: (slug, shotIds, board) =>
     req("POST", "/api/render", { slug, shotIds, board }),
+
+  // Start/mid/end Krea-2 stills for one shot — a fast preview, not a render.
+  stills: (slug, shotId) => req("POST", "/api/stills", { slug, shotId }),
 
   // Join the rendered clips into one video. A whole-board render does this at
   // the end; this is the same pass on demand, for when nothing needs

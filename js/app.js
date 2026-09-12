@@ -41,6 +41,13 @@ const state = {
   awaitingBatch: false,
   dirty: false,
   toast: null,
+  // While a batch render is in flight, the Output panel follows whichever
+  // shot the orchestrator is actually rendering — this is what makes the big
+  // preview (and its stage tiles/log) advance scene to scene on its own
+  // instead of sitting on whatever was selected when "Render all" was
+  // clicked. Cleared the moment someone clicks a different shot themselves,
+  // so inspecting an earlier shot mid-batch does not get yanked away.
+  followRender: true,
 };
 
 /* Mirrors RERUNNABLE in server/orchestrator.py: the statuses a whole-board
@@ -73,6 +80,21 @@ const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
+
+/* True when this shot's dialogue is spoken directly in the render, in the
+   speaking character's own cloned voice (Ref2VA, with that character's own
+   voice clip sent in as a reference — see server/backends/vpipe_backend.py's
+   _clones_voice). Mirrors that same rule so the UI and the render agree on
+   which shots need a separate TTS dub and which don't. */
+function shotClonesVoice(raw) {
+  if (raw.model !== "ref2va") return false;
+  const cast = (state.board.characters || []).filter((c) =>
+    (raw.characterIds || []).includes(c.id)
+  );
+  const inferred = cast.find((c) => c.voice && c.voice.path) || cast[0] || null;
+  const speaker = cast.find((c) => c.id === raw.speakerId) || inferred;
+  return !!(speaker && speaker.voice && speaker.voice.path);
+}
 /* Why this shot's clip is not a render of what the board says now; "" when it
    is current, or when there is nothing rendered to be out of date. */
 const staleWhy = (id) => (state.stale && state.stale.shots && state.stale.shots[id]) || "";
@@ -423,6 +445,7 @@ function wireChrome() {
     try {
       state.status = await API.render(state.slug, undefined, state.board);
       state.awaitingBatch = true;
+      state.followRender = true;
       startPolling();
       render();
     } catch (err) {
@@ -599,6 +622,18 @@ function wireChrome() {
 
   $("#draftToggle").addEventListener("change", (e) => {
     state.board.defaults.draft = e.target.checked;
+    markDirty();
+    render();
+  });
+
+  $("#sketchToggle").addEventListener("change", (e) => {
+    state.board.defaults.sketch = e.target.checked;
+    markDirty();
+    render();
+  });
+
+  $("#stillsSize").addEventListener("change", (e) => {
+    state.board.defaults.stillsSize = e.target.value;
     markDirty();
     render();
   });
@@ -880,19 +915,40 @@ async function refreshStatus() {
   try {
     const s = await API.status();
     const wasBusy = state.status && state.status.busy;
+    const wasStillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
     state.status = s;
 
-    if (s.busy && !state.poll) startPolling();
+    const stillsBusy = !!(s.stills && s.stills.busy);
+    if ((s.busy || stillsBusy) && !state.poll) startPolling();
+
+    // Advance the Output panel scene to scene with the orchestrator's own
+    // idea of what it is rendering, rather than leaving it on whatever shot
+    // happened to be selected when the batch started.
+    if (s.busy && state.followRender && s.currentShotId &&
+        s.currentShotId !== state.selectedId && shotById(s.currentShotId)) {
+      state.selectedId = s.currentShotId;
+    }
 
     if (!s.busy && (wasBusy || state.awaitingBatch)) {
       state.awaitingBatch = false;
-      stopPolling();
+      if (!stillsBusy) stopPolling();
       // the server has been mutating the board as shots finish; re-read it
       const res = await API.getBoard(state.slug);
       takeStale(res);
       state.board = res.board;
       const done = batchOutcome(s);
       toast(done.msg, done.kind);
+    }
+    if (wasStillsBusy && !stillsBusy) {
+      if (!s.busy) stopPolling();
+      // the stills, once done, are saved onto the shot server-side
+      const res = await API.getBoard(state.slug);
+      takeStale(res);
+      state.board = res.board;
+      toast(
+        s.stills.error ? `Stills failed: ${s.stills.error}` : "Stills ready.",
+        s.stills.error ? "error" : "info"
+      );
     }
     if (s.error) toast(s.error, "error");
 
@@ -920,9 +976,11 @@ async function refreshStatus() {
 function structuralSig() {
   const busy = !!(state.status && state.status.busy);
   const a = state.status && state.status.assembly;
+  const st = state.status && state.status.stills;
   return JSON.stringify([
     busy,
     state.selectedId,
+    st ? [st.busy, st.shotId, st.phase, st.error] : null,
     // The assembly pass runs after the last shot, so its state moves while
     // nothing else does — without it the final panel would sit on "Joining
     // the clips" until something unrelated forced a rebuild.
@@ -939,6 +997,7 @@ function structuralSig() {
         raw.renderedAs || "",
         staleWhy(raw.id),
         (v.outputs || []).join("|"),
+        raw.stills ? Object.keys(raw.stills).join(",") : "",
       ];
     }),
   ]);
@@ -950,9 +1009,10 @@ function structuralSig() {
 function paintLive() {
   if (!state.board) return;
   const busy = !!(state.status && state.status.busy);
-  $("#btnRender").disabled = busy || !state.info.backend.healthy;
-  $("#btnAssemble").disabled = busy;
-  $("#btnStop").disabled = !busy;
+  const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
+  $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnAssemble").disabled = busy || stillsBusy;
+  $("#btnStop").disabled = !busy && !stillsBusy;
   paintMeta();
   paintRenderHint();
 
@@ -985,6 +1045,8 @@ function paintLive() {
       const rt = document.querySelector('#preview .stat-grid dt + dd');
       if (rt) rt.textContent = STATUS_LABELS[shot.status] || shot.status;
       paintLog(shot);
+      paintStillsLog(raw);
+      paintStageTiles(raw, shot);
     }
   });
 }
@@ -1006,15 +1068,53 @@ function paintLog(shot) {
   // It was showing "No run yet." or a saved log; this run supersedes it.
   if (!have) part.innerHTML = "";
 
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
-  lines.slice(have).forEach((e) => part.appendChild(logLine(e)));
+  // Newest first, so the latest status is the one already in view — each new
+  // line goes in right above the previous newest, not at the end.
+  const atTop = box.scrollTop <= 24;
+  lines.slice(have).forEach((e) => part.insertBefore(logLine(e), part.firstChild));
   part.dataset.count = String(lines.length);
 
-  // Hold the same window renderPreview draws, so the two agree.
+  // Hold the same window renderPreview draws, so the two agree. Oldest is
+  // now the tail end, so that is what falls off.
   let extra = part.querySelectorAll(".log-line").length - LOG_WINDOW;
-  while (extra-- > 0 && part.firstChild) part.removeChild(part.firstChild);
+  while (extra-- > 0 && part.lastChild) part.removeChild(part.lastChild);
 
-  if (atBottom) box.scrollTop = box.scrollHeight;
+  if (atTop) box.scrollTop = 0;
+}
+
+/* Same incremental-append shape as paintLog, for the separate stills job's
+   log — it lives on state.status.stills, not on the shot's own run. */
+function paintStillsLog(raw) {
+  const box = $("#preview .log");
+  const st = state.status && state.status.stills;
+  if (!box || !st || st.shotId !== raw.id) return;
+  const lines = st.log || [];
+  const part = box.querySelector('[data-part="stills"]');
+  if (!part) return;
+
+  const have = Number(part.dataset.count || 0);
+  if (lines.length <= have) return;
+
+  if (!have) {
+    part.innerHTML = "";
+    part.appendChild(logLine("# stills preview"));
+  }
+
+  // The header (above) always stays first; new lines go in right after it,
+  // newest on top of the ones already there — not at the very top of the
+  // container, which would shove the header down. The anchor is read fresh
+  // each time (not cached) so a batch of several new lines still lands in
+  // the right order relative to each other, the same trick paintLog uses.
+  const atTop = box.scrollTop <= 24;
+  lines.slice(have).forEach((e) =>
+    part.insertBefore(logLine(e), part.firstChild.nextSibling)
+  );
+  part.dataset.count = String(lines.length);
+
+  let extra = part.querySelectorAll(".log-line").length - LOG_WINDOW;
+  while (extra-- > 0 && part.lastChild) part.removeChild(part.lastChild);
+
+  if (atTop) box.scrollTop = 0;
 }
 
 function render() {
@@ -1027,9 +1127,10 @@ function render() {
   renderPreview();
 
   const busy = !!(state.status && state.status.busy);
-  $("#btnRender").disabled = busy || !state.info.backend.healthy;
-  $("#btnAssemble").disabled = busy;
-  $("#btnStop").disabled = !busy;
+  const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
+  $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnAssemble").disabled = busy || stillsBusy;
+  $("#btnStop").disabled = !busy && !stillsBusy;
 
   paintMeta();
   paintRenderHint();
@@ -1089,6 +1190,8 @@ function renderRail() {
   if (document.activeElement !== sd) sd.value = state.board.sceneDescription || "";
   const snd = $("#soundscape");
   if (document.activeElement !== snd) snd.value = state.board.soundscape || "";
+  ensureSceneWand();
+  ensureSoundscapeWand();
   const sndMode = $("#soundscapeInShots");
   sndMode.checked = state.board.soundscapeInShots !== false;
   sndMode.title = sndMode.checked
@@ -1198,10 +1301,41 @@ function renderRail() {
   const cap = modelCap(state.board.defaults.model) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
-    ? `Rendering at ${dw}×${dh} and 4 steps without generated audio. Clip ` +
-      `length and seed are unchanged, so the camera move is the one you will get.`
-    : `Drafts render at ${dw}×${dh} and 4 steps to check framing and motion ` +
-      `quickly. Audio and full frame dumps are skipped unless needed for chaining.`;
+    ? `Rendering at ${dw}×${dh} and 4 steps, dialogue and sound effects ` +
+      `included. Clip length and seed are unchanged, so the camera move is ` +
+      `the one you will get.`
+    : `Drafts render at ${dw}×${dh} and 4 steps to check framing, motion, ` +
+      `dialogue and sound quickly. Full frame dumps are skipped unless ` +
+      `needed for chaining.`;
+
+  // sketch preview — a draft-only sub-option, so it is disabled without one
+  const skt = $("#sketchToggle");
+  const sketchOn = !!state.board.defaults.sketch;
+  skt.checked = sketchOn;
+  skt.disabled = !draftOn;
+  $("#sketchToggleWrap").classList.toggle("disabled", !draftOn);
+  const minFrames = cap && cap.frameRule ? cap.frameRule.minimum : 39;
+  $("#sketchNote").textContent = !draftOn
+    ? `Only applies while Draft mode is on.`
+    : sketchOn
+    ? `Rendering just ${minFrames} frames as a rough pencil-sketch, silent, ` +
+      `then holding them to fill the shot's full length — real motion and ` +
+      `camera move from the actual model, sampled far more coarsely, at a ` +
+      `fraction of the time.`
+    : `Renders only ${minFrames} frames — a rough pencil-sketch pass, ` +
+      `silent — then stretches them to the shot's full length by holding ` +
+      `frames, so composition and camera move are cheap to check before a ` +
+      `full draft.`;
+
+  // stills size — independent of draft/sketch, only "Create Stills" reads it
+  const stillsSizeSel = $("#stillsSize");
+  stillsSizeSel.value = state.board.defaults.stillsSize || "small";
+  const largeStills = stillsSizeSel.value === "large";
+  $("#stillsSizeNote").textContent = largeStills
+    ? `Renders at this project's real resolution and step count — big enough ` +
+      `to use as a reference image, but noticeably slower than the small size.`
+    : `Renders at draft size (384px long edge, 4 steps) — fast, good for ` +
+      `judging composition, too small to use as a reference image.`;
 
   const modelSel = $("#defModel");
   if (modelSel.dataset.built !== "1") {
@@ -1303,6 +1437,7 @@ function renderRail() {
     }
     row.addEventListener("click", () => {
       state.selectedId = raw.id;
+      state.followRender = false;
       render();
     });
     wireDrag(row, raw, "y");
@@ -1310,6 +1445,66 @@ function renderRail() {
   });
 
   renderFinal();
+}
+
+/* Built once and left alone: renderRail() runs on every poll tick while a
+   render is in flight, and rebuilding a live wand button on every tick would
+   reset its "rewriting…" state mid-request and blow away an open proposal
+   the user is still reading. */
+function ensureSceneWand() {
+  const wandSlot = $("#sceneWandSlot");
+  if (!wandSlot || wandSlot.childElementCount) return;
+  wandSlot.appendChild(
+    wandButton({
+      title: (svc) =>
+        `Restyle the scene description using ${svc.label} (${svc.model}). ` +
+        `Takes up to a minute on a local model, and shows you the result ` +
+        `before changing anything.`,
+      slot: () => $("#sceneProposalSlot"),
+      rewrite: () =>
+        API.rewrite(state.slug, {
+          field: "sceneDescription",
+          text: $("#sceneDescription").value,
+        }),
+      onUse: (text) => {
+        $("#sceneDescription").value = text;
+        state.board.sceneDescription = text;
+        markDirty();
+        updateResolvedPreview();
+        toast(
+          "Scene description replaced. Undo by editing it back — the old text is above."
+        );
+      },
+    })
+  );
+}
+
+function ensureSoundscapeWand() {
+  const wandSlot = $("#soundscapeWandSlot");
+  if (!wandSlot || wandSlot.childElementCount) return;
+  wandSlot.appendChild(
+    wandButton({
+      title: (svc) =>
+        `Restyle the background sound using ${svc.label} (${svc.model}). ` +
+        `Takes up to a minute on a local model, and shows you the result ` +
+        `before changing anything.`,
+      slot: () => $("#soundscapeProposalSlot"),
+      rewrite: () =>
+        API.rewrite(state.slug, {
+          field: "soundscape",
+          text: $("#soundscape").value,
+        }),
+      onUse: (text) => {
+        $("#soundscape").value = text;
+        state.board.soundscape = text;
+        markDirty();
+        updateResolvedPreview();
+        toast(
+          "Background sound replaced. Undo by editing it back — the old text is above."
+        );
+      },
+    })
+  );
 }
 
 /* --- the assembled cut --------------------------------------------------- */
@@ -1779,13 +1974,29 @@ function renderStrip() {
     const body = el("div", "shot-body");
     body.appendChild(el("div", "shot-title", raw.title || "Untitled"));
     const cap = modelCap(raw.model);
+    // What will actually render, not just what's configured: draft mode
+    // shrinks the frame and caps steps at 4 (see draftGeometry / the
+    // backend's own _draft_geometry), so this must track that toggle and
+    // the project resolution live rather than always showing the full-size
+    // numbers.
+    const draftOn = !!(state.board.defaults && state.board.defaults.draft);
+    const sketchOn = draftOn && !!state.board.defaults.sketch;
+    const [rw, rh] = projectResolution().split("x").map(Number);
+    const resLabel = draftOn
+      ? `${draftGeometry(rw, rh, cap ? cap.sizeAlign : 16).join("×")} (${sketchOn ? "sketch" : "draft"})`
+      : projectResolution();
+    const stepsLabel = draftOn ? 4 : raw.steps;
+    // Sketch renders far fewer real frames (see the backend's own comment
+    // in prepare()) then stretches the clip back to this same duration, so
+    // the length shown here still holds — only the frame count actually
+    // generated is different, which is what the (sketch) tag is for.
     body.appendChild(
       el(
         "div",
         "shot-sub",
-        `${projectResolution()}` +
+        `${resLabel}` +
           (cap && cap.kind === "image" ? " · still" : ` · ${fmtDur(raw.frames)}`) +
-          ` · ${raw.steps} steps`
+          ` · ${stepsLabel} steps`
       )
     );
 
@@ -1810,6 +2021,7 @@ function renderStrip() {
 
     card.addEventListener("click", () => {
       state.selectedId = raw.id;
+      state.followRender = false;
       render();
     });
     wireDrag(card, raw, "x");
@@ -2017,83 +2229,100 @@ function renderEditor() {
     const canClone = !!(engNow && engNow.supportsCloning);
     const willClone = !!(speaker && speaker.voice && speaker.voice.path && canClone);
 
-    // The video model is asked not to generate its own dialogue, but it does
-    // not always listen — leaving a second, mumbled voice under the real
-    // line. "Mix" is right when that instruction held (it keeps engine hum
-    // and wind alive under the spoken line); flip to "replace" for a shot
-    // where it didn't, and the dub becomes the clip's only audio.
-    const replaceToggle = el("label", "toggle");
-    const replaceBox = el("input");
-    replaceBox.type = "checkbox";
-    replaceBox.checked = raw.dubMode === "replace";
-    replaceBox.addEventListener("change", () => {
-      live().dubMode = replaceBox.checked ? "replace" : "mix";
-      markDirty();
-    });
-    replaceToggle.title =
-      "On: the dub replaces the clip's own audio entirely — use this if the " +
-      "clip's generated audio already has a (wrong) voice in it. " +
-      "Off: the dub is mixed over the clip's audio, keeping its ambience.";
-    replaceToggle.append(
-      replaceBox,
-      el("span", "toggle-track"),
-      el("span", null, "Replace clip audio with the dub")
-    );
-    dubRow.appendChild(replaceToggle);
-
-    const dubBtn = el("button", "btn btn-sm", "Generate");
-    dubBtn.disabled = !engNow || !engNow.healthy;
-    dubBtn.title = !engNow || !engNow.healthy
-      ? (engNow && engNow.message) || "No speech engine selected — see ⚙ Settings"
-      : willClone
-      ? `Synthesise with ${engNow.label}, cloning ${speaker.name}’s voice`
-      : `Synthesise with ${engNow.label}`;
-
-    dubBtn.onclick = async () => {
-      dubBtn.disabled = true;
-      dubBtn.textContent = "generating…";
-      setSpeakAudioBusy(dubRow, true);
-      try {
-        // send the line as typed; it may not be saved yet
-        const sh = live();
-        const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle, sh.dubMode);
-        sh.dialogueAudioUrl = r.audioUrl;
-        if (r.dubUrl) sh.dubUrl = r.dubUrl;
-        if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
-        if (r.log && r.log.length) state.speechLog[sh.id] = r.log;
-        if (r.note) toast(r.note, "warn");
-        else if (r.warning) toast(r.warning, "warn");
-        else {
-          toast(
-            `Spoke ${r.seconds}s in ${r.cloned ? `${r.speaker}’s cloned voice` : "the engine voice"}` +
-              (r.muxed
-                ? sh.dubMode === "replace"
-                  ? " and replaced the clip's audio with it."
-                  : " and mixed it over the clip."
-                : " — the clip is not rendered yet, so nothing was mixed.")
-          );
-        }
-        render();
-      } catch (err) {
-        // The engine's own log is the useful part of a speech failure, and the
-        // error body carries it — a toast alone would throw it away.
-        if (err.payload && err.payload.log && err.payload.log.length) {
-          state.speechLog[raw.id] = err.payload.log;
-        }
-        toast(`Could not speak this line: ${err.message}`, "error");
-        render();
-      }
-    };
-    dubRow.appendChild(dubBtn);
-
-    if (speaker && speaker.voice && speaker.voice.path && !canClone) {
+    // Ref2VA already sends the speaking character's own voice clip in as a
+    // soundtrack reference (see server/backends/vpipe_backend.py), and is
+    // asked to speak the line in it directly — verified to work well enough
+    // that a separate TTS dub is not just redundant here, it is actively
+    // wrong: muxing a second, independently-synthesised take of the same
+    // line over a clip that already speaks it is exactly the "doubled
+    // dialogue" bug this replaced. So for a shot this applies to, the
+    // manual dub controls are replaced with a note instead of shown
+    // alongside them.
+    const h3ClonesVoice = raw.model === "ref2va" && !!(speaker && speaker.voice && speaker.voice.path);
+    if (h3ClonesVoice) {
       dubRow.appendChild(
-        el("span", "field-warn",
-           `${engNow ? engNow.label : "this engine"} cannot clone — the clip will not be used`)
+        el("span", "field-note",
+           `🎙 spoken directly in the render, in ${speaker.name}’s cloned voice — no separate dub needed`)
       );
-    }
-    if (engNow && !engNow.healthy) {
-      dubRow.appendChild(el("span", "field-warn", "speech engine unavailable"));
+    } else {
+      // The video model is asked not to generate its own dialogue, but it does
+      // not always listen — leaving a second, mumbled voice under the real
+      // line. "Mix" is right when that instruction held (it keeps engine hum
+      // and wind alive under the spoken line); flip to "replace" for a shot
+      // where it didn't, and the dub becomes the clip's only audio.
+      const replaceToggle = el("label", "toggle");
+      const replaceBox = el("input");
+      replaceBox.type = "checkbox";
+      replaceBox.checked = raw.dubMode === "replace";
+      replaceBox.addEventListener("change", () => {
+        live().dubMode = replaceBox.checked ? "replace" : "mix";
+        markDirty();
+      });
+      replaceToggle.title =
+        "On: the dub replaces the clip's own audio entirely — use this if the " +
+        "clip's generated audio already has a (wrong) voice in it. " +
+        "Off: the dub is mixed over the clip's audio, keeping its ambience.";
+      replaceToggle.append(
+        replaceBox,
+        el("span", "toggle-track"),
+        el("span", null, "Replace clip audio with the dub")
+      );
+      dubRow.appendChild(replaceToggle);
+
+      const dubBtn = el("button", "btn btn-sm", "Generate");
+      dubBtn.disabled = !engNow || !engNow.healthy;
+      dubBtn.title = !engNow || !engNow.healthy
+        ? (engNow && engNow.message) || "No speech engine selected — see ⚙ Settings"
+        : willClone
+        ? `Synthesise with ${engNow.label}, cloning ${speaker.name}’s voice`
+        : `Synthesise with ${engNow.label}`;
+
+      dubBtn.onclick = async () => {
+        dubBtn.disabled = true;
+        dubBtn.textContent = "generating…";
+        setSpeakAudioBusy(dubRow, true);
+        try {
+          // send the line as typed; it may not be saved yet
+          const sh = live();
+          const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle, sh.dubMode);
+          sh.dialogueAudioUrl = r.audioUrl;
+          if (r.dubUrl) sh.dubUrl = r.dubUrl;
+          if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
+          if (r.log && r.log.length) state.speechLog[sh.id] = r.log;
+          if (r.note) toast(r.note, "warn");
+          else if (r.warning) toast(r.warning, "warn");
+          else {
+            toast(
+              `Spoke ${r.seconds}s in ${r.cloned ? `${r.speaker}’s cloned voice` : "the engine voice"}` +
+                (r.muxed
+                  ? sh.dubMode === "replace"
+                    ? " and replaced the clip's audio with it."
+                    : " and mixed it over the clip."
+                  : " — the clip is not rendered yet, so nothing was mixed.")
+            );
+          }
+          render();
+        } catch (err) {
+          // The engine's own log is the useful part of a speech failure, and the
+          // error body carries it — a toast alone would throw it away.
+          if (err.payload && err.payload.log && err.payload.log.length) {
+            state.speechLog[raw.id] = err.payload.log;
+          }
+          toast(`Could not speak this line: ${err.message}`, "error");
+          render();
+        }
+      };
+      dubRow.appendChild(dubBtn);
+
+      if (speaker && speaker.voice && speaker.voice.path && !canClone) {
+        dubRow.appendChild(
+          el("span", "field-warn",
+             `${engNow ? engNow.label : "this engine"} cannot clone — the clip will not be used`)
+        );
+      }
+      if (engNow && !engNow.healthy) {
+        dubRow.appendChild(el("span", "field-warn", "speech engine unavailable"));
+      }
     }
 
     // the spoken line, playable right here
@@ -2120,20 +2349,45 @@ function renderEditor() {
     panelDubRow = dubRow;
   }
 
+  const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   const one = el("button", "btn btn-sm", "Render this shot");
-  one.disabled = !!(state.status && state.status.busy);
+  one.disabled = !!(state.status && state.status.busy) || stillsBusy;
   one.addEventListener("click", async () => {
+    // Disable immediately, not after the save + render round trips —
+    // otherwise the button sits clickable for however long those take,
+    // which reads as "nothing happened" and invites a second click.
+    one.disabled = true;
     await saveNow();
     try {
       state.status = await API.render(state.slug, [raw.id], state.board);
       state.awaitingBatch = true;
+      state.followRender = true;
       startPolling();
       render();
     } catch (err) {
       toast(err.message, "error");
+      one.disabled = false;
     }
   });
   head.appendChild(one);
+
+  const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Stills");
+  stillsBtn.title = "Fast Krea-2 previews of this shot's start, middle and end";
+  stillsBtn.disabled = !!(state.status && state.status.busy) || stillsBusy;
+  stillsBtn.addEventListener("click", async () => {
+    stillsBtn.disabled = true;
+    await saveNow();
+    try {
+      state.status = await API.stills(state.slug, raw.id);
+      state.previewMainTab = "stills";
+      startPolling();
+      render();
+    } catch (err) {
+      toast(err.message, "error");
+      stillsBtn.disabled = false;
+    }
+  });
+  head.appendChild(stillsBtn);
 
   const del = el("button", "btn btn-ghost btn-sm", "Delete");
   del.addEventListener("click", () => {
@@ -2220,7 +2474,24 @@ function renderEditor() {
     el("span", "pane-hint", "action / camera / mood only — not the subject or the style")
   );
   promptHead.appendChild(el("div", "header-spacer"));
-  promptHead.appendChild(wandButton(raw, ta));
+  promptHead.appendChild(
+    wandButton({
+      title: (svc) =>
+        `Restyle this shot prompt for ${modelLabel(raw.model)} using ` +
+        `${svc.label} (${svc.model}). Takes up to a minute on a local model, and ` +
+        `shows you the result before changing anything.`,
+      slot: () => promptPane.querySelector(".proposal-slot"),
+      rewrite: () => API.rewrite(state.slug, { shotId: raw.id, text: ta.value }),
+      onUse: (text) => {
+        ta.value = text;
+        live().prompt = text;
+        markDirty();
+        updateResolvedPreview();
+        syncTabDots();
+        toast("Shot prompt replaced. Undo by editing it back — the old text is above.");
+      },
+    })
+  );
   promptPane.append(promptHead, ta, el("div", "proposal-slot"));
   pane("prompt", promptPane);
 
@@ -2278,11 +2549,31 @@ function renderEditor() {
       syncTabDots();
     });
     sa.dataset.fkey = "sound-accents";
+
     const sp2 = el("div");
-    sp2.append(
-      paneHint("this clip only — independent of the project background sound mode"),
-      sa
+    const saHead = paneHint("this clip only — independent of the project background sound mode");
+    saHead.appendChild(el("div", "header-spacer"));
+    saHead.appendChild(
+      wandButton({
+        title: (svc) =>
+          `Propose sound effects for this shot using ${svc.label} (${svc.model}). ` +
+          `Grounded in this shot's own prompt — dialogue is never included. ` +
+          `Takes up to a minute on a local model, and shows you the result ` +
+          `before changing anything.`,
+        slot: () => sp2.querySelector(".proposal-slot"),
+        rewrite: () =>
+          API.rewrite(state.slug, { shotId: raw.id, field: "soundNote", text: sa.value }),
+        onUse: (text) => {
+          sa.value = text;
+          live().soundNote = text;
+          markDirty();
+          updateResolvedPreview();
+          syncTabDots();
+          toast("Sound accents replaced. Undo by editing it back — the old text is above.");
+        },
+      })
     );
+    sp2.append(saHead, sa, el("div", "proposal-slot"));
     pane("sound", sp2);
   }
 
@@ -2776,6 +3067,195 @@ function draftGeometry(w, h, align = 16) {
   ];
 }
 
+/* --- stage tiles ----------------------------------------------------------
+
+   A plain-language view of what a render is actually doing, for someone who
+   has never heard of "denoise" or "vae decode". The tile set and the phase
+   mapping are grounded in server/backends/vpipe_backend.py's own
+   PHASE_ORDER/PHASE_WEIGHTS (encoding references / denoise / vae decode) and
+   the orchestrator's steps around them (build the spec, validate the
+   result) — not invented busywork. "References" only appears for Ref2VA
+   (FL2VA never has that phase), and "Voice" only for a shot whose dialogue
+   still needs a separate TTS dub — see shotClonesVoice(). */
+
+const STAGE_PHASE_KEY = {
+  "encoding references": "refs",
+  "denoise": "gen",
+  "vae decode": "dev",
+};
+
+function stageTiles(raw, shot) {
+  const isRef2va = raw.model === "ref2va";
+  const needsDub = !!(raw.dialogue || "").trim() && !shotClonesVoice(raw);
+
+  // icon ids match the <symbol>/<g> ids in index.html's stage-icon sprite —
+  // see the comment there for why these are hand-drawn inline SVG rather
+  // than an icon font or CDN.
+  const tiles = [
+    { key: "prep", label: "Preparing" },
+    ...(isRef2va ? [{ key: "refs", label: "References" }] : []),
+    { key: "gen", label: "Generating" },
+    { key: "dev", label: "Developing" },
+    ...(needsDub ? [{ key: "voice", label: "Voice" }] : []),
+    { key: "check", label: "Checking" },
+    { key: "done", label: "Done" },
+  ];
+
+  const status = shot.status;
+  const order = tiles.map((t) => t.key);
+
+  if (!status || status === "draft") {
+    return tiles.map((t) => ({ ...t, state: "pending" }));
+  }
+  if (status === "queued") {
+    return tiles.map((t, i) => ({ ...t, state: i === 0 ? "active" : "pending" }));
+  }
+  if (status === "running") {
+    const activeKey = STAGE_PHASE_KEY[shot.phase] || "prep";
+    const activeIdx = Math.max(0, order.indexOf(activeKey));
+    return tiles.map((t, i) => ({
+      ...t,
+      state: i < activeIdx ? "done" : i === activeIdx ? "active" : "pending",
+    }));
+  }
+  // A terminal status: done, failed, blocked, review, interrupted.
+  return tiles.map((t) => {
+    if (t.key === "voice") return { ...t, state: raw.dubUrl ? "done" : "pending" };
+    if (t.key === "done") return { ...t, state: status === "done" ? "done" : "failed" };
+    return { ...t, state: "done" };
+  });
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function stageIconSvg(key) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "stage-tile-icon");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", `#stage-icon-${key}`);
+  svg.appendChild(use);
+  return svg;
+}
+
+function renderStageTiles(raw, shot) {
+  const row = el("div", "stage-tiles");
+  row.dataset.shotId = raw.id;
+  stageTiles(raw, shot).forEach((t) => {
+    const tile = el("div", "stage-tile");
+    tile.dataset.state = t.state;
+    tile.dataset.key = t.key;
+    tile.title = t.label;
+    tile.appendChild(stageIconSvg(t.key));
+    tile.appendChild(el("span", "stage-tile-label", t.label));
+    row.appendChild(tile);
+  });
+  return row;
+}
+
+/* The poll's path: states patched in place on the existing tiles, never
+   rebuilt — so the active tile's pulse animation is not restarted every
+   second the way a fresh element would restart it. Only rebuilds if the
+   tile *set* itself changed (dialogue added/removed mid-session). */
+function paintStageTiles(raw, shot) {
+  const row = document.querySelector(`.stage-tiles[data-shot-id="${raw.id}"]`);
+  if (!row) return;
+  const states = stageTiles(raw, shot);
+  const nodes = row.querySelectorAll(".stage-tile");
+  if (nodes.length !== states.length) {
+    row.replaceWith(renderStageTiles(raw, shot));
+    return;
+  }
+  nodes.forEach((node, i) => {
+    if (node.dataset.state !== states[i].state) node.dataset.state = states[i].state;
+  });
+}
+
+/* --- stills ---------------------------------------------------------------- */
+
+const STILL_PHASE_LABELS = { start: "Start", mid: "Middle", end: "End" };
+
+/* A generic full-size viewer, built on demand rather than living in
+   index.html, since nothing about it is specific to any one dialog. */
+function openLightbox(src, alt) {
+  const overlay = el("div", "lightbox-overlay");
+  const img = el("img", "lightbox-img");
+  img.src = src;
+  img.alt = alt || "";
+  overlay.appendChild(img);
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  overlay.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+}
+
+function renderStillsPane(raw) {
+  const wrap = el("div", "stills-pane");
+  const st = state.status && state.status.stills;
+  const runningHere = !!(st && st.busy && st.shotId === raw.id);
+  const failedHere = !!(st && st.error && st.shotId === raw.id && !st.busy);
+
+  if (runningHere) {
+    const order = ["start", "mid", "end"];
+    const i = Math.max(0, order.indexOf(st.phase));
+    wrap.appendChild(
+      el("div", "stills-status",
+         `Generating ${STILL_PHASE_LABELS[st.phase] || "…"} ` +
+         `(${Math.min(i + 1, 3)} of 3)…`)
+    );
+  } else if (failedHere) {
+    wrap.appendChild(el("div", "stills-status stills-error", `Stills failed: ${st.error}`));
+  }
+
+  // While a job for this shot is running (or just failed partway through),
+  // state.status.stills.results — updated as each phase finishes — wins
+  // over the board's own copy, which is only refetched once the whole job
+  // ends. That is what lets "start" show up the moment it is done instead
+  // of waiting on "mid" and "end" too.
+  const live = (runningHere || failedHere) && st.results ? st.results : null;
+  const stills = live || raw.stills;
+
+  if (!stills || !stills.start) {
+    if (!runningHere) {
+      wrap.appendChild(
+        el("div", "empty-state",
+           "No stills yet — “Create Stills” renders fast Krea-2 previews of " +
+           "this shot's start, middle and end.")
+      );
+    }
+    return wrap;
+  }
+
+  const grid = el("div", "stills-grid");
+  ["start", "mid", "end"].forEach((key) => {
+    const cell = el("div", "stills-cell");
+    const s = stills[key];
+    if (s && s.url) {
+      const img = el("img", "stills-thumb stills-thumb-clickable");
+      img.src = s.url;
+      img.alt = `${STILL_PHASE_LABELS[key]} still`;
+      img.title = "Click to view full size";
+      img.addEventListener("click", () => openLightbox(s.url, img.alt));
+      cell.appendChild(img);
+    } else if (runningHere && key === st.phase) {
+      cell.appendChild(el("div", "stills-thumb stills-pending"));
+    } else {
+      cell.appendChild(el("div", "stills-thumb stills-missing"));
+    }
+    cell.appendChild(el("div", "stills-label", STILL_PHASE_LABELS[key]));
+    grid.appendChild(cell);
+  });
+  wrap.appendChild(grid);
+  return wrap;
+}
+
 /* --- preview ------------------------------------------------------------- */
 
 function renderPreview() {
@@ -2798,71 +3278,125 @@ function renderPreview() {
 
   host.appendChild(el("div", "section-label", "Output"));
 
-  const stage = el("div", "preview-stage");
-  const video = raw.dubUrl || (shot.outputs || []).find((u) => u.endsWith(".mp4"));
-  const image = (shot.outputs || []).find((u) => /\.(jpe?g|png|webp)$/i.test(u));
-  if (video) {
-    stage.appendChild(
-      reuse(video, () => {
-        const v = el("video");
-        v.src = video;
-        v.controls = true;
-        v.loop = true;
-        v.muted = false;
-        return v;
-      })
-    );
-  } else if (image) {
-    stage.appendChild(
-      reuse(image, () => {
-        const img = el("img");
-        img.src = image;
-        return img;
-      })
-    );
-  } else if (raw.thumb) {
-    stage.appendChild(
-      reuse(raw.thumb, () => {
-        const img = el("img");
-        img.src = raw.thumb;
-        return img;
-      })
-    );
-  } else {
-    const ph = el("img", "preview-placeholder");
-    ph.src = "assets/shot-placeholder.png";
-    ph.alt = "";
-    stage.appendChild(ph);
-    const e = el("div", "preview-empty");
-    e.appendChild(el("span", "big", shot.status === "running" ? "◐" : "▦"));
-    e.appendChild(
-      el(
-        "span",
-        null,
-        shot.status === "running"
-          ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}`
-          : "Not rendered yet"
-      )
-    );
-    stage.appendChild(e);
-  }
-  host.appendChild(stage);
+  // Stills are a second view of the same output card, on equal footing with
+  // the rendered clip — not a debug/detail tab, so this toggle lives right
+  // at the top rather than down with Details / Backend output.
+  const mainTabs = el("div", "tabs");
+  mainTabs.classList.add("output-tabs");
+  const activeMainTab = state.previewMainTab || "clip";
+  [{ id: "clip", label: "Clip" }, { id: "stills", label: "Stills" }].forEach((t) => {
+    const b = el("button", "tab");
+    b.dataset.tab = t.id;
+    b.dataset.on = String(t.id === activeMainTab);
+    b.appendChild(el("span", null, t.label));
+    b.addEventListener("click", () => {
+      state.previewMainTab = t.id;
+      renderPreview();
+    });
+    mainTabs.appendChild(b);
+  });
+  host.appendChild(mainTabs);
 
-  if (video) {
-    const actions = el("div", "preview-actions");
-    const download = el("a", "btn btn-sm btn-primary", "Download clip");
-    download.href = video;
-    download.download = sceneClipDownloadName(raw, video);
-    download.title = "Download this scene clip";
-    actions.appendChild(download);
-    host.appendChild(actions);
+  if (activeMainTab === "stills") {
+    host.appendChild(renderStillsPane(raw));
+  } else {
+    const stage = el("div", "preview-stage");
+    const video = raw.dubUrl || (shot.outputs || []).find((u) => u.endsWith(".mp4"));
+    const image = (shot.outputs || []).find((u) => /\.(jpe?g|png|webp)$/i.test(u));
+    if (video) {
+      stage.appendChild(
+        reuse(video, () => {
+          const v = el("video");
+          v.src = video;
+          v.controls = true;
+          v.loop = true;
+          v.muted = false;
+          return v;
+        })
+      );
+    } else if (image) {
+      stage.appendChild(
+        reuse(image, () => {
+          const img = el("img");
+          img.src = image;
+          return img;
+        })
+      );
+    } else if (raw.thumb) {
+      stage.appendChild(
+        reuse(raw.thumb, () => {
+          const img = el("img");
+          img.src = raw.thumb;
+          return img;
+        })
+      );
+    } else {
+      const ph = el("img", "preview-placeholder");
+      ph.src = "assets/shot-placeholder.png";
+      ph.alt = "";
+      stage.appendChild(ph);
+      const e = el("div", "preview-empty");
+      e.appendChild(el("span", "big", shot.status === "running" ? "◐" : "▦"));
+      e.appendChild(
+        el(
+          "span",
+          null,
+          shot.status === "running"
+            ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}`
+            : "Not rendered yet"
+        )
+      );
+      stage.appendChild(e);
+    }
+    host.appendChild(stage);
+
+    if (video) {
+      const actions = el("div", "preview-actions");
+      const download = el("a", "btn btn-sm btn-primary", "Download clip");
+      download.href = video;
+      download.download = sceneClipDownloadName(raw, video);
+      download.title = "Download this scene clip";
+      actions.appendChild(download);
+      host.appendChild(actions);
+    }
   }
+
+  // A plain-language read of what the render is doing, always in view —
+  // the technical log below is the detail view for whoever wants it.
+  host.appendChild(renderStageTiles(raw, shot));
 
   staleNotes(raw, shot.status).forEach((n) => host.appendChild(n));
 
   const diag = diagnostic(raw, shot);
   if (diag) host.appendChild(diag);
 
+  // Details / Backend output share a small tab strip of their own — the raw
+  // log is the least-needed-by-default part of this panel, so it is one
+  // click away rather than always taking up space under every shot.
+  const detailTabs = el("div", "tabs");
+  const detailPanes = el("div", "tab-panes");
+  const detailTabDefs = [
+    { id: "details", label: "Details" },
+    { id: "log", label: "Backend output" },
+  ];
+  let activeDetailTab = state.previewDetailTab || "details";
+  const showDetailTab = (id) => {
+    activeDetailTab = id;
+    state.previewDetailTab = id;
+    [...detailTabs.children].forEach((b) => (b.dataset.on = String(b.dataset.tab === id)));
+    [...detailPanes.children].forEach((p) => (p.hidden = p.dataset.tab !== id));
+  };
+  detailTabDefs.forEach((t) => {
+    const b = el("button", "tab");
+    b.dataset.tab = t.id;
+    b.appendChild(el("span", null, t.label));
+    b.addEventListener("click", () => showDetailTab(t.id));
+    detailTabs.appendChild(b);
+  });
+  host.append(detailTabs, detailPanes);
+
+  const detailsPane = el("div", "tab-pane");
+  detailsPane.dataset.tab = "details";
   const stats = el("dl", "stat-grid");
   [
     ["Status", STATUS_LABELS[shot.status] || shot.status],
@@ -2880,11 +3414,13 @@ function renderPreview() {
   const sp = el("div", "panel");
   sp.style.marginBottom = "var(--sp-3)";
   sp.appendChild(stats);
-  host.appendChild(sp);
+  detailsPane.appendChild(sp);
 
+  const logPane = el("div", "tab-pane");
+  logPane.dataset.tab = "log";
   const lbl = el("div", "section-label", "Backend output");
-  lbl.appendChild(el("span", "hint", "— the render, and any spoken line"));
-  host.appendChild(lbl);
+  lbl.appendChild(el("span", "hint", "— newest first; stills, the render, and any spoken line"));
+  logPane.appendChild(lbl);
 
   /* One window, two producers. They go into separate containers inside it so
      each can be filled independently — the render log arrives live or as a
@@ -2892,11 +3428,24 @@ function renderPreview() {
      stays fixed and the render poll's append (which counts lines) only ever
      touches its own. */
   const box = el("div", "log");
+  const stillsPart = el("div", "log-part");
+  stillsPart.dataset.part = "stills";
   const renderPart = el("div", "log-part");
   renderPart.dataset.part = "render";
   const speechPart = el("div", "log-part");
   speechPart.dataset.part = "speech";
-  box.append(renderPart, speechPart);
+  box.append(stillsPart, renderPart, speechPart);
+
+  // "Create Stills" runs outside the normal render queue, so its log lives
+  // on state.status.stills rather than on this shot's own run — shown here,
+  // not just as a phase label in the Stills tab, so the same vpipe detail
+  // is one click away for a still as it is for a full render.
+  const st = state.status && state.status.stills;
+  if (st && st.shotId === raw.id && st.log && st.log.length) {
+    stillsPart.appendChild(logLine("# stills preview"));
+    st.log.slice(-LOG_WINDOW).reverse().forEach((e) => stillsPart.appendChild(logLine(e)));
+    stillsPart.dataset.count = String(st.log.length);
+  }
 
   const speech = state.speechLog[raw.id];
   const haveSpeech = !!(speech || raw.speechLogUrl);
@@ -2911,9 +3460,9 @@ function renderPreview() {
         .then((r) => (r.ok ? r.text() : Promise.reject()))
         .then((text) => {
           renderPart.innerHTML = "";
-          text.trimEnd().split("\n").slice(-LOG_WINDOW)
+          text.trimEnd().split("\n").slice(-LOG_WINDOW).reverse()
             .forEach((t) => renderPart.appendChild(logLine(t)));
-          box.scrollTop = box.scrollHeight;
+          box.scrollTop = 0;
         })
         .catch(() => {
           renderPart.innerHTML = "";
@@ -2927,7 +3476,7 @@ function renderPreview() {
       renderPart.appendChild(logLine("# not rendered yet"));
     }
   } else {
-    lines.slice(-LOG_WINDOW).forEach((e) => renderPart.appendChild(logLine(e)));
+    lines.slice(-LOG_WINDOW).reverse().forEach((e) => renderPart.appendChild(logLine(e)));
     // paintLog appends from here rather than rebuilding, so it needs to know
     // how much of the log is already on screen.
     renderPart.dataset.count = String(lines.length);
@@ -2938,16 +3487,16 @@ function renderPreview() {
       // A session run has no saved header, so it gets one: which process this
       // came from should be readable without inferring it from content.
       speechPart.appendChild(logLine("# spoken line"));
-      speech.slice(-LOG_WINDOW).forEach((t) => speechPart.appendChild(logLine(t)));
+      speech.slice(-LOG_WINDOW).reverse().forEach((t) => speechPart.appendChild(logLine(t)));
     } else {
       speechPart.appendChild(el("span", "log-empty", "loading speech log…"));
       fetch(raw.speechLogUrl)
         .then((r) => (r.ok ? r.text() : Promise.reject()))
         .then((text) => {
           speechPart.innerHTML = "";
-          text.trimEnd().split("\n").slice(-LOG_WINDOW)
+          text.trimEnd().split("\n").slice(-LOG_WINDOW).reverse()
             .forEach((t) => speechPart.appendChild(logLine(t)));
-          box.scrollTop = box.scrollHeight;
+          box.scrollTop = 0;
         })
         .catch(() => {
           speechPart.innerHTML = "";
@@ -2956,8 +3505,10 @@ function renderPreview() {
     }
   }
 
-  host.appendChild(box);
-  box.scrollTop = box.scrollHeight;
+  logPane.appendChild(box);
+  detailPanes.append(detailsPane, logPane);
+  showDetailTab(activeDetailTab);
+  box.scrollTop = 0;
 }
 
 /* Two shapes reach here: live lines arrive as {level, text} from the
@@ -2998,21 +3549,21 @@ function staleNotes(raw, status) {
 
   const why = staleWhy(raw.id);
   if (why && status !== "running") {
-    const note = el("div", "stale-note");
+    // The shot-strip's CHANGED tag already says this clip is out of date —
+    // no need to say it again here. What the tag can't do is let the user
+    // dismiss it, so that action (only) still lives in this panel.
+    const note = el("div", "stale-note stale-note-compact");
     note.dataset.note = "stale";
-    note.append(
-      el("strong", null, "This clip is out of date. "),
-      el("span", null, `${why}. It will be re-rendered by “Render all”.`)
-    );
+    note.title = why;
     // The judgement is sometimes the user's: a board that predates change
     // tracking cannot be *shown* to match, but they may know that it does,
     // and half an hour of GPU time to prove it is a poor trade. That is an
     // assertion, so it is theirs to make rather than ours to infer.
-    const keep = el("button", "btn btn-sm", "Keep this take");
+    const keep = el("button", "btn btn-sm btn-ghost", "Keep this take");
     keep.title =
-      "Records this clip as a render of what the board says now, without " +
-      "re-rendering it. Use it when you know the clip is current.";
-    keep.style.marginTop = "var(--sp-2)";
+      `${why}. Keeping it records this clip as a render of what the board ` +
+      "says now, without re-rendering it — use it when you know the clip " +
+      "is still current.";
     keep.addEventListener("click", async () => {
       keep.disabled = true;
       try {
@@ -3026,7 +3577,7 @@ function staleNotes(raw, status) {
         keep.disabled = false;
       }
     });
-    note.appendChild(el("div")).appendChild(keep);
+    note.appendChild(keep);
     out.push(note);
   }
 
@@ -3140,6 +3691,7 @@ function diagnostic(raw, shot) {
     try {
       state.status = await API.render(state.slug, [raw.id], state.board);
       state.awaitingBatch = true;
+      state.followRender = true;
       startPolling();
       render();
     } catch (err) {
@@ -3188,11 +3740,16 @@ function syncTabDots() {
   });
 }
 
-/* A rewrite is a proposal, never an edit. The prompt is the user's authorship
-   and it took thought to write, so the model's version appears alongside it
-   with an explicit Use this — replacing the text outright would destroy work
-   with no way back. */
-function wandButton(raw, textarea) {
+/* A rewrite is a proposal, never an edit. The text being rewritten is the
+   user's authorship and it took thought to write, so the model's version
+   appears alongside it with an explicit Use this — replacing the text
+   outright would destroy work with no way back.
+
+   Generic across every rewritable field (a shot prompt, the scene
+   description, the background sound): the caller supplies the tooltip, where
+   the proposal slot lives, how to ask for the rewrite, and what to do with
+   the result. */
+function wandButton({ title, slot, rewrite, onUse }) {
   const svc = currentLLM();
   const btn = el("button", "btn btn-sm wand");
   btn.append(el("span", "wand-icon", "🪄"), el("span", null, "Rewrite"));
@@ -3209,23 +3766,20 @@ function wandButton(raw, textarea) {
     btn.title = svc.message || `${svc.label} is not reachable`;
     return btn;
   }
-  btn.title =
-    `Restyle this shot prompt for ${modelLabel(raw.model)} using ` +
-    `${svc.label} (${svc.model}). Takes up to a minute on a local model, and ` +
-    `shows you the result before changing anything.`;
+  btn.title = title(svc);
 
   btn.addEventListener("click", async () => {
-    const slot = btn.closest(".tab-pane").querySelector(".proposal-slot");
-    slot.innerHTML = "";
+    const slotEl = slot();
+    slotEl.innerHTML = "";
     btn.disabled = true;
     btn.classList.add("busy");
     const label = btn.lastChild;
     label.textContent = "rewriting…";
     try {
-      const r = await API.rewrite(state.slug, raw.id, textarea.value);
-      slot.appendChild(proposalBox(r, raw, textarea, slot));
+      const r = await rewrite();
+      slotEl.appendChild(proposalBox(r, onUse, slotEl));
     } catch (err) {
-      slot.appendChild(el("div", "inline-warn", `⚠ Rewrite failed: ${err.message}`));
+      slotEl.appendChild(el("div", "inline-warn", `⚠ Rewrite failed: ${err.message}`));
     } finally {
       btn.disabled = false;
       btn.classList.remove("busy");
@@ -3235,7 +3789,7 @@ function wandButton(raw, textarea) {
   return btn;
 }
 
-function proposalBox(r, raw, textarea, slot) {
+function proposalBox(r, onUse, slot) {
   const box = el("div", "proposal");
   const head = el("div", "proposal-head");
   head.appendChild(el("strong", null, "Proposed rewrite"));
@@ -3248,13 +3802,8 @@ function proposalBox(r, raw, textarea, slot) {
   const acts = el("div", "proposal-acts");
   const use = el("button", "btn btn-sm btn-primary", "Use this");
   use.addEventListener("click", () => {
-    textarea.value = r.text;
-    (shotById(raw.id) || raw).prompt = r.text;
-    markDirty();
-    updateResolvedPreview();
-    syncTabDots();
+    onUse(r.text);
     slot.innerHTML = "";
-    toast("Shot prompt replaced. Undo by editing it back — the old text is above.");
   });
   const drop = el("button", "btn btn-sm btn-ghost", "Discard");
   drop.addEventListener("click", () => (slot.innerHTML = ""));

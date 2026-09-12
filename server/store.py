@@ -216,9 +216,12 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "steps": int(shot.get("steps") or 0),
         "seed": int(shot.get("seed") or 0),
         "draft": bool(defaults.get("draft")),
+        "sketch": bool(defaults.get("draft")) and bool(defaults.get("sketch")),
     }
     if payload["draft"]:
-        payload["draftProfile"] = "384-long-edge-4-step-no-audio-light-frames"
+        payload["draftProfile"] = "384-long-edge-4-step-with-audio"
+    if payload["sketch"]:
+        payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["model"] == "ref2va":
         payload["ref2vaProfile"] = "shot-reference-set-isolated-v2"
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -328,6 +331,8 @@ def default_board(name: str) -> dict[str, Any]:
             "frames": 124,
             "steps": 8,
             "draft": False,
+            "sketch": False,
+            "stillsSize": "small",
             "tts": "none",
             "llm": "",       # "" means: use the server's default service
         },
@@ -848,6 +853,8 @@ class Store:
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
         defaults.setdefault("draft", False)
+        defaults.setdefault("sketch", False)
+        defaults.setdefault("stillsSize", "small")
         defaults.setdefault("tts", "none")
         defaults.setdefault("llm", "")
 
