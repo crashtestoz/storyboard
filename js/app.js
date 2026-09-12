@@ -335,6 +335,19 @@ function batchOutcome(status) {
   return { msg: `Render finished — ${bits.join(", ")}.`, kind };
 }
 
+function projectBatchOutcome(status) {
+  const pb = status && status.projectBatch;
+  const total = (pb && pb.total) || [];
+  const errors = (pb && pb.errors) || {};
+  const failedCount = Object.keys(errors).length;
+  const bits = [`${total.length} project(s)`];
+  if (failedCount) bits.push(`${failedCount} could not render — ${Object.keys(errors).join(", ")}`);
+  return {
+    msg: `Batch render finished — ${bits.join(", ")}.`,
+    kind: failedCount ? "error" : "info",
+  };
+}
+
 /* ==========================================================================
    Boot
    ========================================================================== */
@@ -573,6 +586,20 @@ function wireChrome() {
     }
   });
 
+  $("#btnBatchRender").addEventListener("click", openBatchDialog);
+  $("#batchClose").addEventListener("click", () => ($("#batchDialog").hidden = true));
+  $("#batchDialog").addEventListener("click", (e) => {
+    if (e.target === $("#batchDialog")) $("#batchDialog").hidden = true;
+  });
+  $("#batchStart").addEventListener("click", startProjectBatch);
+  $("#batchBannerStop").addEventListener("click", async () => {
+    try {
+      await API.stop();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  });
+
   $("#boardPicker").addEventListener("change", async (e) => {
     await saveNow();
     await openBoard(e.target.value);
@@ -758,6 +785,97 @@ function paintOpenList() {
   });
 }
 
+/* ==========================================================================
+   Batch Render — several projects, one after another, each with its own
+   saved settings. Meant for setting a night's worth of renders going at
+   once rather than babysitting "Render all" project by project.
+   ========================================================================== */
+
+async function openBatchDialog() {
+  const host = $("#batchList");
+  $("#batchDialog").hidden = false;
+  host.innerHTML = "";
+  host.appendChild(el("div", "empty-state", "loading…"));
+  try {
+    state.boards = (await API.listBoards()).boards;
+  } catch (err) {
+    host.innerHTML = "";
+    host.appendChild(el("div", "empty-state", `Could not list storyboards: ${err.message}`));
+    return;
+  }
+  if (!state.batchSelection) state.batchSelection = new Set();
+  // Prune any selection left over from projects that no longer exist.
+  const known = new Set(state.boards.map((b) => b.slug));
+  [...state.batchSelection].forEach((slug) => {
+    if (!known.has(slug)) state.batchSelection.delete(slug);
+  });
+  paintBatchList();
+}
+
+function paintBatchList() {
+  const host = $("#batchList");
+  host.innerHTML = "";
+  if (!state.boards.length) {
+    host.appendChild(el("div", "empty-state", "No storyboards yet — use New."));
+    return;
+  }
+  state.boards.forEach((b) => {
+    const row = el("div", "open-row");
+    const main = el("div", "open-main");
+
+    const titleRow = el("label", "batch-row-label");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = state.batchSelection.has(b.slug);
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.batchSelection.add(b.slug);
+      else state.batchSelection.delete(b.slug);
+    });
+    titleRow.appendChild(cb);
+    const title = el("div", "open-name");
+    title.appendChild(el("span", null, b.name));
+    if (b.slug === state.slug) title.appendChild(el("span", "open-tag", "open now"));
+    titleRow.appendChild(title);
+    main.appendChild(titleRow);
+
+    main.appendChild(
+      el("div", "open-meta",
+         `${b.shots} shot${b.shots === 1 ? "" : "s"} · ` +
+         `${b.rendered} rendered · ${relTime(b.updatedAt)}`)
+    );
+    row.appendChild(main);
+    row.addEventListener("click", (e) => {
+      if (e.target === cb) return;
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event("change"));
+    });
+    host.appendChild(row);
+  });
+}
+
+async function startProjectBatch() {
+  const slugs = Array.from(state.batchSelection || []);
+  if (!slugs.length) {
+    toast("Select at least one project first.", "warn");
+    return;
+  }
+  const btn = $("#batchStart");
+  btn.disabled = true;
+  try {
+    await saveNow();
+    state.status = await API.renderBatch(slugs);
+    $("#batchDialog").hidden = true;
+    state.awaitingBatch = true;
+    startPolling();
+    render();
+    toast(`Batch started — ${slugs.length} project(s) queued.`, "info");
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function relTime(ts) {
   if (!ts) return "unknown";
   const secs = Math.max(0, Date.now() / 1000 - ts);
@@ -916,6 +1034,7 @@ async function refreshStatus() {
     const s = await API.status();
     const wasBusy = state.status && state.status.busy;
     const wasStillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
+    const wasProjectBatch = !!(state.status && state.status.projectBatch && state.status.projectBatch.active);
     state.status = s;
 
     const stillsBusy = !!(s.stills && s.stills.busy);
@@ -936,7 +1055,7 @@ async function refreshStatus() {
       const res = await API.getBoard(state.slug);
       takeStale(res);
       state.board = res.board;
-      const done = batchOutcome(s);
+      const done = wasProjectBatch ? projectBatchOutcome(s) : batchOutcome(s);
       toast(done.msg, done.kind);
     }
     if (wasStillsBusy && !stillsBusy) {
@@ -1011,8 +1130,10 @@ function paintLive() {
   const busy = !!(state.status && state.status.busy);
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
+  paintBatchBanner();
   paintMeta();
   paintRenderHint();
 
@@ -1129,12 +1250,33 @@ function render() {
   const busy = !!(state.status && state.status.busy);
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
+  paintBatchBanner();
 
   paintMeta();
   paintRenderHint();
   focusRestore(snap);
+}
+
+/* Shown whenever a multi-project batch is in flight, regardless of which
+   project happens to be open — that render may be on a project you are not
+   even looking at, so this is the one place its progress is always visible. */
+function paintBatchBanner() {
+  const pb = state.status && state.status.projectBatch;
+  const banner = $("#batchBanner");
+  if (!pb || !pb.active) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  const doneCount = pb.done.length;
+  const totalCount = pb.total.length;
+  const current = state.boards.find((b) => b.slug === pb.current);
+  const currentName = current ? current.name : pb.current || "…";
+  $("#batchBannerText").textContent =
+    `Batch rendering — ${currentName} (${doneCount + 1} of ${totalCount})…`;
 }
 
 /* What "Render all" will actually do.

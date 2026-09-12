@@ -41,9 +41,20 @@
       <span class="backend-badge" id="backendBadge" data-healthy="true">—</span>
       <button class="btn btn-danger" id="btnStop" disabled>Stop</button>
       <button class="btn btn-primary" id="btnRender">▶ Render all</button>
+      <button class="btn btn-ghost" id="btnBatchRender"
+        title="Render several projects in sequence, e.g. overnight">☰ Batch Render</button>
       <button class="btn btn-ghost" id="btnAssemble"
         title="Join the rendered clips into one video">⧉ Assemble</button>
     </header>
+
+    <!-- A quiet status strip, shown only while a multi-project batch is
+         active — the render itself may be on a project other than the one
+         currently open, so this is the one place progress is always
+         visible regardless of what's on screen. -->
+    <div class="batch-banner" id="batchBanner" hidden>
+      <span id="batchBannerText"></span>
+      <button class="btn btn-ghost btn-sm" id="batchBannerStop">Stop batch</button>
+    </div>
 
     <!-- ================= rail ================= -->
     <aside class="rail">
@@ -171,6 +182,27 @@
             not its location, so this cannot open one in place; renders stay
             with the original.
           </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="batchDialog" class="modal" hidden>
+    <div class="modal-card" style="width:min(560px,100%)">
+      <div class="modal-head">
+        <span>Batch Render</span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-ghost btn-sm" id="batchClose">Close</button>
+      </div>
+      <div class="modal-body" style="display:block" id="batchList"></div>
+      <div class="modal-foot">
+        <div>
+          Each project renders in full — the same as clicking "Render all"
+          on it — using whatever draft/sketch/model settings that project
+          already has saved, then the next one starts automatically.
+        </div>
+        <div style="margin-top:var(--sp-3)">
+          <button class="btn btn-primary btn-sm" id="batchStart">Start batch</button>
         </div>
       </div>
     </div>
