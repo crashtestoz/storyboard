@@ -453,6 +453,8 @@ class Handler(BaseHTTPRequestHandler):
                 warnings.append("H3 cannot combine exact frame anchors with the Ref2VA reference-image list; frame anchors take priority.")
             if model == "fl2va" and (shot.get("referenceImages") or any(c.get("image") for c in board.get("characters", []) if c.get("id") in shot.get("characterIds", []))):
                 warnings.append("FL2VA uses frame anchors; scene reference images and Cast portraits are not supplied.")
+            if model == "fl2va" and re.search(r"@[A-Za-z0-9_-]+", shot.get("prompt") or ""):
+                warnings.append("FL2VA does not use tagged image references; @tags are treated as ordinary prompt text. Switch to Ref2VA to use the images.")
             native = audio and _clones_voice(shot, board, model)
             if shot.get("dialogueSource") == "native" and not native:
                 warnings.append("Native dialogue requires Ref2VA and a speaker reference voice.")
