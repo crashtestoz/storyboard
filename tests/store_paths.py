@@ -17,10 +17,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "server"))
+sys.path.insert(0, str(ROOT))
 
-from backends.base import ShotPaths          # noqa: E402
-from store import Store, default_shot        # noqa: E402
+from server.backends.base import ShotPaths          # noqa: E402
+from server.store import Store, default_shot        # noqa: E402
 
 failures: list[str] = []
 

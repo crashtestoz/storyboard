@@ -170,6 +170,15 @@ def _ref_key(ref: Any) -> str | None:
     return ref.get("path") or ref.get("url") or ""
 
 
+def speech_fingerprint(shot: dict, board: dict) -> str:
+    from .dubbing import speaker_for
+    speaker = speaker_for(shot, board) or {}
+    payload = [shot.get("dialogue", "").strip(), shot.get("dialogueStyle", "").strip(),
+               speaker.get("id"), _ref_key(speaker.get("voice")), speaker.get("voiceText"),
+               shot.get("dialogueVoice"), (board.get("defaults") or {}).get("tts")]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
     """Hash of everything that decides what a render of *shot* produces.
 
@@ -194,6 +203,16 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         if c.get("id") in wanted
     ]
     payload = {
+        "layeringVersion": 3,
+        "speechInputs": speech_fingerprint(shot, board),
+        "recording": shot.get("dialogueAudioUrl") if shot.get("dialogueSource") == "recording" else None,
+        "dialogueSource": shot.get("dialogueSource", "auto"),
+        "dialogueStyle": shot.get("dialogueStyle", ""),
+        "speakerId": shot.get("speakerId", ""),
+        "dialogueVoice": shot.get("dialogueVoice", ""),
+        "dubMode": shot.get("dubMode", "mix"),
+        "voices": [{"id": c.get("id"), "voice": _ref_key(c.get("voice")), "voiceText": c.get("voiceText", "")} for c in board.get("characters", []) if c.get("id") in wanted or c.get("id") == shot.get("speakerId")],
+        "referenceMetadata": [{"tag": r.get("tag", ""), "role": r.get("role", "")} for r in ([shot.get("startRef"), shot.get("endRef")] + (shot.get("referenceImages") or []) + (board.get("styleRefs") or []) + [c.get("image") for c in board.get("characters", []) if c.get("id") in wanted]) if isinstance(r, dict)],
         "prompt": (shot.get("prompt") or "").strip(),
         "dialogue": (shot.get("dialogue") or "").strip(),
         "soundNote": (shot.get("soundNote") or "").strip(),
@@ -257,6 +276,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "soundNote": "",
         "characterIds": [],
         "dialogue": "",           # the spoken line, synthesised separately
+        "dialogueSource": "recording", # use the approved Dialogue-window take
         "dialogueStyle": "",      # delivery notes for TTS, not spoken text
         "dialogueVoice": "",      # engine voice id, or "" for the default
         "speakerId": "",          # which cast member says it; "" = infer

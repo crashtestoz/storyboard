@@ -70,21 +70,21 @@ H3_FRAME_RULE = FrameRule(
 # text-to-video and the reference image silently does nothing.
 H3_SIZE_ALIGN = 32
 
-# Every dimension here is a multiple of 32, matching H3's rounded canvas and
-# still satisfying Krea's multiple-of-16 requirement. Grouped by aspect so the
-# UI can offer a ratio rather than a pixel string. Sizes above H3's documented
-# 768p canvas are deliberate "try it if you can afford the time/RAM" options
-# and remain labelled untested unless a model marks them otherwise.
+# H3-Base generates at a 768-pixel short edge by default. The first entry in
+# each group is that base canvas, rounded to the model's required multiple of
+# 32. The smaller entries are useful local preview canvases. The separate
+# H3-Regenerate-2K service is not part of this local backend, so 2K sizes are
+# deliberately not presented as native H3-Base output choices.
 ASPECT_TABLE: dict[str, list[str]] = {
     "21:9": ["1792x768", "1344x576", "1120x480"],
-    "16:9": ["1920x1088", "1536x864", "1344x768", "1280x736",
-             "960x544", "832x480", "672x384"],
-    "4:3":  ["1280x960", "1024x768", "768x576", "640x480"],
-    "1:1":  ["1536x1536", "1344x1344", "1024x1024", "768x768", "640x640"],
-    "3:4":  ["960x1280", "768x1024", "576x768"],
-    "9:16": ["1088x1920", "864x1536", "768x1344", "544x960", "480x832"],
+    "16:9": ["1344x768", "960x544", "832x480"],
+    "4:3":  ["1024x768", "768x576", "640x480"],
+    "1:1":  ["768x768", "576x576", "480x480"],
+    "3:4":  ["768x1024", "576x768", "480x640"],
+    "9:16": ["768x1344", "544x960", "480x832"],
 }
 ALL_RESOLUTIONS = [r for group in ASPECT_TABLE.values() for r in group]
+H3_BASE_RESOLUTIONS = [group[0] for group in ASPECT_TABLE.values()]
 
 # The sizes each model's own documentation actually cites. Anything else in
 # ALL_RESOLUTIONS is offered but untested.
@@ -277,7 +277,7 @@ class VpipeBackend(Backend):
 
     def prepare(self, shot: dict, project: dict, paths: ShotPaths) -> JobSpec:
         paths.ensure()
-        model = shot.get("model") or "fl2va"
+        model, automatic_reason = _effective_video_model(shot, project)
         # Resolve every reference source before choosing the pipeline. Ref2VA
         # skips an empty request; FL2VA can render that shot from text instead.
         # Keep the board's choice intact so later chained shots still use it.
@@ -296,6 +296,16 @@ class VpipeBackend(Backend):
                     + (cap.unavailable_reason or "FL2VA is not available")
                 )
             raise ValueError(cap.unavailable_reason or f"{model} is not available")
+
+        if shot.get("dialogueSource") == "recording" and (shot.get("dialogue") or "").strip():
+            from ..store import speech_fingerprint
+            speech = paths.abs_dir / "dialogue.wav"
+            if not speech.exists():
+                raise ValueError("Generate and preview the Dialogue-window recording before rendering")
+            if (shot.get("dialogueSpokenText", "").strip() != shot["dialogue"].strip()
+                    or shot.get("dialogueSpokenStyle", "").strip() != shot.get("dialogueStyle", "").strip()
+                    or (shot.get("speechFingerprint") and shot["speechFingerprint"] != speech_fingerprint(shot, project))):
+                raise ValueError("Dialogue recording is out of date; generate it again before rendering")
 
         # Resolution is a project setting, not a per-shot one: a storyboard
         # produces one video, and mixing frame sizes between shots would just
@@ -319,6 +329,8 @@ class VpipeBackend(Backend):
         # motion-only pass (see the frame-count comment below), so there is
         # no dialogue or sound to generate in the first place.
         with_audio = cap.supports_audio and not sketch
+        if shot.get("dialogue") and shot.get("dialogueSource") == "native" and not _clones_voice(shot, project, model):
+            raise ValueError("Native dialogue requires Ref2VA and a speaker with a reference voice")
         prompt = _resolved_prompt(
             shot,
             project,
@@ -436,6 +448,7 @@ class VpipeBackend(Backend):
                 + f" · {steps} steps"
                 + (" · SKETCH" if sketch else " · DRAFT" if draft else "")
                 + (" · no references: using FL2VA" if reference_fallback else "")
+                + (f" · {automatic_reason}" if automatic_reason else "")
             ),
         )
 
@@ -1205,8 +1218,8 @@ def _resolved_prompt(
     view = _view_constraint(shot)
     if view:
         parts.append(view)
-    if not has_shot_refs:
-        parts.append((project.get("sceneDescription") or "").strip())
+    parts.append((project.get("sceneDescription") or "").strip())
+    parts.append("Shared scene and Cast details are defaults. Explicit shot instructions take priority for actions, setting, and appearance changes.")
 
     # Characters appearing in this shot, named so the shot prompt can refer to
     # them ("Kira ducks behind the crate"). Only the ones this shot casts —
@@ -1214,18 +1227,33 @@ def _resolved_prompt(
     for ch in _shot_characters(shot, project):
         name = (ch.get("name") or "").strip()
         desc = (ch.get("description") or "").strip()
-        if has_shot_refs and ch.get("image") and name:
-            parts.append(
-                f"{name}: use the character portrait for identity, silhouette, "
-                "materials, and color only; follow this shot for pose, camera "
-                "angle, and environment."
-            )
-            continue
         character = _character_description(name, desc)
         if character:
             parts.append(character)
+        if model == "ref2va" and ch.get("image"):
+            parts.append(
+                f"{name or 'The selected character'}: use the character portrait "
+                "and Cast description together to maintain appearance. Use the "
+                "portrait for visual identity and the Cast description for "
+                "persistent appearance details, clothing, and equipment. Ignore "
+                "pose and background in the portrait or Cast description. "
+                "Follow the scene prompt for actions, expressions, posture, "
+                "camera, environment, and any explicit appearance changes."
+            )
 
-    parts.append((shot.get("prompt") or "").strip())
+    bindings = _reference_bindings(shot, project, model)
+    for entry in bindings:
+        parts.append(f"{entry['token']}: {entry['name']} reference; use for {entry['role']} only")
+    shot_prompt = (shot.get("prompt") or "").strip()
+    tags = {e["tag"]: e["token"] for e in bindings if e["tag"]}
+    def replace_tag(match):
+        tag = match.group(1)
+        if tag not in tags:
+            raise ValueError(f"Unknown or unsupported reference tag @{tag}")
+        return tags[tag]
+    parts = [re.sub(r"@([A-Za-z0-9_-]+)", replace_tag, part) for part in parts]
+    shot_prompt = re.sub(r"@([A-Za-z0-9_-]+)", replace_tag, shot_prompt)
+    parts.append(shot_prompt)
     line = (shot.get("dialogue") or "").strip()
     clones_voice = bool(line) and _clones_voice(shot, project, model)
     if with_audio:
@@ -1244,6 +1272,28 @@ def _resolved_prompt(
                 "dubbed separately."
             )
     return " ".join(_sentence(p) for p in parts if p)
+
+
+def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
+    """Choose the H3 partition required by the scene's concrete inputs.
+
+    FL2VA owns keyframe anchors. Ref2VA owns the reference-media list. H3
+    cannot combine those two conditioning layouts in one render.
+    """
+    requested = (
+        shot.get("model")
+        or (project.get("defaults") or {}).get("model")
+        or "fl2va"
+    )
+    if requested not in ("fl2va", "ref2va"):
+        return requested, ""
+    if shot.get("startRef") or shot.get("endRef"):
+        reason = "using FL2VA for frame anchors" if requested != "fl2va" else ""
+        return "fl2va", reason
+    if shot.get("referenceImages"):
+        reason = "using Ref2VA for reference images" if requested != "ref2va" else ""
+        return "ref2va", reason
+    return requested, ""
 
 
 def _ref2va_references(
@@ -1278,21 +1328,14 @@ def _ref2va_references(
     # packs references instead of keyframes -- but each is still a shot-local
     # visual reference, so together they should outrank portraits and
     # project-wide style references.
-    for ref in _shot_reference_images(shot):
-        add_image(ref)
-
-    for ch in _shot_characters(shot, project):
-        add_image(ch.get("image"))
-
-    if not _shot_reference_images(shot):
-        for r in project.get("styleRefs") or []:
-            add_image(r)
+    for entry in _reference_bindings(shot, project, "ref2va"):
+        add_image(entry["ref"])
 
     # Only the character who actually speaks this shot's line — every other
     # cast member's voice clip would just be a second, unlabelled candidate
     # voice for the same line, which is exactly the kind of ambiguity that
     # caused H3 to blend/duplicate a voice instead of cloning one cleanly.
-    if include_audio_refs and (shot.get("dialogue") or "").strip():
+    if include_audio_refs and shot.get("dialogueSource", "auto") != "recording" and (shot.get("dialogue") or "").strip():
         speaker = speaker_for(shot, project)
         if speaker:
             add_sound(speaker.get("voice"))
@@ -1306,23 +1349,44 @@ def _ref2va_references(
     return (images + sounds)[:12]
 
 
-def _shot_reference_images(shot: dict) -> list[Any]:
-    """Every image this shot points at, for a model with no true anchor port.
+def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
+    """One ordered manifest shared by prompt labels and image encoder inputs."""
+    candidates = []
+    if model == "ref2va":
+        candidates.extend((r, "Shot reference", "environment and composition") for r in _shot_reference_images(shot))
+        candidates.extend((c["image"], c.get("name") or "Character", "character identity")
+                          for c in _shot_characters(shot, project) if c.get("image"))
+        if not _shot_reference_images(shot):
+            candidates.extend((r, "Project style", "style") for r in project.get("styleRefs") or [])
+    # FL2VA anchors are wired directly to the model's keyframe ports. They
+    # are not members of a prompt-addressable reference list.
+    result, seen, tags = [], {}, set()
+    for ref, name, role in candidates:
+        data = ref if isinstance(ref, dict) else {"path": ref}
+        key = data.get("path") or data.get("resolved") or ("chain:" + data.get("from", "") if data.get("kind") == "chain" else "")
+        if not key:
+            continue
+        tag = (data.get("tag") or "").strip().lstrip("@")
+        if tag and (not re.fullmatch(r"[A-Za-z0-9_-]+", tag) or tag in tags):
+            raise ValueError(f"Reference tags must be unique letters, digits, hyphens or underscores: @{tag}")
+        if key in seen:
+            if tag:
+                raise ValueError("Use one reference entry per tagged image")
+            continue
+        if len(result) >= 9:
+            raise ValueError("Ref2VA accepts at most 9 unique images; remove unused references")
+        token = f"<Picture {len(result) + 1}>"
+        seen[key] = token
+        if tag:
+            tags.add(tag)
+        result.append(dict(ref=ref, token=token, tag=tag, name=name,
+                           role=data.get("role") or role))
+    return result
 
-    Ref2VA has no first/last-frame input at all — it takes one flat list of
-    reference images (see ``_ref2va_spec``) — so a start or end frame anchor
-    set on a Ref2VA shot cannot pin a frame; the closest it can do is join
-    the same reference set everything else here does. Leaving either one out
-    would make it silently do nothing, while the "Frame anchors" panel still
-    tells the user it is "stored ... for continuity".
-    """
-    refs = []
-    if shot.get("startRef"):
-        refs.append(shot.get("startRef"))
-    if shot.get("endRef"):
-        refs.append(shot.get("endRef"))
-    refs.extend(shot.get("referenceImages") or [])
-    return refs
+
+def _shot_reference_images(shot: dict) -> list[Any]:
+    """The prompt-addressable Ref2VA images, excluding FL2VA anchors."""
+    return list(shot.get("referenceImages") or [])
 
 
 def _view_constraint(shot: dict) -> str:
@@ -1348,7 +1412,7 @@ def _clones_voice(shot: dict, project: dict, model: str) -> bool:
     sounds like, so asking it to "speak in their own voice" there would be
     asking it to invent one, not clone one.
     """
-    if model != "ref2va":
+    if model != "ref2va" or shot.get("dialogueSource", "auto") == "recording":
         return False
     speaker = speaker_for(shot, project)
     return bool(speaker and (speaker.get("voice") or {}).get("path"))
@@ -1375,16 +1439,9 @@ def _dialogue_visual_cue(
 
 
 def _speaker_name(shot: dict, project: dict) -> str:
-    cast = _shot_characters(shot, project)
-    speaker_id = shot.get("speakerId") or ""
-    if speaker_id:
-        for ch in project.get("characters") or []:
-            if ch.get("id") == speaker_id and (ch.get("name") or "").strip():
-                return ch["name"].strip()
-    named = [(ch.get("name") or "").strip() for ch in cast]
-    named = [name for name in named if name]
-    if named:
-        return named[0]
+    speaker = speaker_for(shot, project)
+    if speaker and (speaker.get("name") or "").strip():
+        return speaker["name"].strip()
     return "The visible character"
 
 

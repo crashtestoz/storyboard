@@ -626,13 +626,16 @@ function wireChrome() {
   $("#addCharacter").addEventListener("click", () => editCharacter(null));
 
   $("#projAspect").addEventListener("change", (e) => {
-    // keep the closest size when the ratio changes, rather than resetting
+    // Preserve the quality tier when rotating/changing shape. Comparing the
+    // short edge works for both landscape and portrait; comparing width would
+    // jump a 544p landscape project to the largest portrait canvas.
     const opts = resolutionsByAspect()[e.target.value] || [];
     if (!opts.length) return;
-    const [cw] = projectResolution().split("x").map(Number);
+    const [cw, ch] = projectResolution().split("x").map(Number);
+    const currentShort = Math.min(cw, ch);
     const closest = opts.reduce((best, r) =>
-      Math.abs(Number(r.split("x")[0]) - cw) <
-      Math.abs(Number(best.split("x")[0]) - cw)
+      Math.abs(Math.min(...r.split("x").map(Number)) - currentShort) <
+      Math.abs(Math.min(...best.split("x").map(Number)) - currentShort)
         ? r
         : best
     );
@@ -1450,7 +1453,7 @@ function renderRail() {
   sndMode.checked = state.board.soundscapeInShots !== false;
   sndMode.title = sndMode.checked
     ? "The background sound text is included in every shot render."
-    : "The background sound text is kept for the final mix/add-later stage; only per-shot sound accents render now.";
+    : "Background sound is disabled for rendering. Only per-shot sound accents are included; no background track is added automatically later.";
 
   const wrap = $("#styleRefs");
   wrap.innerHTML = "";
@@ -1512,11 +1515,13 @@ function renderRail() {
   const groups = resolutionsByAspect();
   const current = projectResolution();
   const currentAspect = aspectOf(current);
+  if (!groups[currentAspect]) groups[currentAspect] = [];
+  if (!groups[currentAspect].includes(current)) groups[currentAspect].push(current);
 
   const aspSel = $("#projAspect");
   aspSel.innerHTML = "";
   Object.keys(groups).forEach((a) => {
-    const o = el("option", null, a);
+    const o = el("option", null, aspectLabel(a));
     o.value = a;
     if (a === currentAspect) o.selected = true;
     aspSel.appendChild(o);
@@ -1525,27 +1530,24 @@ function renderRail() {
   const resSel = $("#projResolution");
   resSel.innerHTML = "";
   (groups[currentAspect] || []).forEach((r) => {
-    const tested = isTestedResolution(r);
-    const o = el("option", null, r.replace("x", " × ") + (tested ? "" : "  (untested)"));
+    const o = el("option", null, frameSizeLabel(r, groups[currentAspect]));
     o.value = r;
     if (r === current) o.selected = true;
     resSel.appendChild(o);
   });
 
-  // Say plainly when a size is outside what the model's docs cite. It will
-  // usually work; it is just not a promise, and the cost scales with pixels.
+  // H3-Base is the local generator. H3's advertised 2K output is produced by
+  // a separate regeneration service which this backend does not include.
   const noteHost = $("#resNoteField");
   noteHost.innerHTML = "";
-  if (!isTestedResolution(current)) {
-    noteHost.appendChild(
-      el(
-        "div",
-        "field-warn",
-        `⚠ ${current} is not a size this model's docs cite — usually fine, but ` +
-          `untested, and cost scales with pixel count`
-      )
-    );
-  }
+  const supported = allResolutions().includes(current);
+  noteHost.appendChild(el(
+    "div",
+    supported ? "field-note" : "field-warn",
+    supported
+      ? "H3-Base canvas. The largest option for each ratio uses the official 768px short edge; smaller canvases render faster. 2K requires H3-Regenerate-2K, which is not installed locally."
+      : `⚠ ${current.replace("x", " × ")} is a legacy custom size. Choose an H3-Base size before the next render.`
+  ));
 
   // draft mode
   const dt = $("#draftToggle");
@@ -2524,8 +2526,10 @@ function renderEditor() {
       dubRow.appendChild(replaceToggle);
 
       const dubBtn = el("button", "btn btn-sm", "Generate");
-      dubBtn.disabled = !engNow || !engNow.healthy;
-      dubBtn.title = !engNow || !engNow.healthy
+      dubBtn.disabled = raw.dialogueSource === "native" || !engNow || !engNow.healthy;
+      dubBtn.title = raw.dialogueSource === "native"
+        ? "H3 generates speech during rendering. Select Dialogue-window recording to generate a separate take."
+        : !engNow || !engNow.healthy
         ? (engNow && engNow.message) || "No speech engine selected — see ⚙ Settings"
         : willClone
         ? `Synthesise with ${engNow.label}, cloning ${speaker.name}’s voice`
@@ -2775,8 +2779,16 @@ function renderEditor() {
     });
     style.dataset.fkey = "dialogue-style";
     const dp = el("div");
+    const source = el("select");
+    source.setAttribute("aria-label", "Dialogue source");
+    for (const [value, label] of [["recording", "Use Dialogue-window recording"], ["native", "Generate speech with H3 (Ref2VA + voice reference)"], ["auto", "Legacy automatic selection"]]) {
+      const option = el("option", null, label); option.value = value; source.appendChild(option);
+    }
+    source.value = raw.dialogueSource || "auto";
+    source.onchange = () => { live().dialogueSource = source.value; markDirty(); renderEditor(); };
+    dp.append(paneHint("Dialogue source — recording uses the take you generated and previewed; H3 creates a new performance"), source);
     dp.append(
-      paneHint("drives mouth movement; the final voice is mixed in separately"),
+      paneHint("spoken words — rendered using the dialogue source selected above"),
       dlg,
       paneHint("voice direction — sent to compatible speech engines, not spoken aloud"),
       style
@@ -2907,7 +2919,7 @@ function renderEditor() {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     const lbl = el("div", "section-label", "Frame anchors");
-    lbl.appendChild(el("span", "hint", "— opens/closes on this exact frame"));
+    lbl.appendChild(el("span", "hint", "— exact FL2VA opening and closing frames; adding one selects FL2VA"));
     refPanel.appendChild(lbl);
 
     const slots = el("div", "ref-slots");
@@ -2924,9 +2936,12 @@ function renderEditor() {
       cb.type = "checkbox";
       cb.checked = !!(raw.startRef && raw.startRef.kind === "chain");
       cb.addEventListener("change", () => {
-        live().startRef = cb.checked
+        const current = live();
+        current.startRef = cb.checked
           ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
           : null;
+        if (cb.checked) current.model = "fl2va";
+        else selectReferenceModel(current);
         markDirty();
         render();
       });
@@ -2940,9 +2955,8 @@ function renderEditor() {
         el(
           "div",
           "hint-body",
-          `${cap.label.split("—")[0].trim()} sends these as shot reference ` +
-            `images rather than exact start/end frames — they describe the ` +
-            `scene, not a frame this model can pin.`
+          `Adding a start frame, end frame, or chain changes this scene to ` +
+            `FL2VA because Ref2VA cannot pin exact output frames.`
         )
       );
     }
@@ -2955,16 +2969,12 @@ function renderEditor() {
     refPanel.appendChild(el("div", "section-label", "Reference images"));
     refPanel.appendChild(shotReferenceImages(raw));
 
-    const supportsAnchors = cap.supportsStartAnchor || cap.supportsEndAnchor;
     const note = cap.supportsStyleRefs
-      ? (supportsAnchors
-          ? `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
-            `Start/end frame anchors above still control exact opening and closing frames.`
-          : `${cap.label.split("—")[0].trim()} uses these as clip reference images. ` +
-            `The start and end frames above are also sent as primary shot references.`)
+      ? `${cap.label.split("—")[0].trim()} uses each tagged image as a separate ` +
+        `prompt reference. Adding an exact frame anchor changes the scene to FL2VA, ` +
+        `which cannot also consume this reference list.`
       : `${cap.label.split("—")[0].trim()} does not use shot reference images, ` +
-        `so these are stored with the clip but not used ` +
-        `until you switch to a reference-capable model.`;
+        `so adding one changes this scene to Ref2VA.`;
     refPanel.appendChild(el("div", "hint-body", note));
     host.appendChild(refPanel);
   }
@@ -2985,7 +2995,9 @@ function renderEditor() {
         raw.model,
         (v) => {
           const sh = live();
-          sh.model = v;
+          if (sh.startRef || sh.endRef) sh.model = "fl2va";
+          else if ((sh.referenceImages || []).length) sh.model = "ref2va";
+          else sh.model = v;
           const c = modelCap(v);
           if (c) {
             if (!c.resolutions.includes(sh.resolution))
@@ -3129,6 +3141,26 @@ function resolutionsByAspect() {
   return groups;
 }
 
+function frameSizeLabel(res, group) {
+  const pixels = res.replace("x", " × ");
+  if (group && group[0] === res && allResolutions().includes(res)) {
+    return `${pixels}  · H3-Base 768p`;
+  }
+  if (allResolutions().includes(res)) return `${pixels}  · reduced`;
+  return `${pixels}  · legacy custom`;
+}
+
+function aspectLabel(aspect) {
+  return ({
+    "21:9": "21:9 · ultrawide",
+    "16:9": "16:9 · widescreen",
+    "4:3": "4:3 · landscape",
+    "1:1": "1:1 · square",
+    "3:4": "3:4 · portrait",
+    "9:16": "9:16 · vertical",
+  })[aspect] || aspect;
+}
+
 /** Is this size one the selected model's own docs cite? */
 function isTestedResolution(res) {
   const vids = state.models.filter((m) => m.available && m.kind === "video");
@@ -3195,6 +3227,16 @@ function resolvedParts(raw) {
       const n = (c.name || "").trim();
       const d = (c.description || "").trim();
       if (d) push(`cast · ${n || "unnamed"}`, characterDescription(n, d));
+      if (raw.model === "ref2va" && c.image) {
+        push(`cast guidance · ${n || "unnamed"}`,
+          `${n || "The selected character"}: use the character portrait ` +
+          "and Cast description together to maintain appearance. Use the " +
+          "portrait for visual identity and the Cast description for " +
+          "persistent appearance details, clothing, and equipment. Ignore " +
+          "pose and background in the portrait or Cast description. " +
+          "Follow the scene prompt for actions, expressions, posture, " +
+          "camera, environment, and any explicit appearance changes.");
+      }
     });
 
   push("shot", raw.prompt);
@@ -3204,7 +3246,7 @@ function resolvedParts(raw) {
     if (state.board.soundscapeInShots !== false) {
       push("sound bed", state.board.soundscape);   // project-wide
     } else if ((state.board.soundscape || "").trim()) {
-      push("sound bed", "(held for final mix; not sent to this shot render)");
+      push("sound bed", "(disabled; not sent to this shot render)");
     }
     push("accents", raw.soundNote);              // this clip only
     if ((raw.dialogue || "").trim()) {
@@ -3272,22 +3314,19 @@ function paintResolvedInto(host, raw) {
   if (!host || !raw) return;
   host.innerHTML = "";
 
-  const parts = resolvedParts(raw);
-  if (!parts.length) {
-    host.appendChild(el("div", "empty-state", "Nothing to send yet."));
-    return;
-  }
-  parts.forEach(({ source, text }) => {
-    const seg = el("div", "seg");
-    seg.appendChild(el("span", "seg-source", source));
-    seg.appendChild(el("span", "seg-text", text));
-    host.appendChild(seg);
+  const requestId = String((Number(host.dataset.requestId) || 0) + 1);
+  host.dataset.requestId = requestId;
+  host.appendChild(el("div", "hint", "Resolving render inputs…"));
+  req("POST", "/api/render-preview", {board: state.board, shot: raw}).then((result) => {
+    if (host.dataset.requestId !== requestId) return;
+    host.innerHTML = "";
+    host.appendChild(el("div", "seg-source", `${result.model} · ${result.dialogueSource}`));
+    host.appendChild(el("div", "seg-text", result.prompt));
+    for (const ref of result.references) host.appendChild(el("div", "hint", `${ref.token} · ${ref.tag ? "@" + ref.tag + " · " : ""}${ref.name} · ${ref.role}`));
+    for (const warning of result.warnings) host.appendChild(el("div", "inline-warn", warning));
+  }).catch((error) => {
+    if (host.dataset.requestId === requestId) { host.innerHTML = ""; host.appendChild(el("div", "inline-warn", error.status === 404 ? "Restart the Storyboard server after the active render queue finishes to enable the updated render preview." : error.message)); }
   });
-
-  const total = el("div", "seg-total");
-  const words = resolvedPromptText(raw).split(/\s+/).filter(Boolean).length;
-  total.textContent = `${parts.length} parts · ${words} words, joined in this order`;
-  host.appendChild(total);
 }
 
 /** Repaint whatever is already on screen, for live edits after a render. */
@@ -4217,6 +4256,7 @@ function refSlot(label, shot, key, pickerTitle = null) {
         const current = shotById(shot.id);
         if (!current) return;
         current[key] = null;
+        selectReferenceModel(current);
         markDirty();
         render();
         await saveNow();
@@ -4234,6 +4274,7 @@ function refSlot(label, shot, key, pickerTitle = null) {
     const current = shotById(shot.id);
     if (!current) return;
     current[key] = chosen;
+    current.model = "fl2va";
     markDirty();
     render();
     await saveNow();
@@ -4253,7 +4294,8 @@ function shotReferenceImages(shot) {
     const replace = async (chosen) => {
       const current = shotById(shot.id);
       if (!current || !current.referenceImages?.[i]) return;
-      current.referenceImages[i] = chosen;
+      current.referenceImages[i] = { ...chosen, tag: current.referenceImages[i].tag || "", role: current.referenceImages[i].role || "" };
+      selectReferenceModel(current);
       markDirty();
       render();
       await saveNow();
@@ -4277,6 +4319,19 @@ function shotReferenceImages(shot) {
       const chosen = await API.uploadRef(slug, file);
       if (state.slug === slug) await replace(chosen);
     });
+    const controls = el("div");
+    const tag = el("input"); tag.placeholder = "Tag, e.g. falcon-corridor"; tag.value = ref.tag || "";
+    tag.setAttribute("aria-label", `Reference ${i + 1} tag`);
+    tag.onchange = () => { const current = shotById(shot.id)?.referenceImages?.[i]; if (current) current.tag = tag.value.trim().replace(/^@/, ""); markDirty(); updateResolvedPreview(); };
+    const role = el("select"); role.setAttribute("aria-label", `Reference ${i + 1} role`);
+    for (const value of ["environment and composition", "environment", "composition", "style", "character identity", "object appearance"]) {
+      const option = el("option", null, value); option.value = value; role.appendChild(option);
+    }
+    role.value = ref.role || "environment and composition";
+    role.onchange = () => { const current = shotById(shot.id)?.referenceImages?.[i]; if (current) current.role = role.value; markDirty(); updateResolvedPreview(); };
+    controls.append(tag, role, el("span", "hint", "Use @tag in the shot prompt"));
+    controls.addEventListener("click", (event) => event.stopPropagation());
+    slot.appendChild(controls);
     wrap.appendChild(slot);
   });
 
@@ -4299,6 +4354,7 @@ function shotReferenceImages(shot) {
       for (const f of files) {
         shot.referenceImages.push(await API.uploadRef(state.slug, f));
       }
+      selectReferenceModel(shot);
       markDirty();
       await saveNow();
       render();
@@ -4315,6 +4371,7 @@ async function addShotReferenceImage(shot) {
   if (!chosen) return;
   if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
   shot.referenceImages.push(chosen);
+  selectReferenceModel(shot);
   markDirty();
   await saveNow();
   render();
@@ -4568,9 +4625,18 @@ async function pickRef(shot, key, pickerTitle = null) {
   const current = shotById(shot.id);
   if (!current) return;
   current[key] = chosen;
+  current.model = "fl2va";
   markDirty();
   await saveNow();
   render();
+}
+
+function selectReferenceModel(shot) {
+  if (shot.startRef || shot.endRef) {
+    shot.model = "fl2va";
+    return;
+  }
+  if ((shot.referenceImages || []).length) shot.model = "ref2va";
 }
 
 document.addEventListener("DOMContentLoaded", boot);
