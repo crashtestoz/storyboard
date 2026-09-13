@@ -2405,6 +2405,10 @@ async function addShot() {
     const { board, shot } = await API.addShot(state.slug, {});
     state.board = board;
     state.selectedId = shot.id;
+    // Adding a shot is an explicit editing action. Do not let an in-flight
+    // batch's output-follow mode immediately move the editor back to the
+    // shot the orchestrator is rendering.
+    state.followRender = false;
     render();
   } catch (err) {
     toast(err.message, "error");
@@ -2888,7 +2892,16 @@ function renderEditor() {
         const ids = new Set(raw.characterIds || []);
         if (ids.has(ch.id)) ids.delete(ch.id);
         else ids.add(ch.id);
-        live().characterIds = [...ids];
+        const current = live();
+        current.characterIds = [...ids];
+        // Reference media needs Ref2VA. Exact start/end anchors are a
+        // stronger temporal constraint and keep FL2VA, so the warning below
+        // can explain that tradeoff instead of making the user choose a
+        // technical model merely because they selected a character.
+        if (ids.has(ch.id) && (ch.image || ch.voice) &&
+            !current.startRef && !current.endRef) {
+          current.model = "ref2va";
+        }
         markDirty();
         renderEditor();
       };
@@ -2904,9 +2917,10 @@ function renderEditor() {
         el(
           "div",
           "inline-warn",
-          `⚠ ${withMedia.length} of these have a reference image or voice, but ` +
-            `this model takes no reference list — only their descriptions will ` +
-            `be used. Switch the shot to Ref2VA to use the media.`
+          `⚠ Using FL2VA because this shot has an exact start/end frame anchor. ` +
+            `Character descriptions are included, but ${withMedia.length} ` +
+            `character reference image/voice set(s) are not used. ` +
+            `Choose Ref2VA to prioritize character and reference media.`
         )
       );
     }
@@ -2964,6 +2978,45 @@ function renderEditor() {
     host.appendChild(refPanel);
   }
 
+  // Chaining is still useful while editing a Ref2VA shot: choosing it changes
+  // the shot back to FL2VA, where the previous shot's last frame is an exact
+  // start anchor. Keep this continuity control visible even though Ref2VA
+  // hides the separate start/end anchor slots.
+  if (isVideoShot && raw.model === "ref2va" && idx > 0) {
+    const prev = shots()[idx - 1];
+    const continuity = el("div", "panel");
+    continuity.style.marginTop = "var(--sp-3)";
+    continuity.appendChild(
+      el("div", "section-label", "Scene continuity")
+    );
+    continuity.appendChild(
+      el("div", "hint-body", "Continue this scene from the previous scene's last frame. This switches the shot to FL2VA.")
+    );
+    const wrap = el("div");
+    wrap.style.marginTop = "var(--sp-3)";
+    const toggle = el("label", "toggle");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = false;
+    checkbox.addEventListener("change", () => {
+      const current = live();
+      current.startRef = checkbox.checked
+        ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
+        : null;
+      if (checkbox.checked) current.model = "fl2va";
+      markDirty();
+      render();
+    });
+    toggle.append(
+      checkbox,
+      el("span", "toggle-track"),
+      el("span", null, `Chain start frame from scene ${idx}`)
+    );
+    wrap.appendChild(toggle);
+    continuity.appendChild(wrap);
+    host.appendChild(continuity);
+  }
+
   if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
@@ -2987,11 +3040,15 @@ function renderEditor() {
 
   params.appendChild(
     field(
-      "Model",
+      "Generation mode",
       select(
         state.models.map((m) => [
           m.id,
-          m.available ? m.label : `${m.label}  — unavailable`,
+          m.id === "fl2va"
+            ? "Scene continuity — exact start/end frames (FL2VA)"
+            : m.id === "ref2va"
+              ? "Character and reference images (Ref2VA)"
+              : m.available ? m.label : `${m.label}  — unavailable`,
         ]),
         raw.model,
         (v) => {
@@ -3041,7 +3098,8 @@ function renderEditor() {
           markDirty();
           render();
         }
-      )
+      ),
+      "Use Scene continuity for exact frame anchors, or Character and reference images for portraits and tagged references."
     )
   );
 
