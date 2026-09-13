@@ -528,7 +528,15 @@ class Handler(BaseHTTPRequestHandler):
                     text,
                     scene=board.get("sceneDescription") or "",
                     characters=cast,
-                    reference_images=_rewrite_reference_images(shot, cast),
+                    reference_images=_rewrite_reference_images(
+                        shot, cast, board.get("styleRefs")
+                    ),
+                    reference_files=_materialize_rewrite_images(
+                        ctx.data_dir,
+                        _rewrite_reference_images(
+                            shot, cast, board.get("styleRefs")
+                        ),
+                    ),
                     kind="still" if (cap and cap.kind == "image") else "shot",
                 )
             elif field == "sceneDescription":
@@ -545,6 +553,12 @@ class Handler(BaseHTTPRequestHandler):
                     text,
                     reference_images=_rewrite_reference_images(
                         None, [], board.get("styleRefs")
+                    ),
+                    reference_files=_materialize_rewrite_images(
+                        ctx.data_dir,
+                        _rewrite_reference_images(
+                            None, [], board.get("styleRefs")
+                        ),
                     ),
                     kind="scene",
                 )
@@ -577,10 +591,21 @@ class Handler(BaseHTTPRequestHandler):
             if not (ctype or "").startswith("image/"):
                 raise ValueError("the selected reference is not an image")
 
+            voice = None
+            voice_rel = payload.get("voice")
+            if voice_rel:
+                voice = self._resolve_within(ctx.data_dir, voice_rel)
+                vtype, _ = mimetypes.guess_type(str(voice or voice_rel))
+                if voice is None or not voice.is_file():
+                    raise FileNotFoundError(f"no such reference voice: {voice_rel}")
+                if not (vtype or "").startswith("audio/"):
+                    raise ValueError("the selected reference voice is not audio")
+
             service = ctx.llm(payload.get("service") or ctx.default_llm)
             proposal = describe_character(
                 service,
                 image,
+                voice=voice,
                 name=payload.get("name") or "",
                 current=payload.get("description") or "",
             )
@@ -1079,10 +1104,16 @@ def _rewrite_reference_images(
         if not label:
             return
         item = {
-            "role": role,
+            "role": (ref.get("role") if isinstance(ref, dict) else "") or role,
             "label": label,
             "summary": _label_summary(label),
         }
+        if isinstance(ref, dict) and ref.get("tag"):
+            item["tag"] = str(ref["tag"]).strip().lstrip("@")
+        if isinstance(ref, dict) and ref.get("path"):
+            item["path"] = str(ref["path"])
+        elif isinstance(ref, str):
+            item["path"] = ref
         if item not in refs:
             refs.append(item)
 
@@ -1098,6 +1129,23 @@ def _rewrite_reference_images(
         role = f"Character portrait for {name}" if name else "Character portrait"
         add(role, ch.get("image"))
     return refs
+
+
+def _materialize_rewrite_images(
+    root: Path, refs: list[dict[str, str]]
+) -> list[Path]:
+    """Resolve the image refs that are actually attached to a rewrite call."""
+    files: list[Path] = []
+    for ref in refs:
+        rel = ref.get("path") or ""
+        target = (root / posixpath.normpath("/" + rel).lstrip("/")).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            continue
+        if target.is_file():
+            files.append(target)
+    return files
 
 
 def _is_image_ref(ref: Any) -> bool:

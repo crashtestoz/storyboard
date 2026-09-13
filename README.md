@@ -415,7 +415,9 @@ restyle. The result is shown as a **proposal with Use this / Discard** — never
 applied on the model's word, because the prompt is your authorship and took
 thought to write. The scene description and the shot's cast go along as
 context marked *do not repeat*, since both are already prepended when the full
-prompt is assembled.
+prompt is assembled. The shot's attached reference photos are also sent to
+vision-capable rewrite services, so the rewrite can use their actual visual
+constraints without describing attached character identities in prose.
 
 The same 🪄 button rewrites three other fields, each with its own house
 style so the model does not blur what belongs where: the project's **scene
@@ -425,6 +427,9 @@ project's **background sound** (grounded in the scene description, proposing
 concrete effects suited to that setting rather than a vague mood), and a
 shot's own **sound accents** (grounded in that shot's own prompt — the
 action, environment and materials in it — and explicitly never dialogue).
+The character **AI** button sends the portrait, attached voice clip (when
+present), and starting description to a multimodal service and asks only for a
+character description, never a scene description.
 
 **Dialogue, cloned twice over — once for real.** On a Ref2VA shot, the
 speaking character's own voice clip is already sent in as a soundtrack

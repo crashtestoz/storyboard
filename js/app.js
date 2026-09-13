@@ -2067,6 +2067,7 @@ async function editCharacter(existing) {
     try {
       const r = await API.describeCharacter(
         image,
+        draft.voice && draft.voice.path,
         $("#castName").value.trim(),
         field.value.trim(),
         llm && llm.id
@@ -2915,7 +2916,7 @@ function renderEditor() {
   // Clip references: keep the user's intent on the shot even when the
   // currently selected model only consumes part of it.
   const isVideoShot = cap && cap.kind !== "image";
-  if (isVideoShot) {
+  if (isVideoShot && raw.model !== "ref2va") {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     const lbl = el("div", "section-label", "Frame anchors");
@@ -2995,7 +2996,38 @@ function renderEditor() {
         raw.model,
         (v) => {
           const sh = live();
-          if (sh.startRef || sh.endRef) sh.model = "fl2va";
+          if (v === "ref2va" && !(sh.startRef?.kind === "chain" || sh.endRef?.kind === "chain")) {
+            if (!Array.isArray(sh.referenceImages)) sh.referenceImages = [];
+            const moveAnchor = (anchor, tag) => {
+              if (!anchor) return;
+              const key = referenceKey(anchor);
+              const existing = sh.referenceImages.find((ref) => referenceKey(ref) === key);
+              if (existing) {
+                if (!existing.tag) existing.tag = tag;
+              } else {
+                sh.referenceImages.push({
+                  ...anchor,
+                  tag,
+                  role: anchor.role || "environment and composition",
+                });
+              }
+            };
+            moveAnchor(sh.startRef, "start-frame");
+            moveAnchor(sh.endRef, "end-frame");
+            sh.startRef = null;
+            sh.endRef = null;
+            sh.model = "ref2va";
+          } else if (v === "fl2va" && !(sh.startRef || sh.endRef)) {
+            const refs = sh.referenceImages || [];
+            const start = refs.find((ref) => ref.tag === "start-frame");
+            const end = refs.find((ref) => ref.tag === "end-frame");
+            if (start) sh.startRef = { ...start, tag: undefined };
+            if (end) sh.endRef = { ...end, tag: undefined };
+            sh.referenceImages = refs.filter(
+              (ref) => ref !== start && ref !== end
+            );
+            sh.model = "fl2va";
+          } else if (sh.startRef || sh.endRef) sh.model = "fl2va";
           else if ((sh.referenceImages || []).length) sh.model = "ref2va";
           else sh.model = v;
           const c = modelCap(v);
@@ -4045,7 +4077,9 @@ function syncTabDots() {
 function wandButton({ title, slot, rewrite, onUse }) {
   const svc = currentLLM();
   const btn = el("button", "btn btn-sm wand");
-  btn.append(el("span", "wand-icon", "🪄"), el("span", null, "Rewrite"));
+  const icon = stageIconSvg("rewrite");
+  icon.classList.add("rewrite-icon");
+  btn.append(icon, el("span", null, "Rewrite"));
 
   if (!svc || svc.id === "none") {
     btn.disabled = true;
@@ -4177,6 +4211,8 @@ function referenceActions(slot, label, replace, remove) {
       toast(`Could not update reference: ${err.message}`, "error");
     }
   });
+  const actions = el("div", "ref-actions");
+  actions.addEventListener("click", (event) => event.stopPropagation());
   const button = el("button", "pick-delete", "🗑");
   button.type = "button";
   button.title = `Remove ${label}`;
@@ -4192,7 +4228,8 @@ function referenceActions(slot, label, replace, remove) {
       button.disabled = false;
     }
   });
-  return button;
+  actions.appendChild(button);
+  return actions;
 }
 
 function imageDrop(slot, upload) {
@@ -4294,13 +4331,17 @@ function shotReferenceImages(shot) {
     const replace = async (chosen) => {
       const current = shotById(shot.id);
       if (!current || !current.referenceImages?.[i]) return;
-      current.referenceImages[i] = { ...chosen, tag: current.referenceImages[i].tag || "", role: current.referenceImages[i].role || "" };
+      current.referenceImages[i] = {
+        ...chosen,
+        tag: current.referenceImages[i].tag || referenceTagFor(chosen) || "",
+        role: current.referenceImages[i].role || "",
+      };
       selectReferenceModel(current);
       markDirty();
       render();
       await saveNow();
     };
-    slot.appendChild(referenceActions(slot, `reference image ${i + 1}`,
+    const actions = referenceActions(slot, `reference image ${i + 1}`,
       async () => {
         const slug = state.slug;
         const chosen = await chooseImage("Replace shot reference image");
@@ -4313,23 +4354,22 @@ function shotReferenceImages(shot) {
         markDirty();
         render();
         await saveNow();
-      }));
+      });
+    actions.appendChild(referenceTagControl(shot, i, ref));
+    slot.appendChild(actions);
     imageDrop(slot, async (file) => {
       const slug = state.slug;
       const chosen = await API.uploadRef(slug, file);
       if (state.slug === slug) await replace(chosen);
     });
-    const controls = el("div");
-    const tag = el("input"); tag.placeholder = "Tag, e.g. falcon-corridor"; tag.value = ref.tag || "";
-    tag.setAttribute("aria-label", `Reference ${i + 1} tag`);
-    tag.onchange = () => { const current = shotById(shot.id)?.referenceImages?.[i]; if (current) current.tag = tag.value.trim().replace(/^@/, ""); markDirty(); updateResolvedPreview(); };
+    const controls = el("div", "ref-role-control");
     const role = el("select"); role.setAttribute("aria-label", `Reference ${i + 1} role`);
     for (const value of ["environment and composition", "environment", "composition", "style", "character identity", "object appearance"]) {
       const option = el("option", null, value); option.value = value; role.appendChild(option);
     }
     role.value = ref.role || "environment and composition";
     role.onchange = () => { const current = shotById(shot.id)?.referenceImages?.[i]; if (current) current.role = role.value; markDirty(); updateResolvedPreview(); };
-    controls.append(tag, role, el("span", "hint", "Use @tag in the shot prompt"));
+    controls.append(el("span", "ref-role-label", "Role"), role);
     controls.addEventListener("click", (event) => event.stopPropagation());
     slot.appendChild(controls);
     wrap.appendChild(slot);
@@ -4366,15 +4406,86 @@ function shotReferenceImages(shot) {
   return wrap;
 }
 
+function referenceTagControl(shot, index, ref) {
+  const host = el("span", "ref-tag-control");
+  host.addEventListener("click", (event) => event.stopPropagation());
+  const button = el("button", "ref-tag-pill", ref.tag ? `@${ref.tag}` : "Add tag");
+  button.type = "button";
+  button.title = ref.tag ? "Edit reference tag" : "Add a tag for this reference";
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const input = el("input", "ref-tag-input");
+    input.type = "text";
+    input.value = ref.tag || "";
+    input.placeholder = "tag-name";
+    input.setAttribute("aria-label", "Reference tag");
+    const save = el("button", "ref-tag-save", "Save");
+    save.type = "button";
+    const cancel = () => { host.replaceChildren(button); };
+    const commit = async () => {
+      const current = shotById(shot.id)?.referenceImages?.[index];
+      if (!current) return;
+      const tag = input.value.trim().replace(/^@/, "")
+        .replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "");
+      current.tag = tag;
+      propagateReferenceTag(current, tag);
+      markDirty();
+      updateResolvedPreview();
+      render();
+      await saveNow();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commit(); }
+      if (e.key === "Escape") cancel();
+    });
+    save.addEventListener("click", (e) => { e.stopPropagation(); commit(); });
+    host.replaceChildren(input, save);
+    input.focus();
+    input.select();
+  });
+  host.appendChild(button);
+  return host;
+}
+
 async function addShotReferenceImage(shot) {
   const chosen = await chooseImage("Choose an additional shot reference image");
   if (!chosen) return;
   if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
-  shot.referenceImages.push(chosen);
+  shot.referenceImages.push({
+    ...chosen,
+    tag: referenceTagFor(chosen) || "",
+  });
   selectReferenceModel(shot);
   markDirty();
   await saveNow();
   render();
+}
+
+function referenceKey(ref) {
+  return (ref && (ref.path || ref.url || ref.resolved) || "")
+    .replace(/^\/media\//, "");
+}
+
+function referenceTagFor(ref) {
+  const key = referenceKey(ref);
+  if (!key || !state.board) return "";
+  for (const shot of state.board.shots || []) {
+    for (const candidate of shot.referenceImages || []) {
+      if (referenceKey(candidate) === key && candidate.tag) return candidate.tag;
+    }
+  }
+  return "";
+}
+
+function propagateReferenceTag(source, tag) {
+  const key = referenceKey(source);
+  if (!key || !state.board) return;
+  for (const shot of state.board.shots || []) {
+    for (const candidate of shot.referenceImages || []) {
+      if (candidate !== source && referenceKey(candidate) === key) candidate.tag = tag;
+    }
+  }
 }
 
 /**
