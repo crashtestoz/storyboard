@@ -1249,6 +1249,12 @@ def _resolved_prompt(
     def replace_tag(match):
         tag = match.group(1)
         if tag not in tags:
+            # FL2VA has no prompt-addressable reference-image list. A tag can
+            # legitimately remain in the prompt when a user switches away
+            # from Ref2VA; keep its meaning as ordinary words and let the UI
+            # explain that the image is inactive instead of failing prepare.
+            if model != "ref2va":
+                return tag.replace("-", " ").replace("_", " ")
             raise ValueError(f"Unknown or unsupported reference tag @{tag}")
         return tags[tag]
     parts = [re.sub(r"@([A-Za-z0-9_-]+)", replace_tag, part) for part in parts]
