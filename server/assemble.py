@@ -72,6 +72,8 @@ def shot_clip(shot_dir: Path, shot: dict[str, Any] | None = None) -> Path | None
     clip = shot_dir / "clip.mp4"
     if not (clip.exists() and clip.stat().st_size > 1024):
         return None
+    if shot and shot.get("renderedDialogueSource") == "native":
+        return clip
     dubbed = shot_dir / "clip-dubbed.mp4"
     if (
         dubbed.exists()

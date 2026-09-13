@@ -433,6 +433,40 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._accept_take(m.group(1), m.group(2))
 
+        if path == "/api/render-preview":
+            from .backends.vpipe_backend import (
+                SKETCH_STYLE_PREFIX, _clones_voice, _effective_video_model,
+                _reference_bindings, _resolved_prompt,
+            )
+            payload = self._read_json() or {}
+            board, shot = payload["board"], payload["shot"]
+            model, automatic_reason = _effective_video_model(shot, board)
+            refs = _reference_bindings(shot, board, model)
+            if model == "ref2va" and not refs:
+                model = "fl2va"
+            cap = ctx.backend.capability(model)
+            audio = bool(cap and cap.supports_audio and not ((board.get("defaults") or {}).get("draft") and (board.get("defaults") or {}).get("sketch")))
+            warnings = []
+            if automatic_reason:
+                warnings.append(automatic_reason[0].upper() + automatic_reason[1:] + ".")
+            if model == "fl2va" and (shot.get("startRef") or shot.get("endRef")) and shot.get("referenceImages"):
+                warnings.append("H3 cannot combine exact frame anchors with the Ref2VA reference-image list; frame anchors take priority.")
+            if model == "fl2va" and (shot.get("referenceImages") or any(c.get("image") for c in board.get("characters", []) if c.get("id") in shot.get("characterIds", []))):
+                warnings.append("FL2VA uses frame anchors; scene reference images and Cast portraits are not supplied.")
+            native = audio and _clones_voice(shot, board, model)
+            if shot.get("dialogueSource") == "native" and not native:
+                warnings.append("Native dialogue requires Ref2VA and a speaker reference voice.")
+            source = "H3 native speech" if native else "Dialogue-window recording"
+            if not audio:
+                source = "No generated audio"
+            prompt = _resolved_prompt(shot, board, with_audio=audio, model=model)
+            if (board.get("defaults") or {}).get("draft") and (board.get("defaults") or {}).get("sketch"):
+                prompt = f"{SKETCH_STYLE_PREFIX} {prompt}"
+            return self._send_json({"prompt": prompt,
+                "model": model, "dialogueSource": source,
+                "references": [{k: v for k, v in r.items() if k != "ref"} for r in refs],
+                "warnings": warnings})
+
         if path == "/api/rewrite":
             payload = self._read_json() or {}
             slug = payload.get("slug")
@@ -913,6 +947,8 @@ class Handler(BaseHTTPRequestHandler):
         # the fresh clip, and must not do that once the line has been edited.
         shot["dialogueSpokenText"] = (text or "").strip()
         shot["dialogueSpokenStyle"] = style
+        from .store import speech_fingerprint
+        shot["speechFingerprint"] = speech_fingerprint({**shot, "dialogue": text, "dialogueStyle": style}, board)
         if result.video:
             shot["dubUrl"] = as_url(result.video)
         shot["speechLogUrl"] = log_url

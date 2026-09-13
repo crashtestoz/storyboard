@@ -706,6 +706,7 @@ class Orchestrator:
                 # so a draft is never mistaken for a finished shot later
                 renderedAs="draft" if spec.payload.get("draft") else "final",
                 renderFingerprint=fingerprint,
+                renderedDialogueSource="native" if voice_cloned_natively else "recording",
             )
             if voice_cloned_natively:
                 # A dub from before this shot cloned its own voice would

@@ -256,7 +256,10 @@ def test_dialogue_prompting() -> None:
           prompt)
 
     shot["model"] = "ref2va"
-    shot["startRef"] = {"kind": "upload", "path": "projects/x/refs/corridor.jpg"}
+    shot["startRef"] = None
+    shot["referenceImages"] = [
+        {"kind": "upload", "path": "projects/x/refs/corridor.jpg"}
+    ]
     shot["prompt"] = "A tracking shot follows Kira from behind."
     prompt = _resolved_prompt(shot, board, with_audio=True, model="ref2va")
     check("a Ref2VA shot reference set is called out as primary visual context",
@@ -265,15 +268,17 @@ def test_dialogue_prompting() -> None:
     check("a rear-view shot gets a first-frame camera constraint",
           "keep the visible character facing away" in prompt,
           prompt)
-    check("shot-local Ref2VA references suppress conflicting project scene text",
-          "An ocean at golden hour." not in prompt,
+    check("shot-local Ref2VA references retain shared scene text",
+          "An ocean at golden hour." in prompt,
           prompt)
-    check("shot-local Ref2VA references suppress conflicting project soundscape",
-          "Deep engine roar." not in prompt,
+    check("shot-local Ref2VA references retain shared soundscape",
+          "Deep engine roar." in prompt,
           prompt)
-    check("image-backed Ref2VA characters do not copy portrait pose text",
-          "focused pilot in a worn flight jacket" not in prompt and
-          "use the character portrait for identity" in prompt,
+    check("image-backed Ref2VA characters retain Cast details with scene priority",
+          "focused pilot in a worn flight jacket" in prompt and
+          "use the character portrait and Cast description together" in prompt and
+          "Ignore pose and background in the portrait or Cast description" in prompt and
+          "any explicit appearance changes" in prompt,
           prompt)
 
 
@@ -308,21 +313,21 @@ def test_ref2va_reference_priority() -> None:
         data_dir=Path("/tmp/ws"),
     )
 
+    shot["dialogue"] = "Hold course."
+    shot["dialogueSource"] = "native"
     refs = _ref2va_references(shot, board, paths)
     names = [Path(r).name for r in refs]
-    check("shot-local images remain first",
-          names[:4] == [
-              "shot.jpg",
-              "shot-end.jpg",
-              "cockpit-left.jpg",
-              "cockpit-right.jpg",
-          ],
+    check("only Ref2VA shot images remain first",
+          names[:2] == ["cockpit-left.jpg", "cockpit-right.jpg"],
+          str(names))
+    check("FL2VA anchors are excluded from the Ref2VA list",
+          "shot.jpg" not in names and "shot-end.jpg" not in names,
           str(names))
     check("shot-local images suppress project style refs",
           "global-1.jpg" not in names and "global-2.jpg" not in names,
           str(names))
     check("character identity comes after shot-local images",
-          names[4] == "character.jpg",
+          names[2] == "character.jpg",
           str(names))
     check("voice references come after images", names[-1] == "voice.wav", str(names))
     draft_refs = _ref2va_references(shot, board, paths, include_audio_refs=False)
@@ -367,7 +372,8 @@ def test_ref2va_fallback(tmp: Path) -> None:
         else:
             target[source] = [ref] if source == "referenceImages" else ref
         job = backend.prepare(target, candidate, paths)
-        check(f"{source} preserves Ref2VA", job.payload["model"] == "ref2va")
+        expected = "fl2va" if source in ("startRef", "endRef", "chain") else "ref2va"
+        check(f"{source} selects {expected.upper()}", job.payload["model"] == expected)
     (workspace / "models/local/MiniMax-H3-FL2VA-8bit").rmdir()
     try:
         backend.prepare(shot, board, paths)
