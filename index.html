@@ -344,13 +344,15 @@
         </div>
         <div class="field">
           <label>Description <span class="hint-inline">required — this is what conditions the model</span></label>
-          <textarea id="castDesc" rows="4"
-            placeholder="Appearance, clothing, build, age — whatever should stay consistent whenever they appear."></textarea>
           <div class="cast-ai-row">
-            <button class="btn btn-sm wand" id="castDescribe" title="Improve from the reference image">
-              <span class="wand-icon">🪄</span><span>AI</span>
+            <button class="btn btn-sm wand" id="castDescribe" title="Rewrite the character description">
+              <svg class="rewrite-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <use href="#stage-icon-rewrite"></use>
+              </svg><span>Rewrite</span>
             </button>
           </div>
+          <textarea id="castDesc" rows="4"
+            placeholder="Appearance, clothing, build, age — whatever should stay consistent whenever they appear."></textarea>
           <div class="proposal-slot" id="castDescProposal"></div>
         </div>
         <div class="field-row">
@@ -621,6 +623,10 @@
       <g id="stage-icon-done" class="stage-icon">
         <circle cx="12" cy="12" r="9"/>
         <path d="M7.7 12.5l2.6 2.6 5.6-6.2"/>
+      </g>
+      <g id="stage-icon-rewrite" class="stage-icon">
+        <path d="M5 18.8l1.1-4.2L15.8 4.9a1.7 1.7 0 0 1 2.4 0l1 1a1.7 1.7 0 0 1 0 2.4L9.5 18.1z"/>
+        <path d="M14.4 6.3l3.3 3.3M4 20.5c2.1-1.1 3.5-.2 5.1.1 1.6.3 2.7-.5 4.2-.2 1.4.3 2.3 1 3.7.4"/>
       </g>
     </defs>
   </svg>

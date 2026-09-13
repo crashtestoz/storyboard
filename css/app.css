@@ -534,7 +534,57 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .ref-slot.filled { border-style: solid; border-color: var(--border); }
 
-.ref-slot .pick-delete { right: var(--sp-2); bottom: var(--sp-2); z-index: 2; }
+.ref-actions {
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  bottom: var(--sp-2);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ref-actions .pick-delete {
+  position: static;
+}
+
+.ref-tag-pill, .ref-tag-save {
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  padding: 2px 8px;
+}
+
+.ref-tag-pill:hover, .ref-tag-save:hover { color: var(--text); border-color: var(--accent-dim); }
+.ref-tag-input { width: 120px; padding: 3px 6px; font-size: var(--fs-xs); }
+.ref-tag-control { display: inline-flex; align-items: center; order: -1; }
+.ref-role-control {
+  position: absolute;
+  left: var(--sp-2);
+  right: var(--sp-2);
+  top: var(--sp-2);
+  z-index: 2;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.ref-role-control select {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  font-size: var(--fs-xs);
+}
+.ref-role-label {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
 
 .ref-slot .clear-ref {
   position: absolute;
@@ -1361,7 +1411,7 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .cast-ai-row {
   display: flex;
   justify-content: flex-end;
-  margin-top: var(--sp-2);
+  margin: var(--sp-2) 0;
 }
 
 /* The toast is how failures are reported, so it has to sit above anything
@@ -1646,10 +1696,16 @@ textarea.ta-compact {
 /* --- prompt rewriting ---------------------------------------------------- */
 
 .wand { flex: none; }
-.wand-icon { margin-right: 4px; }
+.rewrite-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 5px;
+  color: currentColor;
+  vertical-align: -3px;
+}
 .wand.busy { opacity: 0.7; }
 
-.wand.busy .wand-icon {
+.wand.busy .rewrite-icon {
   display: inline-block;
   animation: wand-spin 1.1s linear infinite;
 }

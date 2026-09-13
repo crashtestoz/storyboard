@@ -77,7 +77,10 @@ say what the subject does, in that order.
 - If reference images are listed in the context, treat them as visual \
 constraints. Add a compact natural-language summary of the relevant reference \
 cues to the rewritten prompt, especially location, framing, lighting, material \
-and character identity. Do not include filenames or paths in the final prompt.
+and composition. Character portraits are already attached to the shot when \
+needed: use them for identity consistency, but do not spend words describing \
+their appearance, clothing, or build. Do not include filenames or paths in the \
+final prompt.
 - Refer to named characters by exactly the name the writer used.
 - One paragraph. No headings, no bullet points, no preamble, no explanation, \
 no quotation marks around the whole thing.
@@ -234,12 +237,14 @@ END: <description>
 
 CHARACTER_IMAGE_SYSTEM_PROMPT = """\
 You write compact, production-ready character descriptions for a storyboard to \
-video generator, using the supplied reference image as visual evidence.
+video generator, using the supplied portrait and voice reference as evidence.
 
 Rules:
 - Describe only stable visible traits useful for recreating the character: age \
 range, build, face shape, hair, skin tone, clothing, accessories, posture or \
 distinctive marks.
+- The voice clip is a reference for this character only. Do not describe the \
+scene, setting, action, or camera, and do not transcribe or quote the clip.
 - If a name is provided, start with that name followed by a colon.
 - Preserve any concrete user-provided details that do not contradict the image.
 - Do not identify real people or copyrighted characters from the image. If the \
@@ -300,15 +305,19 @@ def build_user_message(
             role = (r.get("role") or "Reference image").strip()
             label = (r.get("label") or "").strip()
             summary = (r.get("summary") or "").strip()
-            line = f"- {role}: {label}"
+            tag = (r.get("tag") or "").strip().lstrip("@")
+            tag_text = f" @{tag}" if tag else ""
+            line = f"- {role}{tag_text}: {label}"
             if summary and summary != label:
                 line += f" ({summary})"
             lines.append(line)
         blocks.append(
             "Reference images attached to this shot. Use these as visual "
             "constraints when rewriting, and fold a concise summary of their "
-            "visual cues into the prompt. Do not mention filenames or paths in "
-            "the rewritten prompt:\n" + "\n".join(lines)
+            "visual cues into the prompt. An @tag names the corresponding "
+            "attached image; preserve that @tag when it is part of the user's "
+            "shot prompt. Do not mention filenames or paths in the rewritten "
+            "prompt:\n" + "\n".join(lines)
         )
     blocks.append(instruction + "\n" + text.strip())
     return "\n\n".join(blocks)
@@ -345,6 +354,20 @@ class LLMService:
             "vision-capable Ollama or OpenAI-compatible model for image-based "
             "character descriptions."
         )
+
+    def complete_with_media(
+        self, system: str, user: str, *, images: list[Path] | None = None,
+        audio: Path | None = None, timeout: float = 120.0,
+    ) -> str:
+        """Complete with reference media attached to the user message."""
+        if audio is not None:
+            raise RuntimeError(
+                f"{self.label} does not support audio input for character "
+                "descriptions. Configure an OpenAI-compatible multimodal service."
+            )
+        if images:
+            return self.complete_with_image(system, user, images[0], timeout=timeout)
+        return self.complete(system, user, timeout=timeout)
 
     def to_json(self) -> dict[str, Any]:
         ok, msg = self.health()
@@ -476,6 +499,37 @@ class OllamaLLM(LLMService):
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
 
+    def complete_with_media(
+        self, system: str, user: str, *, images: list[Path] | None = None,
+        audio: Path | None = None, timeout: float = 120.0,
+    ) -> str:
+        if audio is not None:
+            raise RuntimeError(
+                f"{self.label} cannot receive voice clips. Configure an "
+                "OpenAI-compatible multimodal service for character rewrite."
+            )
+        body = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user, "images": [
+                    base64.b64encode(p.read_bytes()).decode("ascii")
+                    for p in (images or [])
+                ]},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.4, "top_p": 0.9,
+                        "num_ctx": self.num_ctx},
+            "think": False,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.url}/api/chat", data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            doc = json.loads(r.read().decode())
+        return ((doc.get("message") or {}).get("content") or "").strip()
+
 
 class OpenAICompatLLM(LLMService):
     """Anything exposing ``/v1/chat/completions`` — llama.cpp, vLLM, LM Studio."""
@@ -562,6 +616,39 @@ class OpenAICompatLLM(LLMService):
                 "stream": False,
             }
         ).encode()
+        req = urllib.request.Request(f"{self.url}/v1/chat/completions",
+                                     data=body, headers=self._headers())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            doc = json.loads(r.read().decode())
+        choices = doc.get("choices") or [{}]
+        return ((choices[0].get("message") or {}).get("content") or "").strip()
+
+    def complete_with_media(
+        self, system: str, user: str, *, images: list[Path] | None = None,
+        audio: Path | None = None, timeout: float = 120.0,
+    ) -> str:
+        content: list[dict[str, Any]] = [{"type": "text", "text": user}]
+        for image in images or []:
+            mime = mimetypes.guess_type(str(image))[0] or "application/octet-stream"
+            encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+            content.append({"type": "image_url", "image_url": {
+                "url": f"data:{mime};base64,{encoded}"
+            }})
+        if audio is not None:
+            mime = mimetypes.guess_type(str(audio))[0] or "audio/wav"
+            fmt = mime.split("/", 1)[-1].split(";", 1)[0]
+            if fmt == "mpeg":
+                fmt = "mp3"
+            content.append({"type": "input_audio", "input_audio": {
+                "data": base64.b64encode(audio.read_bytes()).decode("ascii"),
+                "format": fmt,
+            }})
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": content}],
+            "temperature": 0.4, "stream": False,
+        }).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -674,6 +761,7 @@ def rewrite_prompt(
     context_label: str = "",
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
+    reference_files: list[Path] | None = None,
     kind: str = "shot",
 ) -> str:
     """Ask *service* to restyle *text*. Returns the proposal, never applies it.
@@ -692,7 +780,7 @@ def rewrite_prompt(
     if not ok:
         raise RuntimeError(msg)
 
-    out = service.complete(
+    out = service.complete_with_media(
         spec["system"],
         build_user_message(
             text,
@@ -703,6 +791,7 @@ def rewrite_prompt(
             reference_images=reference_images,
             instruction=spec["instruction"],
         ),
+        images=reference_files,
     )
     out = _strip_wrapping(out)
     if not out:
@@ -717,6 +806,7 @@ def describe_character(
     service: LLMService,
     image: Path,
     *,
+    voice: Path | None = None,
     name: str = "",
     current: str = "",
 ) -> str:
@@ -726,9 +816,12 @@ def describe_character(
         raise RuntimeError(msg)
     if not image.is_file():
         raise FileNotFoundError(f"no such reference image: {image}")
+    if voice is not None and not voice.is_file():
+        raise FileNotFoundError(f"no such reference voice: {voice}")
 
     blocks = [
-        "Write or improve the character description from the attached image."
+        "Write or improve the character description from the attached portrait "
+        "and voice clip. Describe the character, never the scene."
     ]
     if name.strip():
         blocks.append(f"Character label: {name.strip()}")
@@ -737,10 +830,11 @@ def describe_character(
             "Current description to preserve where accurate:\n" + current.strip()
         )
 
-    out = service.complete_with_image(
+    out = service.complete_with_media(
         CHARACTER_IMAGE_SYSTEM_PROMPT,
         "\n\n".join(blocks),
-        image,
+        images=[image],
+        audio=voice,
     )
     out = _strip_wrapping(out)
     if not out:

@@ -2,10 +2,18 @@
   "services": [
     {
       "id": "ollama-local",
-      "label": "Ollama (this machine)",
+      "label": "Qwen 3.8 27B MLX",
       "kind": "ollama",
       "url": "http://localhost:11434",
       "model": "qwen3.8:27b-mlx"
+    },
+    {
+      "id": "ollama-qwen35-9b-mlx",
+      "label": "Qwen 3.5 9B MLX",
+      "kind": "ollama",
+      "url": "http://localhost:11434",
+      "model": "qwen3.5:9b-mlx",
+      "numCtx": 8192
     }
   ]
 }

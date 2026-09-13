@@ -61,8 +61,10 @@ const API = {
   rewrite: (slug, { shotId, field, text, service } = {}) =>
     req("POST", "/api/rewrite", { slug, shotId, field, text, service }),
 
-  describeCharacter: (image, name, description, service) =>
-    req("POST", "/api/describe-character", { image, name, description, service }),
+  describeCharacter: (image, voice, name, description, service) =>
+    req("POST", "/api/describe-character", {
+      image, voice, name, description, service,
+    }),
 
   // Returns the NEW slug: renaming moves the project folder, so the caller
   // has to stop using the old one.
