@@ -161,6 +161,15 @@ button, input, textarea, select {
   opacity: 0.8;
 }
 
+/* The rail's scene and sound headings put their project-wide note on the
+   following line. Keep that note close to the heading without changing the
+   spacing of inline section-label hints elsewhere. */
+.section-label-with-note { margin-bottom: 0; }
+.section-label-with-note + .field-note {
+  margin-top: 0;
+  margin-bottom: var(--sp-2);
+}
+
 .panel {
   background: var(--panel-raised);
   border: 1px solid var(--border);
