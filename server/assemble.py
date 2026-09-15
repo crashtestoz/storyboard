@@ -26,6 +26,9 @@ as long as the first clip.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import shutil
 import subprocess
 import time
@@ -49,6 +52,7 @@ class AssemblyResult:
     # shot labels with no usable clip, in board order
     missing: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    settings_fingerprint: str = ""
     error: str = ""
     log: list[str] = field(default_factory=list)
 
@@ -64,6 +68,7 @@ class AssemblyResult:
             "missing": list(self.missing),
             "seconds": round(self.seconds, 2),
             "partial": self.partial,
+            "settingsFingerprint": self.settings_fingerprint,
         }
 
 
@@ -121,8 +126,12 @@ def final_stale_reason(board: dict[str, Any], project_dir: Path) -> str:
     if not record or not out.exists():
         return "not built yet" if _any_clip(board, project_dir) else ""
 
+    if record.get("settingsFingerprint", assembly_fingerprint({})) != assembly_fingerprint(board):
+        return "cut settings, trims or background audio changed"
     built = out.stat().st_mtime
     for i, shot in enumerate(board.get("shots") or []):
+        if shot.get("dubUrl") and shot.get("renderedDialogueSource") != "native" and shot.get("dubAppliedMode") != shot.get("dubMode", "mix"):
+            return "dialogue mix settings need to be applied again"
         clip = shot_clip(project_dir / "shots" / f"{i + 1:02d}", shot)
         if clip is None:
             continue
@@ -193,15 +202,48 @@ def _any_clip(board: dict[str, Any], project_dir: Path) -> bool:
     )
 
 
+def assembly_fingerprint(board: dict) -> str:
+    settings = board.get("assembly") or {}
+    trims = [[s.get("id"), s.get("trimIn", 0), s.get("trimOut", 0)]
+             for s in board.get("shots", []) if s.get("trimIn") or s.get("trimOut")]
+    return hashlib.sha256(json.dumps([settings, trims], sort_keys=True).encode()).hexdigest()[:16]
+
+
+def board_options(board: dict, project_dir: Path, data_dir: Path) -> dict:
+    options = dict(board.get("assembly") or {})
+    options["fingerprint"] = assembly_fingerprint(board)
+    options["trims"] = {}
+    for i, shot in enumerate(board.get("shots", []), 1):
+        clip = shot_clip(project_dir / "shots" / f"{i:02d}", shot)
+        if clip:
+            options["trims"][str(clip)] = [shot.get("trimIn", 0), shot.get("trimOut", 0)]
+    ref = options.pop("backgroundAudio", None)
+    if ref:
+        path = (data_dir / ref["path"]).resolve()
+        if not path.is_relative_to(data_dir.resolve()) or not path.is_file():
+            raise ValueError("Background audio is missing or outside the projects folder")
+        options["backgroundPath"] = str(path)
+    return options
+
+
+def _seconds(value, label):
+    value = float(value or 0)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} must be a finite non-negative number")
+    return value
+
+
 def assemble(
     parts: list[tuple[str, Path | None]],
     out: Path,
     width: int,
     height: int,
     fps: int = FPS,
+    options: dict | None = None,
 ) -> AssemblyResult:
     """Join *parts* — (label, clip or None) in cut order — into *out*."""
-    res = AssemblyResult()
+    options = options or {}
+    res = AssemblyResult(settings_fingerprint=options.get("fingerprint", assembly_fingerprint({})))
     res.missing = [label for label, clip in parts if clip is None]
     clips = [(label, clip) for label, clip in parts if clip is not None]
 
@@ -218,59 +260,77 @@ def assemble(
         res.error = "ffmpeg is not on PATH, so the shots cannot be joined"
         return res
 
-    argv: list[str] = [ffmpeg, "-hide_banner", "-v", "error", "-y"]
-    filters: list[str] = []
-    pairs: list[str] = []
-    n = 0
+    try:
+        transition = _seconds(options.get("transitionSeconds"), "Transition")
+        fade = _seconds(options.get("audioFadeSeconds"), "Audio fade")
+        gain = _seconds(options.get("backgroundVolume", 0.15), "Background volume")
+        if transition > 2 or fade > 2 or gain > 2:
+            raise ValueError("Transition, fade and background volume must be between 0 and 2")
+        timings = []
+        for _, clip in clips:
+            start, tail = (options.get("trims") or {}).get(str(clip), [0, 0])
+            start, tail = _seconds(start, "Trim start"), _seconds(tail, "Trim end")
+            duration = _duration(clip) - start - tail
+            if duration <= 0 or (transition and duration <= 2 * transition):
+                raise ValueError(f"{clip.parent.name}: trims leave too little video for this transition")
+            timings.append((start, duration))
+    except (ValueError, TypeError) as exc:
+        res.error = str(exc)
+        return res
 
-    for _label, clip in clips:
+    argv = [ffmpeg, "-hide_banner", "-v", "error", "-y", "-filter_complex_threads", "1"]
+    for _, clip in clips:
         argv += ["-i", str(clip)]
-        vi = n
-        n += 1
-        # Every clip is forced to one geometry, sample aspect and frame rate.
-        # concat demands it, and a board *can* hold clips of different sizes:
-        # frame size is a project setting now, but shots rendered before it
-        # moved kept their own, and draft mode halves it.
-        video_filter = (
-            f"[{vi}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+    background = options.get("backgroundPath")
+    if background:
+        argv += ["-stream_loop", "-1", "-i", background]
+    filters = []
+    for i, ((_, clip), (start, duration)) in enumerate(zip(clips, timings)):
+        filters.append(
+            f"[{i}:v]trim=start={start}:duration={duration},setpts=PTS-STARTPTS,"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-            f"fps={fps},setpts=PTS-STARTPTS"
+            f"fps={fps},format=yuv420p,settb=AVTB[v{i}]"
         )
-        filters.append(video_filter + f",format=yuv420p[v{vi}]")
         if _has_audio(clip):
-            audio_filter = (
-                f"[{vi}:a]aresample={SAMPLE_RATE}:async=1,"
-                f"aformat=sample_fmts=fltp:channel_layouts=stereo"
-            )
-            filters.append(audio_filter + f",asetpts=PTS-STARTPTS[a{vi}]")
+            audio = f"[{i}:a]atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS"
         else:
-            # A silent stretch of the right length, so concat still gets one
-            # audio stream per segment. Without it a soundless still in the
-            # middle of the board desynchronises everything after it.
-            seconds = _duration(clip) or 1.0
-            argv += [
-                "-f", "lavfi", "-t", f"{seconds:.3f}",
-                "-i", f"anullsrc=channel_layout=stereo:sample_rate={SAMPLE_RATE}",
-            ]
-            ai = n
-            n += 1
-            filters.append(
-                f"[{ai}:a]aformat=sample_fmts=fltp:channel_layouts=stereo[a{vi}]"
-            )
-        pairs.append(f"[v{vi}][a{vi}]")
-
-    filters.append("".join(pairs) + f"concat=n={len(clips)}:v=1:a=1[v][a]")
-
+            audio = f"anullsrc=r={SAMPLE_RATE}:cl=stereo,atrim=duration={duration}"
+        audio += f",aresample={SAMPLE_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo"
+        if options.get("normalizeAudio"):
+            audio += ",loudnorm=I=-16:TP=-1.5:LRA=11"
+        audio += f",apad,atrim=duration={duration},asetpts=PTS-STARTPTS"
+        if fade:
+            length = min(fade, duration / 2)
+            audio += f",afade=t=in:d={length},afade=t=out:st={duration-length}:d={length}"
+        filters.append(audio + f"[a{i}]")
+    total = sum(d for _, d in timings)
+    if transition and len(clips) > 1:
+        accumulated = timings[0][1]
+        video, audio = "v0", "a0"
+        for i in range(1, len(clips)):
+            filters.append(f"[{video}][v{i}]xfade=transition=fade:duration={transition}:offset={accumulated-transition}[vx{i}]")
+            filters.append(f"[{audio}][a{i}]acrossfade=d={transition}:c1=tri:c2=tri[ax{i}]")
+            accumulated += timings[i][1] - transition
+            video, audio = f"vx{i}", f"ax{i}"
+        filters += [f"[{video}]null[v]", f"[{audio}]anull[baseaudio]"]
+        total = accumulated
+    else:
+        pairs = "".join(f"[v{i}][a{i}]" for i in range(len(clips)))
+        filters.append(pairs + f"concat=n={len(clips)}:v=1:a=1[v][baseaudio]")
+    if background:
+        filters.append(f"[{len(clips)}:a]aresample={SAMPLE_RATE},asetpts=PTS-STARTPTS,"
+                       f"atrim=duration={total},volume={gain},afade=t=in:d=0.1,"
+                       f"afade=t=out:st={max(0, total-0.1)}:d=0.1[bed]")
+        filters.append("[baseaudio][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:latency=1[a]")
+    else:
+        filters.append("[baseaudio]anull[a]")
     out.parent.mkdir(parents=True, exist_ok=True)
-    argv += [
-        "-filter_complex", ";".join(filters),
-        "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        str(out),
-    ]
+    temporary = out.with_name(out.stem + ".assembling.mp4")
+    argv += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
+             "-t", str(total), "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+             "-movflags", "+faststart", str(temporary)]
 
     started = time.time()
     try:
@@ -282,11 +342,12 @@ def assemble(
         res.error = "ffmpeg timed out joining the clips"
         return res
 
-    if proc.returncode != 0 or not out.exists() or out.stat().st_size < 1024:
+    if proc.returncode != 0 or not temporary.exists() or temporary.stat().st_size < 1024:
         res.log = (proc.stderr or "").strip().splitlines()[-8:]
         res.error = f"ffmpeg failed (exit {proc.returncode})"
         return res
 
+    temporary.replace(out)
     res.ok = True
     res.path = out
     res.parts = [(label, clip.name) for label, clip in clips]

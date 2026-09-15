@@ -52,12 +52,24 @@ path. With no anchors, Ref2VA receives the combined ordered reference set and
 its nine-image limit applies. A chained Start frame resolves to the previous
 shot's last saved frame before the FL2VA request is generated.
 
+### Reference continuity
+
+Use **Continue from shot N using Ref2VA references** to supply the previous
+scene's final frame alongside the original cast portraits, style references,
+and native speaker voice. This is guidance, not a pinned first frame. It cannot
+be combined with Start/End anchors. **Continue all scenes with Ref2VA** applies
+this relationship across the board. Dependencies resolve before each render,
+retain frames in draft mode, detect changed frame content, and block on failed
+sources. Selected renders include missing/stale prerequisites automatically;
+links must point to an earlier scene.
+
 ## Dialogue source
 
 - **Dialogue-window recording** (new scene default): generate and preview the
   take before rendering. The video is prompted without speech and the recording
   is mixed with the generated ambience and effects. Missing or outdated takes
-  block preparation. Compatible TTS engines receive voice direction separately.
+  are prepared automatically before video generation; speech failures block the
+  batch. **Prepare all dialogue** prepares/reuses takes without rendering video. Compatible TTS engines receive voice direction separately.
 - **H3 native speech**: requires Ref2VA and a speaker with a reference voice. H3
   receives dialogue and direction and creates a new performance. It does not use
   the Dialogue-window take. Exact speech timing is not guaranteed.
@@ -79,3 +91,16 @@ scenes and downstream chains; explicitly selected renders process those scenes.
 
 Neither reference conditioning nor prompt directions guarantee exact generated
 performance. Check the output and allow enough clip time for spoken dialogue.
+
+## Final-cut controls
+
+The final-video panel exposes crossfade duration, per-scene edge audio fades,
+audio level matching, and a continuous looping background audio file with volume.
+The scene editor exposes trims and a side-by-side boundary review. These settings
+affect assembly only. Continuity still uses the original final rendered frame,
+so review cuts when trimming scene endings. Crossfades overlap both picture and
+sound and shorten the final duration.
+
+Replace mode pads short dialogue with silence to preserve the entire video.
+Re-assembling reapplies current recordings when mix/replace changed; it does not
+synthesize missing takes. Prepare dialogue first if a recording is stale.

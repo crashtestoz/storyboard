@@ -153,6 +153,9 @@ function dialogueReadiness(raw) {
   }
 
   if (source === "native") {
+    if (effectiveShotModel(raw) !== "ref2va") {
+      return {code: "native-dialogue-anchors", title: "Native cloned speech needs Ref2VA", body: "Frame anchors use FL2VA.", action: "Use reference continuity or switch to a cloned recording."};
+    }
     if (!speaker) {
       return {
         code: "native-dialogue-no-speaker",
@@ -221,6 +224,8 @@ function canAutoPrepareDialogue(raw) {
 
 function applyDialogueTake(raw, result, text, style) {
   raw.dialogueAudioUrl = result.audioUrl;
+  if (result.speechFingerprint) raw.speechFingerprint = result.speechFingerprint;
+  if (result.speechEngineFingerprint) raw.speechEngineFingerprint = result.speechEngineFingerprint;
   raw.dialogueSpokenText = (text || "").trim();
   raw.dialogueSpokenStyle = (style || "").trim();
   if (result.dubUrl) raw.dubUrl = result.dubUrl;
@@ -512,6 +517,9 @@ function view(shot) {
    skipped even though their prompts had been rewritten — and built no video
    at all, while reporting success. A summary has to say what came out. */
 function batchOutcome(status) {
+  if (status.operation === "dialogue") {
+    return {msg: status.error ? `Dialogue preparation failed: ${status.error}` : status.cancelRequested ? "Dialogue preparation stopped." : "Dialogue takes are ready to preview. Video clips were not regenerated.", kind: status.error ? "error" : "info"};
+  }
   const runs = Object.values((status && status.runs) || {});
   const n = (st) => runs.filter((r) => r.status === st).length;
   // A whole-board run with nothing stale still has work to do — it assembles
@@ -982,7 +990,7 @@ function paintOpenList() {
          `${b.shots} shot${b.shots === 1 ? "" : "s"} · ` +
          `${b.rendered} rendered · ${relTime(b.updatedAt)}`)
     );
-    main.appendChild(el("div", "open-path", b.configPath || `projects/${b.slug}/storyboard.json`));
+    main.appendChild(el("div", "open-path", b.configPath || `${b.slug}/storyboard.json`));
     row.appendChild(main);
 
     const act = el("button", "btn btn-sm", b.slug === state.slug ? "Reload" : "Open");
@@ -1264,7 +1272,7 @@ function paintProjPath() {
   // (and by default now do) differ.
   const root = (state.info && state.info.dataDir) || "<projects folder>";
   const note = $("#projPath");
-  note.textContent = `${root}/projects/${slug}/`;
+  note.textContent = `${root}/${slug}/`;
   note.classList.toggle("field-warn", slug !== state.slug);
   if (slug !== state.slug) {
     note.textContent += "   ← the folder moves here";
@@ -1304,9 +1312,10 @@ async function saveDataDirAndRestart() {
   if (!path) return;
   if (
     !confirm(
-      `Save "${path}" as the global projects folder and restart the server ` +
+      `Save "${path}" as the Storyboard data folder and restart the server ` +
         `now?\n\nThis briefly drops every connection to this app (any open ` +
-        `tab). Existing project files are not moved automatically.`
+        `tab). Projects are read directly from "${path}/". Existing project ` +
+        `files are not moved automatically.`
     )
   ) {
     return;
@@ -1342,7 +1351,7 @@ async function saveDataDirAndRestart() {
       "error"
     );
   } catch (err) {
-    toast(`Could not save the projects folder: ${err.message}`, "error");
+    toast(`Could not save the Storyboard data folder: ${err.message}`, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = was;
@@ -1997,6 +2006,102 @@ function ensureSoundscapeWand() {
    rather than in the per-shot preview. Its whole job is to be visibly absent
    when it has not been built: a folder of clips and no video is the failure
    this panel exists to make obvious. */
+function renderCutSettings(host, busy) {
+  const details = el("details", "panel");
+  details.open = !!state.cutSettingsOpen;
+  details.addEventListener("toggle", () => { state.cutSettingsOpen = details.open; });
+  details.appendChild(el("summary", null, "Continuity, dialogue & cut settings"));
+  const opts = () => (state.board.assembly ||= {});
+  const number = (label, value, max, change) => {
+    const row = el("label", "field-note", label + " ");
+    const input = el("input");
+    input.type = "number"; input.min = "0"; input.max = String(max); input.step = "0.05";
+    input.value = String(value || 0); input.disabled = busy;
+    input.addEventListener("change", () => {
+      const n = Number(input.value);
+      if (!Number.isFinite(n) || n < 0 || n > max) return;
+      change(n); markDirty();
+    });
+    row.appendChild(input); details.appendChild(row);
+  };
+  number("Crossfade seconds (0 = straight cut)", opts().transitionSeconds, 2, n => { opts().transitionSeconds = n; });
+  number("Audio fade at scene edges (seconds)", opts().audioFadeSeconds, 2, n => { opts().audioFadeSeconds = n; });
+  number("Background audio volume (1 = original)", opts().backgroundVolume ?? 0.15, 2, n => { opts().backgroundVolume = n; });
+  const normalize = el("input"); normalize.type = "checkbox";
+  normalize.checked = !!opts().normalizeAudio; normalize.disabled = busy;
+  normalize.addEventListener("change", () => { opts().normalizeAudio = normalize.checked; markDirty(); });
+  const normLabel = el("label", "field-note");
+  normLabel.append(normalize, el("span", null, " Match scene audio levels")); details.appendChild(normLabel);
+  const upload = el("input"); upload.type = "file"; upload.accept = "audio/*"; upload.disabled = busy;
+  upload.setAttribute("aria-label", "Continuous background audio");
+  upload.addEventListener("change", async () => {
+    if (!upload.files[0]) return;
+    const slug = state.slug, board = state.board;
+    try {
+      const ref = await API.uploadRef(slug, upload.files[0]);
+      if (state.board !== board) return;
+      opts().backgroundAudio = ref; markDirty(); renderFinal();
+    } catch (err) { toast(err.message, "error"); }
+  });
+  details.append(el("div", "field-note", "Continuous background audio (loops across the whole cut)"), upload);
+  if (opts().backgroundAudio) {
+    const remove = el("button", "btn btn-sm", "Remove background audio"); remove.disabled = busy;
+    remove.onclick = () => { delete opts().backgroundAudio; markDirty(); renderFinal(); };
+    details.append(el("div", "field-note", opts().backgroundAudio.label || "Background audio attached"), remove);
+  }
+  const chain = el("button", "btn btn-sm", "Continue all scenes with Ref2VA");
+  chain.disabled = busy || shots().length < 2;
+  chain.onclick = () => {
+    if (shots().some(s => s.startRef || s.endRef)) {
+      toast("Remove Start/End frame anchors before enabling Ref2VA continuity.", "warn"); return;
+    }
+    shots().forEach((s, i, all) => {
+      s.continuityRef = i ? {kind: "chain", from: all[i-1].id, mode: "reference", label: `Continue from shot ${i}`} : null;
+    });
+    markDirty(); render();
+  };
+  const prepare = el("button", "btn btn-sm", "Prepare all dialogue");
+  prepare.disabled = busy || state.dialoguePreparing;
+  prepare.onclick = async () => {
+    prepare.disabled = true;
+    try {
+      await saveNow();
+      state.status = await API.prepareDialogue(state.slug);
+      state.awaitingBatch = true; startPolling(); render();
+    } catch (err) { toast(err.message, "error"); prepare.disabled = false; }
+  };
+  details.append(chain, prepare, el("div", "field-note",
+    "Current takes are reused; missing or changed recordings are generated. Native speech is created during video rendering. Crossfades overlap picture and sound and shorten the cut."));
+  host.appendChild(details);
+}
+
+function renderBoundaryReview(host, raw, idx) {
+  if (idx < 1) return;
+  const previous = shots()[idx - 1];
+  const clip = s => (s.renderedDialogueSource !== "native" && s.dubUrl) || (s.outputs || []).find(u => u.endsWith(".mp4"));
+  if (!clip(previous) || !clip(raw)) return;
+  const panel = el("details", "panel");
+  panel.appendChild(el("summary", null, "Review the cut from the previous scene"));
+  const row = el("div", "boundary-review");
+  for (const [scene, ending] of [[previous, true], [raw, false]]) {
+    const cell = el("div");
+    const video = el("video"); video.src = clip(scene); video.controls = true; video.preload = "metadata";
+    video.muted = outputMuted();
+    let begin = 0, end = 0;
+    video.addEventListener("loadedmetadata", () => {
+      end = Math.max(0, video.duration - (scene.trimOut || 0));
+      begin = ending ? Math.max(scene.trimIn || 0, end - 1.5) : (scene.trimIn || 0);
+      if (!ending) end = Math.min(end, begin + 1.5);
+      video.currentTime = begin;
+    });
+    video.addEventListener("play", () => { if (video.currentTime >= end) video.currentTime = begin; });
+    video.addEventListener("timeupdate", () => { if (end && video.currentTime >= end) video.pause(); });
+    cell.append(el("div", "field-note", ending ? "Previous ending" : "Current opening"), video); row.appendChild(cell);
+  }
+  panel.append(row, el("div", "field-note", "Review trimmed boundaries before assembling; transitions appear in the final cut."));
+  host.appendChild(panel);
+}
+
 function renderFinal(host = $("#preview .final-video-content")) {
   if (!host) return;
   const prev = host.querySelector("video");
@@ -2057,6 +2162,7 @@ function renderFinal(host = $("#preview .final-video-content")) {
     );
   }
 
+  renderCutSettings(host, busy);
   const acts = el("div", "final-actions");
   const btn = el("button", "btn btn-sm", f && f.url ? "Re-assemble" : "Assemble now");
   btn.disabled = busy;
@@ -2504,7 +2610,7 @@ function renderStrip() {
       b.title = staleReason;
       thumb.appendChild(b);
     }
-    if (raw.startRef && raw.startRef.kind === "chain") {
+    if ((raw.startRef && raw.startRef.kind === "chain") || raw.continuityRef) {
       const b = el("span", "chain-badge");
       b.append(el("span", null, "⛓"), el("span", null, "chained"));
       thumb.appendChild(b);
@@ -3249,6 +3355,7 @@ function renderEditor() {
       const t = el("label", "toggle");
       const cb = el("input");
       cb.type = "checkbox";
+      cb.disabled = !!raw.continuityRef;
       cb.checked = !!(raw.startRef && raw.startRef.kind === "chain");
       cb.addEventListener("change", () => {
         const current = live();
@@ -3261,6 +3368,23 @@ function renderEditor() {
       t.append(cb, el("span", "toggle-track"),
                el("span", null, `Chain start frame from shot ${idx}`));
       wrap.appendChild(t);
+      const soft = el("label", "toggle");
+      const softBox = el("input");
+      softBox.type = "checkbox";
+      softBox.checked = !!raw.continuityRef;
+      softBox.disabled = !!(raw.startRef || raw.endRef);
+      softBox.addEventListener("change", () => {
+        live().continuityRef = softBox.checked
+          ? { kind: "chain", from: prev.id, mode: "reference", label: `Continue from shot ${idx}` }
+          : null;
+        markDirty();
+        render();
+      });
+      soft.append(softBox, el("span", "toggle-track"),
+        el("span", null, `Continue from shot ${idx} using Ref2VA references`));
+      wrap.append(soft, el("div", "field-note",
+        "Keeps cast portraits and native voice references. Guides the opening; does not pin an exact frame. Remove Start/End anchors to enable."));
+      if (raw.continuityRef) wrap.appendChild(refSlot("Previous scene reference", raw, "continuityRef"));
       refPanel.appendChild(wrap);
     }
     refPanel.appendChild(
@@ -3273,6 +3397,21 @@ function renderEditor() {
       )
     );
     host.appendChild(refPanel);
+    const trim = el("div", "panel");
+    trim.appendChild(el("div", "section-label", "Trim for the final cut"));
+    for (const [key, title] of [["trimIn", "Remove from start (seconds)"], ["trimOut", "Remove from end (seconds)"]]) {
+      const label = el("label", "field-note", title + " ");
+      const input = el("input"); input.type = "number"; input.min = "0"; input.step = "0.05";
+      input.value = String(raw[key] || 0);
+      input.addEventListener("change", () => {
+        const n = Number(input.value);
+        if (Number.isFinite(n) && n >= 0) { live()[key] = n; markDirty(); }
+      });
+      label.appendChild(input); trim.appendChild(label);
+    }
+    trim.appendChild(el("div", "field-note", "Trims affect assembly only. Continuity references use the original final rendered frame."));
+    host.appendChild(trim);
+    renderBoundaryReview(host, raw, idx);
   }
 
   if (isVideoShot) {
@@ -4786,7 +4925,7 @@ function groupedImageItems(items) {
   }
 
   return [...groups.values()].map((group) => {
-    const own = group.find((item) => item.path && item.path.includes(`projects/${state.slug}/`));
+    const own = group.find((item) => item.path && item.path.startsWith(`${state.slug}/`));
     const used = group.find((item) => item.used);
     const newest = group.reduce((best, item) =>
       (item.modifiedAt || 0) > (best.modifiedAt || 0) ? item : best

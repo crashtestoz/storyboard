@@ -26,6 +26,7 @@ Responsibilities, in order of how much they matter:
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import shutil
@@ -83,6 +84,7 @@ class ShotRun:
 class Orchestrator:
     def __init__(self, backend: Backend, store: Store, workspace: Path,
                  data_dir: Path | None = None):
+        self.prepare_dialogue = None
         self.backend = backend
         self.store = store
         self.workspace = Path(workspace)
@@ -100,6 +102,7 @@ class Orchestrator:
         self._batch_started: float | None = None
         self._batch_ended: float | None = None
         self._error: str = ""
+        self._operation = "render"
         # Why each shot was queued, so "Render all" can say what it picked up
         # rather than leaving the user to infer it from what changes.
         self._queued_because: dict[str, str] = {}
@@ -154,6 +157,7 @@ class Orchestrator:
         with self._lock:
             return {
                 "busy": self.busy,
+                "operation": self._operation,
                 "slug": self._slug,
                 "currentShotId": self._current,
                 "order": list(self._order),
@@ -206,16 +210,63 @@ class Orchestrator:
         self._thread.start()
         return self.status()
 
+    def start_dialogue(self, slug: str) -> dict:
+        """Prepare/reuse recordings without changing video render state."""
+        if self.busy or self.stills_busy:
+            raise RuntimeError("Wait for the current render or still previews to finish")
+        if not self.prepare_dialogue:
+            raise RuntimeError("Dialogue preparation is unavailable")
+        board = self.store.load(slug)
+        self._cancel.clear()
+        self._operation = "dialogue"
+        self._slug = slug
+        self._order = [s["id"] for s in board["shots"] if (s.get("dialogue") or "").strip()]
+        self._runs = {sid: ShotRun(shot_id=sid) for sid in self._order}
+        self._error = ""
+        self._assembly = None
+        self._queued_because = {sid: "prepare dialogue only; video is unchanged" for sid in self._order}
+        self._batch_started = time.time()
+        self._batch_ended = None
+
+        def work():
+            try:
+                for sid in self._order:
+                    if self._cancel.is_set():
+                        break
+                    self._current = sid
+                    run = self._runs[sid]
+                    run.status, run.phase = "running", "Preparing dialogue only"
+                    self.prepare_dialogue(slug, sid)
+                    run.status, run.progress = "done", 100
+            except Exception as exc:
+                self._error = str(exc)
+                self._runs[sid].status = "failed"
+                self._runs[sid].reason = str(exc)
+            finally:
+                self._current = None
+                self._batch_ended = time.time()
+        self._thread = threading.Thread(target=work, name="dialogue-queue", daemon=True)
+        self._thread.start()
+        return self.status()
+
     def _prime_batch(self, slug: str, shot_ids: list[str] | None) -> bool:
         """Load *slug*, pick its targets, and set up the run state that
         ``_run_batch`` expects — the part of ``start()`` that a single
         project's render and a multi-project batch both need, unchanged
         either way. Returns ``whole_board`` (whether to assemble after).
         """
+        self._operation = "render"
         board = self.store.load(slug)
         shots = board.get("shots") or []
         # An explicit list is exactly that — the user asked for these shots.
         # No list means the whole board, which also means assembling the cut.
+        index = {s["id"]: i for i, s in enumerate(shots)}
+        for i, scene in enumerate(shots):
+            for key in ("startRef", "endRef", "continuityRef"):
+                ref = scene.get(key)
+                if isinstance(ref, dict) and ref.get("kind") == "chain":
+                    if ref.get("from") not in index or index[ref["from"]] >= i:
+                        raise ValueError("A scene can only continue from an existing earlier scene; fix missing, forward or cyclic links")
         whole_board = not shot_ids
         if shot_ids:
             wanted = set(shot_ids)
@@ -223,6 +274,21 @@ class Orchestrator:
             because = {s["id"]: "asked for by name" for s in targets}
         else:
             targets, because = self._pending(board)
+        # Include stale or missing prerequisites for selected renders.
+        wanted = {s["id"] for s in targets}
+        for scene in reversed(shots):
+            if scene["id"] not in wanted:
+                continue
+            for key in ("startRef", "endRef", "continuityRef"):
+                ref = scene.get(key)
+                if not isinstance(ref, dict) or ref.get("kind") != "chain":
+                    continue
+                source = shots[index[ref["from"]]]
+                frame_dir = self.data_dir / self.store.shot_rel_dir(slug, index[source["id"]] + 1) / "frames"
+                if source.get("status") != "done" or stale_reason(source, board) or not last_saved_frame(frame_dir, int(source.get("frames") or 0)):
+                    wanted.add(source["id"])
+                    because.setdefault(source["id"], "required by a dependent scene")
+        targets = [s for s in shots if s["id"] in wanted]
         if not targets and not whole_board:
             raise RuntimeError("nothing to render")
         # A whole-board run with nothing stale is not a no-op: it still owes
@@ -348,7 +414,7 @@ class Orchestrator:
             for shot in shots:
                 if shot["id"] in because:
                     continue
-                for key in ("startRef", "endRef"):
+                for key in ("startRef", "endRef", "continuityRef"):
                     ref = shot.get(key)
                     if (
                         isinstance(ref, dict)
@@ -540,16 +606,40 @@ class Orchestrator:
 
     def _run_batch(self, slug: str, assemble_after: bool = False) -> None:
         try:
+            # Prepare all dialogue before the first expensive video job. Whole-board
+            # runs also remux current clips whose audio mix setting changed.
+            board = self.store.load(slug)
+            speech_ids = [s["id"] for s in board["shots"]] if assemble_after else list(self._order)
+            if self.prepare_dialogue:
+                for sid in speech_ids:
+                    if self._cancel.is_set():
+                        self._mark_remaining_cancelled()
+                        return
+                    self._current = sid
+                    run = self._runs.get(sid)
+                    if run:
+                        run.phase = "Preparing dialogue"
+                    try:
+                        self.prepare_dialogue(slug, sid)
+                    except Exception as exc:
+                        raise ValueError(f"Dialogue preparation for {sid}: {exc}") from exc
             for shot_id in list(self._order):
                 if self._cancel.is_set():
                     self._mark_remaining_cancelled()
                     break
                 self._run_one(slug, shot_id)
-            if assemble_after:
+            if assemble_after and not self._cancel.is_set():
                 self._assemble(slug)
         except Exception as exc:  # noqa: BLE001 - reported to the UI
             with self._lock:
                 self._error = f"{type(exc).__name__}: {exc}"
+            fresh = self.store.load(slug)
+            for shot in fresh.get("shots", []):
+                run = self._runs.get(shot["id"])
+                if run and run.status == "queued":
+                    run.status, run.reason = "blocked", self._error
+                    shot.update(status="blocked", reason=self._error)
+            self.store.save(slug, fresh)
         finally:
             with self._lock:
                 self._current = None
@@ -814,6 +904,7 @@ class Orchestrator:
         if out is None:
             return
         shot["dubUrl"] = self._as_url(out)
+        shot["dubAppliedMode"] = shot.get("dubMode", "mix")
         run.log.append(
             {"level": "OK", "text": f"spoken line mixed onto the clip -> {out.name}"}
         )
@@ -845,7 +936,8 @@ class Orchestrator:
         self._set_assembly("running", f"joining {len(shots)} shot(s)")
 
         result = assembly.assemble(
-            parts, assembly.final_path(project_dir), width, height
+            parts, assembly.final_path(project_dir), width, height,
+            options=assembly.board_options(board, project_dir, self.data_dir)
         )
         if not result.ok:
             self._set_assembly("failed", result.error, log=result.log)
@@ -895,7 +987,7 @@ class Orchestrator:
 
         Returns None when the shot is good to run.
         """
-        for key, label in (("startRef", "start"), ("endRef", "end")):
+        for key, label in (("startRef", "start"), ("endRef", "end"), ("continuityRef", "continuity")):
             ref = shot.get(key)
             if not isinstance(ref, dict) or ref.get("kind") != "chain":
                 continue
@@ -904,6 +996,13 @@ class Orchestrator:
             if src_idx is None:
                 return f"{label} frame chains from a shot that no longer exists"
 
+            if src_idx >= next(i for i, s in enumerate(shots) if s["id"] == shot["id"]):
+                return "Continuity sources must be earlier scenes; forward links and cycles are not supported"
+            source_run = self._runs.get(src_id)
+            if source_run and source_run.status != "done":
+                return f"{label} source has not completed successfully ({source_run.status})"
+            if shots[src_idx].get("status") in {"failed", "blocked", "interrupted", "review"}:
+                return f"{label} source needs a successful render first"
             frames_dir = (
                 self.data_dir / self.store.shot_rel_dir(slug, src_idx + 1) / "frames"
             )
@@ -918,6 +1017,7 @@ class Orchestrator:
                 )
             # last frame of the upstream clip
             ref["resolved"] = str(frame.relative_to(self.data_dir))
+            ref["contentHash"] = hashlib.sha256(frame.read_bytes()).hexdigest()
         return None
 
     def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
@@ -983,9 +1083,16 @@ class Orchestrator:
         return "/media/" + str(rel).replace("\\", "/")
 
     def _mark_remaining_cancelled(self) -> None:
+        board = self.store.load(self._slug) if self._slug else None
         for sid, run in self._runs.items():
             if run.status == "queued":
-                run.status = "draft"
+                run.status, run.reason = "interrupted", "Stopped before this scene began"
+                if board:
+                    shot = next((s for s in board["shots"] if s["id"] == sid), None)
+                    if shot:
+                        shot.update(status="interrupted", reason=run.reason)
+        if board:
+            self.store.save(self._slug, board)
 
 
 def _any_output(shots: list[dict]) -> bool:

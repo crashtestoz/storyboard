@@ -47,7 +47,6 @@ from typing import Any
 
 from . import assemble as assembly
 from .backends.base import Backend
-from .dubbing import dub_shot, speaker_for
 from .orchestrator import Orchestrator
 from .llm import LLMService, describe_character, describe_still_phases, rewrite_prompt
 from .llm import load_services as load_llm_services
@@ -124,6 +123,8 @@ class Context:
         self.vpipe_binary = vpipe_binary
         self.default_tts = default_tts
         self.default_llm = default_llm
+        from .speech import prepare_recording
+        self.orch.prepare_dialogue = lambda slug, sid: prepare_recording(self, slug, sid)
         # Set by the /restart endpoint; main() checks this after the server
         # loop exits to decide whether to exec a fresh process or just stop.
         self.restart_requested = False
@@ -630,6 +631,12 @@ class Handler(BaseHTTPRequestHandler):
                 ctx.store.save(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
 
+        if path == "/api/prepare-dialogue":
+            payload = self._read_json() or {}
+            if not payload.get("slug"):
+                raise ValueError("slug is required")
+            return self._send_json(ctx.orch.start_dialogue(payload["slug"]))
+
         if path == "/api/render-batch":
             payload = self._read_json()
             slugs = payload.get("slugs")
@@ -782,6 +789,11 @@ class Handler(BaseHTTPRequestHandler):
                                   "join a clip that is still being written")
 
         board = ctx.store.load(slug)
+        from .speech import prepare_recording
+        for i, shot in enumerate(board.get("shots", []), 1):
+            if (ctx.store.project_dir(slug) / "shots" / f"{i:02d}" / "clip.mp4").exists():
+                prepare_recording(ctx, slug, shot["id"], generate_missing=False)
+        board = ctx.store.load(slug)
         shots = board.get("shots") or []
         parts: list[tuple[str, Path | None]] = []
         for i, shot in enumerate(shots):
@@ -794,7 +806,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         project_dir = ctx.store.project_dir(slug)
         result = assembly.assemble(
-            parts, assembly.final_path(project_dir), width, height
+            parts, assembly.final_path(project_dir), width, height,
+            options=assembly.board_options(board, project_dir, ctx.data_dir)
         )
         if not result.ok:
             return self._send_json(
@@ -857,150 +870,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"text": text, "engine": engine.id})
 
     def _dub(self, slug: str, shot_id: str) -> None:
-        """Speak a shot's dialogue in its character's voice.
-
-        Also mixes it over the clip when the shot has been rendered — but the
-        speech is returned either way, because hearing whether a cloned voice
-        says the line correctly should not cost half an hour of video first.
-        """
-        ctx = self.ctx
-        board = ctx.store.load(slug)
-        shots = board.get("shots") or []
-        idx = next((i for i, s in enumerate(shots) if s["id"] == shot_id), None)
-        if idx is None:
-            raise FileNotFoundError("no such shot")
-        shot = shots[idx]
-
-        payload = self._read_json() or {}
-        # The line may not be saved yet — the same reason /api/rewrite takes it.
-        text = payload.get("text")
-        if text is None:
-            text = shot.get("dialogue") or ""
-        style = payload.get("style")
-        if style is None:
-            style = shot.get("dialogueStyle") or ""
-        style = (style or "").strip()
-        dub_mode = payload.get("dubMode")
-        if dub_mode is None:
-            dub_mode = shot.get("dubMode") or "mix"
-
-        engine = ctx.tts((board.get("defaults") or {}).get("tts"))
-        shot_dir = ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1)
-
-        # The speaking character's recorded voice is the cloning reference, and
-        # their transcript conditions it alongside the audio.
-        speaker = speaker_for(shot, board)
-        reference = None
-        reference_text = ""
-        clone_note = ""
-        if speaker:
-            voice = speaker.get("voice") or {}
-            path = voice.get("path")
-            if not path:
-                clone_note = (
-                    f"{speaker.get('name') or 'that character'} has no reference "
-                    "voice clip, so the engine's own voice was used"
-                )
-            elif not engine.supports_cloning:
-                clone_note = (
-                    f"{engine.label} cannot clone a voice, so "
-                    f"{speaker.get('name') or 'the character'}'s clip was not used"
-                )
-            else:
-                candidate = ctx.data_dir / path
-                if candidate.exists():
-                    reference = candidate
-                    reference_text = speaker.get("voiceText") or ""
-                else:
-                    clone_note = f"the reference clip is missing at {path}"
-
-        result = dub_shot(
-            engine,
-            clip=shot_dir / "clip.mp4",
-            shot_dir=shot_dir,
-            text=text,
-            voice=shot.get("dialogueVoice") or None,
-            reference=reference,
-            reference_text=reference_text,
-            style=style,
-            keep_original_audio=dub_mode != "replace",
-        )
-
-        def as_url(p: Path) -> str:
-            return "/media/" + str(p.relative_to(ctx.data_dir)).replace("\\", "/")
-
-        # The engine's own account of the run, written next to the audio so it
-        # survives a reload the way run.log does for a render. A voice that
-        # comes back wrong is nearly always the reference clip or its
-        # transcript, and neither is visible from the waveform — so this is
-        # kept whether the run succeeded or failed.
-        speech_log = list(result.log or [])
-        if result.speech and result.speech.log:
-            speech_log = list(result.speech.log)
-        if result.warning:
-            speech_log.append(f"[WARN] {result.warning}")
-        if clone_note:
-            speech_log.append(f"[WARN] {clone_note}")
-        if not result.ok and result.error:
-            speech_log.append(f"[ERROR] {result.error}")
-
-        log_url = None
-        try:
-            shot_dir.mkdir(parents=True, exist_ok=True)
-            log_path = shot_dir / "speech.log"
-            header = [
-                f"# {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"# engine: {engine.id} ({engine.label})",
-                f"# speaker: {(speaker or {}).get('name') or '(none)'}"
-                f"{' — cloned' if reference is not None else ''}",
-            ]
-            log_path.write_text("\n".join(header + speech_log) + "\n")
-            log_url = as_url(log_path)
-        except OSError:
-            pass   # a log we could not write is not worth failing the take for
-
-        if not result.ok:
-            return self._send_json(
-                {"error": result.error, "log": speech_log,
-                 "speechLogUrl": log_url, "engine": engine.id}, 409
-            )
-
-        # The spoken line is kept on the shot so it survives a reload and can
-        # be played again without re-synthesising.
-        if result.audio:
-            shot["dialogueAudioUrl"] = (
-                as_url(result.audio) + f"?v={result.audio.stat().st_mtime_ns}"
-            )
-        else:
-            shot["dialogueAudioUrl"] = None
-        # What this take says. A render finishing later re-muxes the wav onto
-        # the fresh clip, and must not do that once the line has been edited.
-        shot["dialogueSpokenText"] = (text or "").strip()
-        shot["dialogueSpokenStyle"] = style
-        from .store import speech_fingerprint
-        shot["speechFingerprint"] = speech_fingerprint({**shot, "dialogue": text, "dialogueStyle": style}, board)
-        if result.video:
-            shot["dubUrl"] = as_url(result.video)
-        shot["speechLogUrl"] = log_url
-        ctx.store.save(slug, board)
-
-        return self._send_json(
-            {
-                "log": speech_log,
-                "speechLogUrl": log_url,
-                "audioUrl": shot["dialogueAudioUrl"],
-                "dubUrl": shot.get("dubUrl") if result.video else None,
-                "muxed": bool(result.video),
-                "engine": engine.id,
-                "engineLabel": engine.label,
-                "speaker": (speaker or {}).get("name") or "",
-                "cloned": reference is not None,
-                "voice": result.speech.voice if result.speech else "",
-                "seconds": round(result.speech.seconds, 2) if result.speech else 0,
-                "warning": result.warning,
-                "note": clone_note,
-            }
-        )
+        if self.ctx.orch.busy or self.ctx.orch.stills_busy:
+            return self._err(409, "Wait for the render to finish before generating a separate take")
+        from .speech import generate_take
+        result = generate_take(self.ctx, slug, shot_id, self._read_json() or {})
+        return self._send_json(result, 409 if result.get("error") else 200)
 
     def _upload_ref(self, slug: str) -> None:
         """Raw-body image upload; the filename comes from a header.
