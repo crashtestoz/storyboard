@@ -17,6 +17,21 @@ having to build or debug a VPIPE or ComfyUI node workflow.
 - **Local-first control** — use your own Apple Silicon hardware, models, and
   services without hiding the pipeline behind a black box.
 
+### Creator-focused AI tools
+
+- **AI prompt rewriting** — turn rough ideas into clearer, more cinematic shot
+  prompts while keeping the scene, action, camera, and style separate.
+- **Character building from references** — add a character portrait and use AI
+  to draft a consistent description that can travel across the storyboard.
+- **Voice cloning** — attach a reference voice clip and generate dialogue in a
+  character's own voice through a supported local speech engine.
+- **Dialogue and sound direction** — write spoken lines, add voice direction,
+  and keep ambient sound and shot-specific sound accents in the right place.
+- **Reference-aware video generation** — use start/end frames, character
+  images, and environment references to guide composition and continuity.
+- **Helpful render feedback** — see what is being rendered, what needs fixing,
+  which dialogue or speech settings are missing, and why a shot failed.
+
 ### Free to use, built to collaborate
 
 Storyboard is free to use for personal, educational, research, hobby, and
