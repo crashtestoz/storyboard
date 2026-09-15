@@ -261,6 +261,29 @@ function sceneClipDownloadName(raw, url) {
   );
 }
 
+function outputMuted() {
+  return !!(state.board && state.board.outputMuted);
+}
+
+function paintOutputMute(button) {
+  const muted = outputMuted();
+  button.textContent = muted ? "🔇 Muted" : "🔊 Sound";
+  button.dataset.muted = String(muted);
+  button.title = muted
+    ? "Unmute project output previews"
+    : "Mute project output previews";
+  button.setAttribute("aria-pressed", String(muted));
+}
+
+function applyOutputMute(muted) {
+  state.board.outputMuted = !!muted;
+  document.querySelectorAll("#preview video").forEach((video) => {
+    video.muted = state.board.outputMuted;
+  });
+  document.querySelectorAll("#preview .output-mute").forEach(paintOutputMute);
+  markDirty();
+}
+
 function setSpeakAudioBusy(row, busy) {
   const au = row.querySelector && row.querySelector(".speak-player");
   const dl = row.querySelector && row.querySelector(".speak-download");
@@ -1926,7 +1949,10 @@ function renderFinal(host = $("#preview .final-video-content")) {
     v.src = f.url;
     v.controls = true;
     v.preload = "metadata";
-    host.appendChild(v);
+    v.muted = outputMuted();
+    const viewport = el("div", "final-video-viewport");
+    viewport.appendChild(v);
+    host.appendChild(viewport);
     host.appendChild(
       el("div", "final-meta",
          `${f.parts.length} clip(s) · ${dur(f.seconds)} · ${f.url.split("/").pop()}`)
@@ -3142,15 +3168,6 @@ function renderEditor() {
   params.style.marginTop = "var(--sp-3)";
   params.appendChild(el("div", "section-label", "Parameters"));
 
-  params.appendChild(
-    field(
-      "Generation model",
-      readOnly("MiniMax H3 Ref2VA — fixed"),
-      null,
-      "All storyboard video shots use the same reference-conditioned model."
-    )
-  );
-
   const isImage = cap && cap.kind === "image";
   const row = el("div", "field-row");
   if (!isImage) {
@@ -3730,6 +3747,11 @@ function renderPreview() {
     });
     mainTabs.appendChild(b);
   });
+  const mute = el("button", "btn btn-ghost btn-sm output-mute");
+  mute.type = "button";
+  paintOutputMute(mute);
+  mute.addEventListener("click", () => applyOutputMute(!outputMuted()));
+  mainTabs.appendChild(mute);
   host.appendChild(mainTabs);
 
   if (activeMainTab === "stills") {
@@ -3747,7 +3769,7 @@ function renderPreview() {
           v.src = video;
           v.controls = true;
           v.loop = true;
-          v.muted = false;
+          v.muted = outputMuted();
           return v;
         })
       );

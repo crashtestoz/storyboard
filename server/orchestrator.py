@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import threading
 import time
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -35,7 +36,7 @@ from typing import Any, Callable
 from . import assemble as assembly
 from .backends.base import Backend, ProgressEvent, ShotPaths
 from .dubbing import mux_speech
-from .store import Store, render_fingerprint, stale_reason
+from .store import Store, last_saved_frame, render_fingerprint, stale_reason
 
 # statuses that a "render all" should pick up
 RERUNNABLE = {"draft", "failed", "blocked", "review", "interrupted"}
@@ -621,20 +622,31 @@ class Orchestrator:
                 self.store.save(slug, fresh_board)
             return
 
-        # Stamp the start so validation can tell this run's outputs from an
-        # earlier run's by modification time. Deleting them up front would
-        # also work, but it throws away a good previous take whenever a
-        # re-render fails or is interrupted — which is exactly what happened.
+        # A render owns the generated stills for this scene. Clear both the
+        # frame dump used for chaining and the optional start/mid/end preview
+        # images before writing the new take, so a shorter re-render cannot
+        # leave an old tail available to the next scene.
+        removed_stills = self._clear_scene_stills(paths.abs_dir)
+
+        # Stamp the start so validation can still distinguish any unexpected
+        # old output from files written by this run.
         spec.started_at = time.time()
 
         run.summary = spec.summary
         run.status = "running"
         run.started_at = time.time()
+        if removed_stills:
+            run.log.append(
+                {
+                    "level": "INFO",
+                    "text": f"cleared {removed_stills} generated still(s) from the previous take",
+                }
+            )
         with self._lock:
             self._current = shot_id
         fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
         if fresh_shot is not None:
-            fresh_shot.update(status="running", progress=0)
+            fresh_shot.update(status="running", progress=0, stills={})
             self.store.save(slug, fresh_board)
 
         # ---- run -------------------------------------------------------
@@ -665,17 +677,17 @@ class Orchestrator:
                 self.store.save(slug, fresh_board)
             return
 
-        # Persist the log next to the outputs before validating, so a run that
-        # failed overnight can still be diagnosed after a restart — the whole
-        # point of the validation checks is answering "why" hours later, and
-        # in-memory logs do not survive that.
-        log_url = self._write_log(paths.abs_dir, run, spec, result)
-
         validation = self.backend.validate(spec, result)
         run.validation = validation.to_json()
         run.status = validation.verdict
         run.reason = validation.reason
         run.progress = 100.0 if validation.ok else run.progress
+
+        # Persist the log next to the outputs after validation, so a run that
+        # failed overnight can still be diagnosed after a restart — the whole
+        # point of the validation checks is answering "why" hours later, and
+        # in-memory logs do not survive that.
+        log_url = self._write_log(paths.abs_dir, run, spec, result)
 
         outputs = [p for p in spec.expected_outputs if p.exists()]
         run.outputs = [self._as_url(p) for p in outputs]
@@ -895,15 +907,17 @@ class Orchestrator:
             frames_dir = (
                 self.data_dir / self.store.shot_rel_dir(slug, src_idx + 1) / "frames"
             )
-            frames = sorted(frames_dir.glob("*.png")) if frames_dir.exists() else []
-            if not frames:
+            frame = last_saved_frame(
+                frames_dir, int(shots[src_idx].get("frames") or 0)
+            )
+            if frame is None:
                 src_title = shots[src_idx].get("title") or f"shot {src_idx + 1}"
                 return (
                     f"{label} frame chains from “{src_title}”, which has no "
                     f"rendered frames yet"
                 )
             # last frame of the upstream clip
-            ref["resolved"] = str(frames[-1].relative_to(self.data_dir))
+            ref["resolved"] = str(frame.relative_to(self.data_dir))
         return None
 
     def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
@@ -924,6 +938,30 @@ class Orchestrator:
             return self._as_url(dest)
         except OSError:
             return None
+
+    def _clear_scene_stills(self, shot_dir: Path) -> int:
+        """Remove generated still outputs for one scene before its render."""
+        removed = 0
+        for directory in (shot_dir / "frames", shot_dir / "stills"):
+            if not directory.exists():
+                continue
+            try:
+                # Keep the root itself: vpipe's SaveImage stage expects the
+                # prepared frames directory to be present when it starts.
+                for item in list(directory.iterdir()):
+                    if item.is_dir() and not item.is_symlink():
+                        removed += sum(
+                            1 for child in item.rglob("*") if child.is_file()
+                        )
+                        shutil.rmtree(item)
+                    else:
+                        removed += int(item.is_file())
+                        item.unlink()
+            except OSError:
+                # Cleanup is best effort. The render's validation remains the
+                # authority if a file is locked or disappears mid-cleanup.
+                continue
+        return removed
 
     def _pick_thumb(self, spec) -> str | None:
         # a still's own output, else the middle frame of the clip (most
