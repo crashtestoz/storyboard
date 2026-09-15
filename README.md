@@ -17,6 +17,26 @@ having to build or debug a VPIPE or ComfyUI node workflow.
 - **Local-first control** — use your own Apple Silicon hardware, models, and
   services without hiding the pipeline behind a black box.
 
+### Free to use, built to collaborate
+
+Storyboard is free to use for personal, educational, research, hobby, and
+other permitted non-commercial work under the project license. Commercial use
+requires separate permission; the models, backends, and services it connects
+to may have their own costs and license terms.
+
+- **Collaborators welcome** — contribute ideas, bug reports, documentation,
+  tests, and pull requests. Please read [`CONTRIBUTING.md`](CONTRIBUTING.md)
+  before starting a change.
+- **A creator layer above the workflow** — Storyboard sits on top of the
+  rendering backend, so creators work with shots, references, dialogue, and
+  outputs instead of wiring a complex node graph by hand.
+- **VPIPE or ComfyUI underneath** — use the supported VPIPE path for local
+  MiniMax H3 workflows, or the ComfyUI scaffold when that backend fits your
+  setup. Storyboard keeps the creative plan separate from the backend details.
+- **Open to improvement** — the project is maintained in the open, with
+  Gitea as the canonical development repository and GitHub as the published
+  collaboration mirror.
+
 A storyboard-shaped front end for local video generation. Build a piece as an
 ordered sequence of shots — each with a prompt, optional reference frames, a
 cast and a length — and the tool compiles each shot into a real pipeline, runs
