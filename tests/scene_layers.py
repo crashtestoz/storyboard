@@ -11,6 +11,7 @@ from server.backends.vpipe_backend import (
 )
 from server.backends.base import FrameRule, ModelCapability, ShotPaths
 from server.store import default_shot, render_fingerprint
+from server.llm import _parse_character_result
 
 class SceneLayers(unittest.TestCase):
     def setUp(self):
@@ -35,6 +36,11 @@ class SceneLayers(unittest.TestCase):
         refs=_ref2va_references(self.shot,self.board,ShotPaths(Path('/tmp'),Path('/tmp/shot'),'shot',Path('/tmp')))
         self.assertNotIn('/tmp/voice.wav',refs)
         self.assertEqual(default_shot()['dialogueSource'],'recording')
+
+    def test_native_dialogue_overrides_quiet_soundscape(self):
+        prompt = _resolved_prompt(self.shot, self.board, model='ref2va')
+        self.assertIn('speaks aloud, in their own voice', prompt)
+        self.assertIn('Dialogue priority:', prompt)
     def test_unknown_and_duplicate_tags(self):
         self.shot['prompt']='Look at @missing.'
         with self.assertRaises(ValueError): _resolved_prompt(self.shot,self.board,model='ref2va')
@@ -56,18 +62,21 @@ class SceneLayers(unittest.TestCase):
         self.shot['characterIds']=[]
         self.assertNotIn('Gold plating.',_resolved_prompt(self.shot,self.board,model='ref2va'))
 
-    def test_storyboard_video_model_is_always_ref2va(self):
-        shot = {**self.shot, 'model': 'fl2va'}
+    def test_frame_anchors_select_fl2va(self):
+        shot = {**self.shot, 'model': 'ref2va'}
         self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
         shot['startRef'] = {'path': 'opening.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
-        bindings = _reference_bindings(shot, self.board, 'ref2va')
-        self.assertEqual([b['name'] for b in bindings[:2]], ['Start frame', 'Shot reference'])
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
+        self.assertIn('Picture 1 is the Start frame at 0.00 seconds',
+                      _resolved_prompt(shot, self.board, model='fl2va'))
         shot.pop('startRef')
-        shot['model'] = 'ref2va'
         shot['endRef'] = {'path': 'closing.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
-        self.assertEqual(_reference_bindings(shot, self.board, 'ref2va')[0]['name'], 'End frame')
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
+        self.assertIn('Picture 1 is the End frame',
+                      _resolved_prompt(shot, self.board, model='fl2va'))
+        shot['startRef'] = {'path': 'opening.png'}
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
+        self.assertEqual(_reference_bindings(shot, self.board, 'fl2va'), [])
 
     def test_project_and_shot_references_are_combined(self):
         self.board['styleRefs'] = [{'path': 'style.png'}]
@@ -122,5 +131,23 @@ class SceneLayers(unittest.TestCase):
                     'dialogue': 'This is only for the video.'}
             spec = backend.prepare(shot, {'defaults': {}}, paths)
             self.assertEqual(spec.payload['model'], 'krea2-still')
+
+    def test_character_result_is_split_into_character_and_environment(self):
+        result = _parse_character_result(
+            'CHARACTER:\nA person with dark curly hair and a red jacket.\n\n'
+            'ENVIRONMENT:\nA bright kitchen with wooden cabinets.'
+        )
+        self.assertEqual(result['character'], 'A person with dark curly hair and a red jacket.')
+        self.assertEqual(result['environment'], 'A bright kitchen with wooden cabinets.')
+
+    def test_character_result_accepts_json(self):
+        result = _parse_character_result(
+            '{"character": "A silver helmet.", "environment": "A hangar."}'
+        )
+        self.assertEqual(result, {'character': 'A silver helmet.', 'environment': 'A hangar.'})
+
+    def test_character_result_keeps_legacy_plain_text_as_character_only(self):
+        result = _parse_character_result('A person in a blue coat.')
+        self.assertEqual(result, {'character': 'A person in a blue coat.', 'environment': ''})
 
 if __name__=='__main__': unittest.main()

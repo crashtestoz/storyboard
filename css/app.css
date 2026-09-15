@@ -1708,6 +1708,14 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .output-mute {
   margin-left: auto;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.output-mute .stage-tile-icon {
+  width: 16px;
+  height: 16px;
 }
 
 .tab {
@@ -1887,6 +1895,14 @@ textarea.ta-compact {
 }
 
 .proposal-acts { display: flex; gap: var(--sp-2); }
+
+.proposal-section {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.proposal-dismiss { margin-top: var(--sp-3); }
 
 /* --- resolved prompt, segmented ------------------------------------------ */
 

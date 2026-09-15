@@ -178,28 +178,32 @@ is used verbatim.
 """
 
 SOUND_ACCENT_SYSTEM_PROMPT = """\
-You rewrite a single shot's sound accents — the local sound effects specific \
-to this one clip (switches, impacts, footsteps, spray, and similar), layered \
-on top of the project's constant background bed.
+You rewrite a single shot's scene-background sound accents — additional, \
+localized environmental sounds that belong to this one clip, layered on top \
+of the project's general Background Sound.
 
 Rules:
-- Ground the accents in the shot's own prompt, given as context: read what \
-happens in it — the action, the environment, the materials involved — and \
-propose concrete, plausible sound effects that belong to that action, not an \
-abstract mood. A door slamming implies a sharp wooden or metallic impact; a \
-landing on gravel implies a crunch and a scuff; a switch flicked implies a \
-small mechanical click. Name what is actually heard, tied to what is \
-actually happening in the shot.
-- Describe only local, momentary effects tied to this shot's action — not \
-the constant ambient bed (that is a separate, project-wide field) and not \
-music.
+- Read the project's general Background Sound and treat it as an exclusion \
+list. Do not repeat it, paraphrase it, expand it, or provide a replacement \
+for any sound already named there.
+- Ground the accents in the project's scene description and this shot's prompt. \
+Choose only additional sounds that are plausibly audible in this specific \
+location and moment: for example nearby birds in this scene, a distant siren, \
+a localized machine hum, a room creak, or a passing vehicle.
+- Keep these as background or environmental accents, not foreground action Foley. \
+Do not add footsteps, impacts, object handling, switches, splashes, or other \
+action sounds unless the text clearly establishes them as distant background \
+sound.
+- Describe only local, momentary or location-specific environmental sound — not \
+the constant ambient bed and not music.
 - Do not describe anything visual: no camera moves, no lighting, no \
 characters' appearance.
 - Do not describe spoken dialogue, or any words being said, in any form — \
 dialogue is a separate field and must never appear here, even as a \
 suggestion.
-- Keep every concrete thing the writer specified. Do not invent effects \
-that contradict the shot, and do not remove any the writer named.
+- Keep every concrete background or environmental sound the writer specified. \
+Do not invent sounds that contradict the shot, but omit foreground action Foley, \
+dialogue, music, and any sound already covered by the general Background Sound.
 - One paragraph, or a short comma-separated phrase. No headings, no bullet \
 points, no preamble, no explanation, no quotation marks around the whole \
 thing.
@@ -254,11 +258,44 @@ user supplied a name, use that name as a label without claiming identity.
 - Write only the character description.
 """
 
+# Vision models are more reliable with two short labelled prose sections than
+# with a required JSON schema. The parser below also accepts JSON as a
+# convenience, but the headings make the contract easy for Qwen to follow.
+CHARACTER_EXTRACTION_SYSTEM_PROMPT = """
+You are a visual character and environment extraction system for a storyboard video generator. Analyse the supplied image and separate the visible character from everything around them.
+
+Return exactly two sections in this order:
+CHARACTER:
+<one compact paragraph>
+ENVIRONMENT:
+<one compact paragraph>
+
+CHARACTER rules:
+- Describe only the visible character: apparent age range, face, skin, eyes, hair, facial hair, build, clothing, footwear, accessories, jewellery, glasses, headwear, tattoos, distinguishing marks, current pose, expression, and objects physically worn, held, or directly carried.
+- Treat the character as if isolated on a neutral background. The description must remain useful when the character is placed in a different scene.
+- Never include the room, background, buildings, furniture, landscape, weather, location, camera, unrelated people, or environmental lighting.
+- Do not infer personality, profession, nationality, ethnicity, identity, name, or backstory. Do not speculate about anything not clearly visible.
+
+ENVIRONMENT rules:
+- Describe only what is not part of the character: setting, architecture, furniture, background and foreground objects, landscape, weather, lighting, colours, textures, and visible background people or vehicles.
+- Do not repeat physical character details. If no meaningful environment is visible, write "No meaningful environment visible.".
+
+Additional rules:
+- The voice clip is evidence for this character only. Do not transcribe or describe it.
+- Preserve concrete user-provided character details when they do not contradict the image.
+- If a name is provided, use it only as a label at the start of CHARACTER.
+- Do not identify real people or copyrighted characters from the image. A name supplied by the user is only a label.
+- Keep each section factual, visually grounded, and suitable for prompting.
+- No preamble, explanation, bullets, or markdown fences.
+- Aim for 35 to 75 words for CHARACTER and 15 to 60 words for ENVIRONMENT.
+"""
+
 
 def build_user_message(
     text: str,
     *,
     scene: str = "",
+    soundscape: str = "",
     context: str = "",
     context_label: str = "",
     characters: list[dict[str, Any]] | None = None,
@@ -271,6 +308,10 @@ def build_user_message(
     fold in* — they are already prepended to every shot when the full prompt
     is assembled, so repeating them here would say everything twice.
 
+    *soundscape* is the project's general Background Sound. It is included as
+    an explicit exclusion context for shot sound accents, so the rewrite can
+    add only sounds that are not already in the general bed.
+
     *context* is a second, generic slot for whatever else the text being
     rewritten has to stay grounded in but must not repeat — a shot's own
     prompt, say, when rewriting that shot's sound accents. *context_label*
@@ -281,6 +322,13 @@ def build_user_message(
         blocks.append(
             "The project's scene description, already applied to every shot. "
             "Do not repeat it; stay consistent with it:\n" + scene.strip()
+        )
+    if soundscape.strip():
+        blocks.append(
+            "The project's general Background Sound, already applied as the "
+            "shared sound bed. Do not repeat, paraphrase, or replace any of "
+            "these sounds when writing shot-specific sound accents:\n"
+            + soundscape.strip()
         )
     if context.strip():
         label = context_label or (
@@ -757,6 +805,7 @@ def rewrite_prompt(
     text: str,
     *,
     scene: str = "",
+    soundscape: str = "",
     context: str = "",
     context_label: str = "",
     characters: list[dict[str, Any]] | None = None,
@@ -785,6 +834,7 @@ def rewrite_prompt(
         build_user_message(
             text,
             scene=scene,
+            soundscape=soundscape,
             context=context,
             context_label=context_label,
             characters=characters,
@@ -831,17 +881,61 @@ def describe_character(
         )
 
     out = service.complete_with_media(
-        CHARACTER_IMAGE_SYSTEM_PROMPT,
+        CHARACTER_EXTRACTION_SYSTEM_PROMPT,
         "\n\n".join(blocks),
         images=[image],
         audio=voice,
     )
-    out = _strip_wrapping(out)
-    if not out:
+    result = _parse_character_result(out)
+    if not result["character"]:
         raise RuntimeError(
             f"{service.label} returned an empty character description."
         )
-    return out
+    return result
+
+
+def _parse_character_result(text: str) -> dict[str, str]:
+    """Split a character/environment extraction, with legacy fallback."""
+    raw = _strip_wrapping(text)
+    if not raw:
+        return {"character": "", "environment": ""}
+
+    candidates = [raw]
+    if "{" in raw and "}" in raw:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < end:
+            candidates.append(raw[start:end + 1])
+    for candidate in candidates:
+        try:
+            doc = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        character = doc.get("character") or doc.get("CHARACTER") or doc.get("Character") or ""
+        environment = doc.get("environment") or doc.get("ENVIRONMENT") or doc.get("Environment") or ""
+        if isinstance(character, dict):
+            character = character.get("summary") or ""
+        if isinstance(environment, dict):
+            environment = environment.get("summary") or ""
+        return {
+            "character": _strip_wrapping(str(character)),
+            "environment": _strip_wrapping(str(environment)),
+        }
+
+    matches = list(re.finditer(
+        r"(?im)^\s*(?:[*#]+\s*)?(CHARACTER|ENVIRONMENT)\s*:\s*", raw
+    ))
+    char_match = next((m for m in matches if m.group(1).upper() == "CHARACTER"), None)
+    env_match = next((m for m in matches if m.group(1).upper() == "ENVIRONMENT"), None)
+    if char_match and env_match and char_match.start() < env_match.start():
+        return {
+            "character": _strip_wrapping(raw[char_match.end():env_match.start()]),
+            "environment": _strip_wrapping(raw[env_match.end():]),
+        }
+
+    # Older or non-compliant models may still return one plain paragraph.
+    return {"character": raw, "environment": ""}
 
 
 _STILL_PHASE_RE = re.compile(

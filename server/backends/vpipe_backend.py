@@ -339,9 +339,9 @@ class VpipeBackend(Backend):
             and not _clones_voice(shot, project, model)
         ):
             raise ValueError(
-                "H3 native speech requires MiniMax H3 Ref2VA and a cast "
-                "speaker with a reference voice clip. Add the voice clip, or "
-                "switch Dialogue source to a separate recording."
+                "H3 native speech requires Ref2VA and a cast speaker with a "
+                "reference voice clip. Remove the Start/End frame anchors, add "
+                "the voice clip, or switch Dialogue source to a separate recording."
             )
         prompt = _resolved_prompt(
             shot,
@@ -1216,6 +1216,25 @@ def _resolved_prompt(
     would only compete with the visual description.
     """
     parts = []
+    if model == "fl2va":
+        # FL2VA's image inputs are true first/last-frame anchors rather than
+        # members of Ref2VA's <Picture N> list. Put the temporal alignment at
+        # the beginning of the prompt, as required by the H3 video guide.
+        alignment = []
+        if shot.get("startRef"):
+            alignment.append("Picture 1 is the Start frame at 0.00 seconds")
+        if shot.get("endRef"):
+            picture_number = 2 if shot.get("startRef") else 1
+            frames = int(shot.get("frames") or 0)
+            seconds = max(frames - 1, 0) / 24 if frames else 0
+            alignment.append(
+                f"Picture {picture_number} is the End frame at {seconds:.2f} seconds"
+            )
+        if alignment:
+            parts.append(
+                "How the reference pictures align with the target video — "
+                + "; ".join(alignment) + "."
+            )
     has_shot_refs = model == "ref2va" and bool(_shot_reference_images(shot))
     if has_shot_refs:
         parts.append(
@@ -1298,15 +1317,28 @@ def _resolved_prompt(
                 "no voice, and no intelligible dialogue; the voice line is "
                 "dubbed separately."
             )
+        elif line and clones_voice:
+            # The shared soundscape may quite reasonably say "no speech" for
+            # an otherwise quiet scene. Once native H3 dialogue is selected,
+            # that ambient constraint must not cancel the explicit spoken
+            # line or its corresponding mouth movement.
+            parts.append(
+                "Dialogue priority: the selected character must speak the "
+                "specified line aloud in the referenced voice; any 'no speech' "
+                "instruction applies only to background or unrelated voices."
+            )
     return " ".join(_sentence(p) for p in parts if p)
 
 
 def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
-    """Return the fixed video model used by Storyboard shots.
+    """Choose H3's video mode from the shot's frame-anchor inputs.
 
-    Krea-2 is retained only for the synthetic still-preview shots created by
-    the separate Create Stills action. User-authored video shots always use
-    Ref2VA, including when their reference list is empty.
+    FL2VA is the only mode that can wire a supplied image to the first/last
+    frame ports, so either Start frame or End frame activates it. With no
+    anchors, Ref2VA is the useful default because it can consume character,
+    style, object and other reference material. The persisted ``model`` field
+    remains a compatibility/default field; this decision is intentionally
+    derived from the actual inputs so old boards route correctly too.
     """
     requested = (
         shot.get("model")
@@ -1315,7 +1347,9 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
     )
     if requested == "krea2-still":
         return requested, ""
-    return "ref2va", "" if requested == "ref2va" else "using Ref2VA (fixed)"
+    if shot.get("startRef") or shot.get("endRef"):
+        return "fl2va", "using FL2VA for Start/End frame anchors"
+    return "ref2va", "" if requested == "ref2va" else "using Ref2VA without frame anchors"
 
 
 def _ref2va_references(
@@ -1346,10 +1380,9 @@ def _ref2va_references(
         if src and src not in sounds and len(sounds) < 3:
             sounds.append(src)
 
-    # A start or end reference cannot anchor a Ref2VA clip -- that partition
-    # packs references instead of keyframes -- but each is still a shot-local
-    # visual reference, so together they should outrank portraits and
-    # project-wide style references.
+    # This helper is only used by Ref2VA preparation. The effective model
+    # routes any shot with a Start/End anchor to FL2VA before this is called;
+    # when called directly, keep the historical ordered-reference behaviour.
     for entry in _reference_bindings(shot, project, "ref2va"):
         add_image(entry["ref"])
 

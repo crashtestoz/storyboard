@@ -227,10 +227,10 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         if c.get("id") in wanted
     ]
     payload = {
-        # Ref2VA now receives one ordered set containing start/end, shot,
-        # Cast and project references. Bump this whenever the routing changes
-        # so old clips are re-rendered instead of being treated as current.
-        "layeringVersion": 4,
+        # Routing now selects FL2VA for Start/End frame anchors and Ref2VA
+        # otherwise. Bump this whenever that routing changes so old clips are
+        # re-rendered instead of being treated as current.
+        "layeringVersion": 5,
         "speechInputs": speech_fingerprint(shot, board),
         "recording": shot.get("dialogueAudioUrl") if shot.get("dialogueSource") == "recording" else None,
         "dialogueSource": shot.get("dialogueSource", "auto"),
@@ -255,6 +255,11 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
             _ref_key(r) for r in (shot.get("referenceImages") or [])
         ],
         "model": shot.get("model") or defaults.get("model") or "",
+        "effectiveModel": (
+            "krea2-still" if (shot.get("model") or defaults.get("model")) == "krea2-still"
+            else "fl2va" if shot.get("startRef") or shot.get("endRef")
+            else "ref2va"
+        ),
         # Frame size is a project setting with a per-shot fallback, in the same
         # order the backend resolves it.
         "resolution": defaults.get("resolution") or shot.get("resolution") or "",
@@ -270,6 +275,8 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["model"] == "ref2va":
         payload["ref2vaProfile"] = "ordered-reference-set-v3"
+    if payload["effectiveModel"] == "fl2va":
+        payload["fl2vaProfile"] = "direct-frame-anchors-v1"
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -319,8 +326,8 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
-        # Storyboard video shots use Ref2VA so the same render can consume
-        # start/end references, cast media and other shot references.
+        # Ref2VA is the no-anchor default; the backend selects FL2VA whenever
+        # Start frame or End frame is supplied.
         "model": "ref2va",
         "resolution": d.get("resolution", "960x544"),
         "frames": d.get("frames", 124),
@@ -948,10 +955,9 @@ class Store:
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])
             shot.setdefault("model", defaults["model"])
-            # Older boards exposed FL2VA as a per-shot choice. Keep their
-            # content and references, but normalize video generation to the
-            # single Storyboard model. Create Stills uses a synthetic copy of
-            # the shot and remains independent of this persisted value.
+            # The persisted model is retained as the compatibility/default
+            # value. The backend derives the actual H3 mode from Start/End
+            # anchors, so older boards route correctly without migration.
             if shot.get("model") != "ref2va":
                 shot["model"] = "ref2va"
             shot.setdefault("resolution", defaults["resolution"])

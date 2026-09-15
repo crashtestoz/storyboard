@@ -340,9 +340,9 @@ def test_ref2va_reference_priority() -> None:
           str(draft_names))
 
 
-def test_ref2va_fixed_model(tmp: Path) -> None:
-    section("Ref2VA remains fixed without references")
-    workspace = tmp / "fallback"
+def test_effective_video_model_routing(tmp: Path) -> None:
+    section("frame anchors select FL2VA; reference shots select Ref2VA")
+    workspace = tmp / "routing"
     for model in ("FL2VA", "Ref2VA"):
         (workspace / "models" / "local" / f"MiniMax-H3-{model}-8bit").mkdir(parents=True)
     backend = VpipeBackend(workspace / "vpipe", workspace)
@@ -354,40 +354,36 @@ def test_ref2va_fixed_model(tmp: Path) -> None:
     job = backend.prepare(shot, board, paths)
     pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
     ref_encoder = next(s for s in pipeline["stages"] if s["type"] == "video-ref-encoder")
-    check("empty references stay on the Ref2VA pipeline",
+    check("no anchors use the Ref2VA pipeline",
           job.payload["model"] == "ref2va"
           and ref_encoder["config"]["references"] == [])
-    board["styleRefs"] = [{"kind": "upload", "path": "refs/style.png"}]
-    before = json.dumps(board, sort_keys=True)
-    job = backend.prepare(shot, board, paths)
-    pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
-    check("a reference selects Ref2VA",
-          job.payload["model"] == "ref2va"
-          and any(s["type"] == "video-ref-encoder" for s in pipeline["stages"]))
-    check("fixed model does not change the board",
-          "FL2VA" not in job.summary
-          and json.dumps(board, sort_keys=True) == before)
-    for source in ("startRef", "endRef", "referenceImages", "character", "style", "chain"):
-        candidate = json.loads(before)
+    for source, ref_port in (("startRef", 5), ("endRef", 6), ("chain", 5)):
+        candidate = json.loads(json.dumps(board))
         target = candidate["shots"][0]
         ref = {"kind": "upload", "path": "refs/image.png"}
-        if source == "character":
-            candidate["characters"] = [{"id": "c1", "image": ref}]
-            target["characterIds"] = ["c1"]
-        elif source == "style":
-            candidate["styleRefs"] = [ref]
-        elif source == "chain":
-            target["startRef"] = {"kind": "chain", "resolved": "shots/00/frames/last.png"}
-        else:
-            target[source] = [ref] if source == "referenceImages" else ref
+        target["startRef" if source == "chain" else source] = (
+            {"kind": "chain", "resolved": "shots/00/frames/last.png"}
+            if source == "chain" else ref
+        )
+        candidate["styleRefs"] = [{"kind": "upload", "path": "refs/style.png"}]
+        before = json.dumps(candidate, sort_keys=True)
         job = backend.prepare(target, candidate, paths)
-        check(f"{source} keeps Ref2VA", job.payload["model"] == "ref2va")
+        pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
+        generate = next(s for s in pipeline["stages"] if s["type"] == "generate-video")
+        check(f"{source} selects FL2VA",
+              job.payload["model"] == "fl2va"
+              and not any(s["type"] == "video-ref-encoder" for s in pipeline["stages"])
+              and generate["iports"][ref_port]["src"] == f"vae-encode-{'start' if ref_port == 5 else 'end'}")
+        check(f"{source} does not mutate the board",
+              "FL2VA" in job.summary and json.dumps(candidate, sort_keys=True) == before)
     (workspace / "models/local/MiniMax-H3-FL2VA-8bit").rmdir()
     try:
-        job = backend.prepare(shot, board, paths)
-        check("FL2VA is not required by the fixed path", job.payload["model"] == "ref2va")
+        candidate = json.loads(json.dumps(board))
+        candidate["shots"][0]["startRef"] = {"path": "refs/image.png"}
+        backend.prepare(candidate["shots"][0], candidate, paths)
+        check("anchored shots require the FL2VA model", False)
     except ValueError:
-        check("FL2VA is not required by the fixed path", False)
+        check("anchored shots require the FL2VA model", True)
 
 
 def test_rewrite_reference_context() -> None:
@@ -444,6 +440,20 @@ def test_rewrite_reference_context() -> None:
     check("rewrite prompt includes readable reference summaries",
           "bright white corridor" in msg and "black ribbed doorway" in msg,
           msg)
+
+    sound_msg = build_user_message(
+        "Birds are audible nearby.",
+        scene="A quiet woodland clearing.",
+        soundscape="Steady wind and distant river noise.",
+        context="A close shot of the clearing.",
+        context_label="This shot's local context:",
+    )
+    check("sound accent rewrite receives the general background sound as context",
+          "Steady wind and distant river noise." in sound_msg,
+          sound_msg)
+    check("sound accent context labels the general background as an exclusion",
+          "Do not repeat, paraphrase, or replace" in sound_msg,
+          sound_msg)
 
 
 def test_soundscape_modes() -> None:
@@ -727,7 +737,7 @@ def main() -> int:
         test_pending(tmp)
         test_dialogue_prompting()
         test_ref2va_reference_priority()
-        test_ref2va_fixed_model(tmp)
+        test_effective_video_model_routing(tmp)
         test_rewrite_reference_context()
         test_soundscape_modes()
         test_clip_choice(tmp)
