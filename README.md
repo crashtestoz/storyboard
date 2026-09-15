@@ -1,5 +1,22 @@
 # Storyboard
 
+![Storyboard — creators, not workflow engineers](assets/storyboard-infographic.png)
+
+Storyboard is for creators who want to direct a sequence of shots without
+having to build or debug a VPIPE or ComfyUI node workflow.
+
+### Why Storyboard?
+
+- **Shot-by-shot storytelling** — plan, reorder, and refine a complete piece.
+- **Visual references and continuity** — keep characters, environments, and
+  compositions coherent across shots.
+- **Dialogue and sound built in** — manage spoken lines, voice generation, and
+  sound cues alongside the picture.
+- **Render, review, and assemble** — see what worked, understand what failed,
+  and join the finished shots into a video.
+- **Local-first control** — use your own Apple Silicon hardware, models, and
+  services without hiding the pipeline behind a black box.
+
 A storyboard-shaped front end for local video generation. Build a piece as an
 ordered sequence of shots — each with a prompt, optional reference frames, a
 cast and a length — and the tool compiles each shot into a real pipeline, runs
