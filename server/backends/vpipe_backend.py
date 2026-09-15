@@ -278,34 +278,37 @@ class VpipeBackend(Backend):
     def prepare(self, shot: dict, project: dict, paths: ShotPaths) -> JobSpec:
         paths.ensure()
         model, automatic_reason = _effective_video_model(shot, project)
-        # Resolve every reference source before choosing the pipeline. Ref2VA
-        # skips an empty request; FL2VA can render that shot from text instead.
-        # Keep the board's choice intact so later chained shots still use it.
-        reference_fallback = model == "ref2va" and not _ref2va_references(
-            shot, project, paths, include_audio_refs=False
-        )
-        if reference_fallback:
-            model = "fl2va"
         cap = self.capability(model)
         if cap is None:
             raise ValueError(f"unknown model: {model}")
         if not cap.available:
-            if reference_fallback:
-                raise ValueError(
-                    "Ref2VA has no references and its FL2VA fallback is unavailable: "
-                    + (cap.unavailable_reason or "FL2VA is not available")
-                )
             raise ValueError(cap.unavailable_reason or f"{model} is not available")
-
-        if shot.get("dialogueSource") == "recording" and (shot.get("dialogue") or "").strip():
+        # Create Stills uses a synthetic Krea-2 image job, but it copies the
+        # shot so it can reuse the scene/cast/reference layers. Dialogue is
+        # irrelevant to that image preview and must not require a prepared
+        # dialogue.wav take or block native speech validation below.
+        if (
+            cap.kind == "video"
+            and shot.get("dialogueSource") == "recording"
+            and (shot.get("dialogue") or "").strip()
+        ):
             from ..store import speech_fingerprint
             speech = paths.abs_dir / "dialogue.wav"
             if not speech.exists():
-                raise ValueError("Generate and preview the Dialogue-window recording before rendering")
+                raise ValueError(
+                    "Dialogue source is set to a separate recording, but no "
+                    "dialogue take exists. Select a healthy speech engine, "
+                    "press Generate in the Dialogue panel, preview the take, "
+                    "then render again."
+                )
             if (shot.get("dialogueSpokenText", "").strip() != shot["dialogue"].strip()
                     or shot.get("dialogueSpokenStyle", "").strip() != shot.get("dialogueStyle", "").strip()
                     or (shot.get("speechFingerprint") and shot["speechFingerprint"] != speech_fingerprint(shot, project))):
-                raise ValueError("Dialogue recording is out of date; generate it again before rendering")
+                raise ValueError(
+                    "Dialogue recording is out of date because the line or "
+                    "voice direction changed. Press Generate in the Dialogue "
+                    "panel before rendering again."
+                )
 
         # Resolution is a project setting, not a per-shot one: a storyboard
         # produces one video, and mixing frame sizes between shots would just
@@ -329,8 +332,17 @@ class VpipeBackend(Backend):
         # motion-only pass (see the frame-count comment below), so there is
         # no dialogue or sound to generate in the first place.
         with_audio = cap.supports_audio and not sketch
-        if shot.get("dialogue") and shot.get("dialogueSource") == "native" and not _clones_voice(shot, project, model):
-            raise ValueError("Native dialogue requires Ref2VA and a speaker with a reference voice")
+        if (
+            cap.kind == "video"
+            and shot.get("dialogue")
+            and shot.get("dialogueSource") == "native"
+            and not _clones_voice(shot, project, model)
+        ):
+            raise ValueError(
+                "H3 native speech requires MiniMax H3 Ref2VA and a cast "
+                "speaker with a reference voice clip. Add the voice clip, or "
+                "switch Dialogue source to a separate recording."
+            )
         prompt = _resolved_prompt(
             shot,
             project,
@@ -447,7 +459,6 @@ class VpipeBackend(Backend):
                 + (f" · {frames}f" if cap.kind == "video" else "")
                 + f" · {steps} steps"
                 + (" · SKETCH" if sketch else " · DRAFT" if draft else "")
-                + (" · no references: using FL2VA" if reference_fallback else "")
                 + (f" · {automatic_reason}" if automatic_reason else "")
             ),
         )
@@ -1242,6 +1253,16 @@ def _resolved_prompt(
             )
 
     bindings = _reference_bindings(shot, project, model)
+    if model == "ref2va" and any(
+        entry["name"] in ("Start frame", "End frame") for entry in bindings
+    ):
+        parts.append(
+            "The Start frame and End frame references describe the intended "
+            "opening and closing composition. Ref2VA uses them as ordered "
+            "visual references rather than hard-pinned keyframes; preserve "
+            "their identity, layout and continuity while following the shot "
+            "action."
+        )
     for entry in bindings:
         parts.append(f"{entry['token']}: {entry['name']} reference; use for {entry['role']} only")
     shot_prompt = (shot.get("prompt") or "").strip()
@@ -1281,25 +1302,20 @@ def _resolved_prompt(
 
 
 def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
-    """Choose the H3 partition required by the scene's concrete inputs.
+    """Return the fixed video model used by Storyboard shots.
 
-    FL2VA owns keyframe anchors. Ref2VA owns the reference-media list. H3
-    cannot combine those two conditioning layouts in one render.
+    Krea-2 is retained only for the synthetic still-preview shots created by
+    the separate Create Stills action. User-authored video shots always use
+    Ref2VA, including when their reference list is empty.
     """
     requested = (
         shot.get("model")
         or (project.get("defaults") or {}).get("model")
-        or "fl2va"
+        or "ref2va"
     )
-    if requested not in ("fl2va", "ref2va"):
+    if requested == "krea2-still":
         return requested, ""
-    if shot.get("startRef") or shot.get("endRef"):
-        reason = "using FL2VA for frame anchors" if requested != "fl2va" else ""
-        return "fl2va", reason
-    if shot.get("referenceImages"):
-        reason = "using Ref2VA for reference images" if requested != "ref2va" else ""
-        return "ref2va", reason
-    return requested, ""
+    return "ref2va", "" if requested == "ref2va" else "using Ref2VA (fixed)"
 
 
 def _ref2va_references(
@@ -1311,9 +1327,9 @@ def _ref2va_references(
 ) -> list[str]:
     """Reference order for Ref2VA, strongest shot-local signals first.
 
-    The shot's own image sets clip-specific location/framing first. Character
-    portraits preserve identity after that, and project style refs are useful
-    background only when there is no local shot reference.
+    Start/end and other shot-local images come first. Character portraits and
+    project style refs follow in the same request so the model can use every
+    available reference until its image limit is reached.
     """
     images: list[str] = []
     sounds: list[str] = []
@@ -1359,11 +1375,17 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
     """One ordered manifest shared by prompt labels and image encoder inputs."""
     candidates = []
     if model == "ref2va":
-        candidates.extend((r, "Shot reference", "environment and composition") for r in _shot_reference_images(shot))
+        if shot.get("startRef"):
+            candidates.append((shot["startRef"], "Start frame", "opening frame and composition"))
+        if shot.get("endRef"):
+            candidates.append((shot["endRef"], "End frame", "closing frame and composition"))
+        candidates.extend((r, "Shot reference", "environment and composition") for r in (shot.get("referenceImages") or []))
         candidates.extend((c["image"], c.get("name") or "Character", "character identity")
                           for c in _shot_characters(shot, project) if c.get("image"))
-        if not _shot_reference_images(shot):
-            candidates.extend((r, "Project style", "style") for r in project.get("styleRefs") or [])
+        # Keep project-wide references in the same Ref2VA request even when a
+        # shot also has local references. The model's nine-image limit is
+        # enforced below, with shot-local inputs taking priority by order.
+        candidates.extend((r, "Project style", "style") for r in project.get("styleRefs") or [])
     # FL2VA anchors are wired directly to the model's keyframe ports. They
     # are not members of a prompt-addressable reference list.
     result, seen, tags = [], {}, set()
@@ -1391,8 +1413,14 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
 
 
 def _shot_reference_images(shot: dict) -> list[Any]:
-    """The prompt-addressable Ref2VA images, excluding FL2VA anchors."""
-    return list(shot.get("referenceImages") or [])
+    """All image references for Ref2VA, including labeled frame references."""
+    refs = []
+    if shot.get("startRef"):
+        refs.append(shot.get("startRef"))
+    if shot.get("endRef"):
+        refs.append(shot.get("endRef"))
+    refs.extend(shot.get("referenceImages") or [])
+    return refs
 
 
 def _view_constraint(shot: dict) -> str:

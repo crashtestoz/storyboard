@@ -419,7 +419,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "slug": {"type": "string"},
-                "shot": {"type": "object", "description": "Optional partial shot fields (prompt, dialogue, model, etc.)."},
+                "shot": {"type": "object", "description": "Optional partial shot fields (prompt, dialogue, startRef, endRef, referenceImages, etc.). Video shots always render with Ref2VA; model is ignored."},
             },
             "required": ["slug"],
         },

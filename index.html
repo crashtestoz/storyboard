@@ -13,7 +13,7 @@
     <!-- ================= header ================= -->
     <header class="header">
       <div class="brand" id="btnHelp" role="button" tabindex="0"
-           title="Camera angles &amp; shot sizes reference">
+           title="Camera prompt guide">
         <span class="brand-mark">▦</span>
         <span>Storyboard</span>
       </div>
@@ -58,14 +58,6 @@
 
     <!-- ================= rail ================= -->
     <aside class="rail">
-
-      <section>
-        <div class="section-label">
-          Final video
-          <span class="hint">— every shot, in order</span>
-        </div>
-        <div class="final-box" id="finalVideo"></div>
-      </section>
 
       <section>
         <div class="section-label">
@@ -133,7 +125,7 @@
         <div class="strip-head">
           <div class="section-label" style="margin:0">
             Storyboard
-            <span class="hint">— drag to reorder</span>
+            <span class="hint">— drag to reorder · scroll horizontally</span>
           </div>
         </div>
         <div class="strip" id="strip"></div>
@@ -252,8 +244,9 @@
           <div class="readonly">24 fps — fixed by the models</div>
         </div>
         <div class="field">
-          <label>Default model <span class="hint-inline">for new shots</span></label>
-          <select id="defModel"></select>
+          <label>Video model</label>
+          <div class="readonly">MiniMax H3 Ref2VA — fixed for storyboard shots</div>
+          <div class="field-note">Start/end references, cast media and other reference material are sent together in one Ref2VA request.</div>
         </div>
         <div class="field">
           <label>Default steps <span class="hint-inline">8 draft · 16 good</span></label>
@@ -383,7 +376,7 @@
   <div id="helpDialog" class="modal" hidden>
     <div class="modal-card" style="width:min(920px,100%)">
       <div class="modal-head">
-        <span>Camera angles, shot sizes &amp; moves</span>
+        <span>Camera prompt guide</span>
         <div class="header-spacer"></div>
         <button class="btn btn-ghost btn-sm" id="helpClose">Close</button>
       </div>
@@ -572,11 +565,66 @@
           </dl>
         </section>
 
+        <section class="help-section help-prompt">
+          <div class="section-label">
+            Turn the idea into a prompt
+            <span class="hint">— describe where the camera starts, how it moves, and where it ends</span>
+          </div>
+          <p class="help-intro">
+            H3 responds more reliably when each part has one clear job. Use this
+            order: <strong>starting position</strong> + <strong>movement and direction</strong>
+            + <strong>angle or height</strong> + <strong>ending framing</strong> +
+            <strong>speed</strong>.
+          </p>
+          <div class="help-recipe">
+            <div><strong>Starting position</strong><span>front, side, behind, or front three-quarter; say whose left or right when it matters.</span></div>
+            <div><strong>Camera height</strong><span>eye level, shoulder level, hip level, knee level, or ground level.</span></div>
+            <div><strong>Movement</strong><span>pan, tilt, dolly, truck, pedestal, orbit, or roll. Say the direction in plain language.</span></div>
+            <div><strong>Framing</strong><span>name the shot size at the start and/or end: close-up, medium shot, full shot.</span></div>
+            <div><strong>Timing</strong><span>slow, steady, or fast; add small, medium, or large amplitude when useful.</span></div>
+          </div>
+          <div class="help-callout">
+            <strong>Important direction choice:</strong>
+            “Counterclockwise” is clearest for an <em>orbit</em> around a subject
+            or a <em>roll</em> of the horizon. For a horizontal pan, say
+            “from screen left to screen right” or “from screen right to screen
+            left.” “Zoom out” changes the lens; “dolly out” moves the camera
+            physically away.
+          </div>
+          <div class="help-examples">
+            <div class="help-example">
+              <strong>Pan with a framing change</strong>
+              <code>Eye-level front three-quarter medium shot from the subject's left. The camera pans from screen left to screen right with medium amplitude at slow speed, ending in a medium close-up.</code>
+            </div>
+            <div class="help-example">
+              <strong>Counterclockwise orbit and zoom out</strong>
+              <code>Begin at eye level in a medium shot with the subject centered. The camera slowly orbits counterclockwise around the subject while zooming out, ending in a full shot that reveals more of the surroundings.</code>
+            </div>
+            <div class="help-example">
+              <strong>Low angle and dolly in</strong>
+              <code>Start at knee level in a low-angle full shot behind the subject. Dolly forward with medium amplitude at steady speed, keeping the subject centered and ending in a medium shot.</code>
+            </div>
+            <div class="help-example">
+              <strong>Side movement and tilt</strong>
+              <code>Start at hip level in a side-on medium shot. Truck from left to right as the camera tilts upward slowly, ending on a medium close-up of the subject's face.</code>
+            </div>
+            <div class="help-example">
+              <strong>Rotation of the horizon</strong>
+              <code>Hold a close-up at eye level, then roll the camera counterclockwise slowly with small amplitude while the subject remains still.</code>
+            </div>
+          </div>
+          <p class="help-tip">
+            Avoid combining “counterclockwise pan” with “zoom to medium shot.”
+            Choose <em>pan left/right</em>, <em>orbit counterclockwise</em>, or
+            <em>roll counterclockwise</em>, then state whether the framing gets
+            tighter or wider.
+          </p>
+        </section>
+
       </div>
       <div class="modal-foot">
-        These describe how a shot's prompt is framed — mention them in the shot
-        prompt itself (e.g. "a cowboy shot, hip level, a slow dolly in") the
-        same way you'd describe any other camera move.
+        Copy the pattern into a shot prompt: starting position → movement and
+        direction → camera height/angle → ending shot size → speed.
       </div>
     </div>
   </div>

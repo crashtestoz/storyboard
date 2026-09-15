@@ -250,7 +250,10 @@ class Orchestrator:
         # a shot that looked finished is indistinguishable from a bug.
         for shot in shots:
             if shot["id"] in self._runs:
-                shot.update(status="queued", progress=0, validation=None, outputs=[])
+                shot.update(
+                    status="queued", reason="", progress=0,
+                    validation=None, outputs=[]
+                )
                 why = because.get(shot["id"])
                 if why:
                     self._runs[shot["id"]].log.append(
@@ -595,7 +598,7 @@ class Orchestrator:
             )
             fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
             if fresh_shot is not None:
-                fresh_shot.update(status="blocked", progress=0)
+                fresh_shot.update(status="blocked", reason=dep_problem, progress=0)
                 self.store.save(slug, fresh_board)
             return
 
@@ -614,7 +617,7 @@ class Orchestrator:
             run.log.append({"level": "ERROR", "text": run.reason})
             fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
             if fresh_shot is not None:
-                fresh_shot.update(status="failed", progress=0)
+                fresh_shot.update(status="failed", reason=run.reason, progress=0)
                 self.store.save(slug, fresh_board)
             return
 
@@ -655,7 +658,10 @@ class Orchestrator:
             run.log.append({"level": "INFO", "text": run.reason})
             fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
             if fresh_shot is not None:
-                fresh_shot.update(status="interrupted", progress=round(run.progress))
+                fresh_shot.update(
+                    status="interrupted", reason=run.reason,
+                    progress=round(run.progress)
+                )
                 self.store.save(slug, fresh_board)
             return
 
@@ -697,6 +703,7 @@ class Orchestrator:
         if fresh_shot is not None:
             fresh_shot.update(
                 status=validation.verdict,
+                reason=validation.reason or "",
                 progress=round(run.progress),
                 runtimeSeconds=round(result.seconds, 1),
                 outputs=run.outputs,

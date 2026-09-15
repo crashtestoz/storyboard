@@ -203,7 +203,10 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         if c.get("id") in wanted
     ]
     payload = {
-        "layeringVersion": 3,
+        # Ref2VA now receives one ordered set containing start/end, shot,
+        # Cast and project references. Bump this whenever the routing changes
+        # so old clips are re-rendered instead of being treated as current.
+        "layeringVersion": 4,
         "speechInputs": speech_fingerprint(shot, board),
         "recording": shot.get("dialogueAudioUrl") if shot.get("dialogueSource") == "recording" else None,
         "dialogueSource": shot.get("dialogueSource", "auto"),
@@ -242,7 +245,7 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
     if payload["sketch"]:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["model"] == "ref2va":
-        payload["ref2vaProfile"] = "shot-reference-set-isolated-v2"
+        payload["ref2vaProfile"] = "ordered-reference-set-v3"
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -292,12 +295,15 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
-        "model": d.get("model", "fl2va"),
+        # Storyboard video shots use Ref2VA so the same render can consume
+        # start/end references, cast media and other shot references.
+        "model": "ref2va",
         "resolution": d.get("resolution", "960x544"),
         "frames": d.get("frames", 124),
         "steps": d.get("steps", 8),
         "seed": 0,
         "status": "draft",
+        "reason": "",
         "progress": 0,
         "runtimeSeconds": None,
         "outputs": [],
@@ -346,7 +352,7 @@ def default_board(name: str) -> dict[str, Any]:
         "characters": [],
         "styleRefs": [],
         "defaults": {
-            "model": "fl2va",
+            "model": "ref2va",
             "resolution": "960x544",
             "frames": 124,
             "steps": 8,
@@ -552,14 +558,17 @@ class Store:
         if not bp.is_file():
             raise FileNotFoundError(f"no storyboard at {bp}")
         board = json.loads(bp.read_text())
+        before_migrate = json.dumps(board, sort_keys=True, separators=(",", ":"))
         board = self.migrate(board)
+        migrated = json.dumps(board, sort_keys=True, separators=(",", ":")) != before_migrate
         # Self-heal on the way out: a board saved before rehoming existed,
         # or one hand-copied from another project's folder, can still point
         # at media that lives elsewhere. Every read is a chance to notice
         # and fix that before it's shown to anyone, not just the moment of
         # import. Same idea for a chain ref whose source already has frames
         # but has never had its preview resolved.
-        healed = self._rehome_media(slug, board)
+        healed = migrated
+        healed = self._rehome_media(slug, board) or healed
         healed = self._resolve_chain_previews(slug, board) or healed
         if healed:
             board = self.save(slug, board)
@@ -868,7 +877,8 @@ class Store:
         board.setdefault("finalVideo", None)
 
         defaults = board.setdefault("defaults", {})
-        defaults.setdefault("model", "fl2va")
+        # The video model is a Storyboard invariant, not a project preference.
+        defaults["model"] = "ref2va"
         defaults.setdefault("resolution", "960x544")
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
@@ -908,11 +918,18 @@ class Store:
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])
             shot.setdefault("model", defaults["model"])
+            # Older boards exposed FL2VA as a per-shot choice. Keep their
+            # content and references, but normalize video generation to the
+            # single Storyboard model. Create Stills uses a synthetic copy of
+            # the shot and remains independent of this persisted value.
+            if shot.get("model") != "ref2va":
+                shot["model"] = "ref2va"
             shot.setdefault("resolution", defaults["resolution"])
             shot.setdefault("frames", defaults["frames"])
             shot.setdefault("steps", defaults["steps"])
             shot.setdefault("seed", 0)
             shot.setdefault("status", "draft")
+            shot.setdefault("reason", "")
             shot.setdefault("progress", 0)
             shot.setdefault("runtimeSeconds", None)
             shot.setdefault("outputs", [])
