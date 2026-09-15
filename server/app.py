@@ -485,17 +485,20 @@ class Handler(BaseHTTPRequestHandler):
                 if text is None:
                     text = shot.get("soundNote") or ""
 
-                # Grounded in this shot's own prompt (the action, environment,
-                # materials), not the project scene description — an accent is
-                # local to what happens in this one clip.
+                # Give the model both scene layers. Sound accents are additional
+                # local background sounds, so the shared Background Sound is an
+                # explicit exclusion list rather than something to rewrite.
                 proposal = rewrite_prompt(
                     service,
                     text,
+                    scene=board.get("sceneDescription") or "",
+                    soundscape=board.get("soundscape") or "",
                     context=shot.get("prompt") or "",
                     context_label=(
-                        "This shot's own prompt (action, camera, mood), already "
-                        "written and not to be repeated here. Ground the sound "
-                        "accents in what actually happens in it:"
+                        "This shot's own prompt, already written elsewhere. Use "
+                        "its location and moment to find additional local "
+                        "background sounds, but do not repeat the prompt or turn "
+                        "foreground action into sound effects:"
                     ),
                     kind="soundNote",
                 )
@@ -604,7 +607,15 @@ class Handler(BaseHTTPRequestHandler):
                 current=payload.get("description") or "",
             )
             return self._send_json(
-                {"text": proposal, "service": service.label, "model": service.model}
+                {
+                    # Keep ``text`` as the character-only value for older
+                    # clients; named fields carry the new split result.
+                    "text": proposal["character"],
+                    "character": proposal["character"],
+                    "environment": proposal["environment"],
+                    "service": service.label,
+                    "model": service.model,
+                }
             )
 
         if path == "/api/transcribe":

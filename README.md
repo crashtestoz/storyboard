@@ -325,10 +325,11 @@ shows the assembled result, so nothing about the composition is hidden.
 
 **Style references and the media library.** Style reference images are
 project-wide and are sent to vpipe's `video-ref-encoder` with each shot's own
-references and selected Cast media. Every Storyboard video shot uses Ref2VA,
-so start/end references, subject/style images, portraits and the speaker's
-voice reference can travel in one request. The model's nine-image/three-audio
-limits are enforced before rendering.
+references and selected Cast media when the shot uses Ref2VA. A shot with a
+Start frame or End frame automatically uses FL2VA, whose images are hard
+first/last-frame anchors; separate Cast, style and shot-reference images are
+not sent on that path. With no anchors, Ref2VA carries that reference set and
+the model's nine-image/three-audio limits are enforced before rendering.
 
 The image picker scans project `refs/` folders and rendered stills, groups
 exact duplicate images by content hash, and shows where used files are
@@ -356,13 +357,12 @@ to them by name in its prompt. On Ref2VA the portrait becomes an image
 reference and the voice clip a soundtrack reference, respecting that model's
 real limits (9 images, 3 soundtracks, 12 total).
 
-**Start/end references and chaining.** Storyboard video shots always use
-Ref2VA. The Start frame and End frame controls identify the intended opening
-and closing compositions and are sent first in the ordered Ref2VA reference
-list, followed by other shot, Cast and project references. They are semantic
-visual cues rather than FL2VA-style hard-pinned keyframes. “Chain start frame
-from the previous shot” still resolves the previous shot's last saved frame
-into that Start frame reference.
+**Start/end references and chaining.** A Start frame or End frame automatically
+switches the shot to FL2VA and wires the supplied image directly to the
+corresponding first/last-frame input. “Chain start frame from the previous
+shot” resolves the previous shot's last saved frame before that FL2VA request
+is generated. Remove both anchors when the shot should use Ref2VA's ordered
+character, style, object and environment reference set instead.
 
 **Transcription is its own capability.** Cloning a voice and recognising
 speech are separate, and one does not imply the other — MOSS clones a voice and

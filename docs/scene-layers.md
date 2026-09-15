@@ -45,13 +45,12 @@ tags when those images are supplied in every affected shot.
 
 Selected Cast portraits are attached and named automatically; mentioning the
 character by name is sufficient. Project style images are included with the
-shot's local references and selected Cast portraits. Storyboard video always
-uses Ref2VA, so the Start frame and End frame controls identify ordered visual
-references alongside the rest of the reference material. Ref2VA cannot pin an
-exact generated opening or closing frame; it receives the two images as labeled
-semantic cues. A chained Start frame resolves to the previous shot's last saved
-frame before the request is generated. The nine-image Ref2VA limit still
-applies to the combined set.
+shot's local references and selected Cast portraits when the shot uses Ref2VA.
+A Start frame or End frame automatically selects FL2VA and wires those images
+as hard first/last-frame anchors; separate Ref2VA images are not sent on that
+path. With no anchors, Ref2VA receives the combined ordered reference set and
+its nine-image limit applies. A chained Start frame resolves to the previous
+shot's last saved frame before the FL2VA request is generated.
 
 ## Dialogue source
 

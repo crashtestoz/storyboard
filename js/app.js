@@ -7,7 +7,8 @@
    actually watching the process.
 
    Frame-count rules and available model capabilities come from /api/info.
-   Storyboard video itself intentionally has one fixed model: Ref2VA.
+   Video shots route to FL2VA when they have frame anchors and Ref2VA
+   otherwise.
    ========================================================================== */
 
 "use strict";
@@ -47,6 +48,8 @@ const state = {
   // clicked. Cleared the moment someone clicks a different shot themselves,
   // so inspecting an earlier shot mid-batch does not get yanked away.
   followRender: true,
+  // A render may be preceded by several sequential speech-engine calls.
+  dialoguePreparing: false,
 };
 
 /* Mirrors RERUNNABLE in server/orchestrator.py: the statuses a whole-board
@@ -79,10 +82,14 @@ const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
-// Storyboard video generation deliberately has one conditioning path. Krea-2
-// is still used by the separate Create Stills preview job via its synthetic
-// shot copy, but is not a user-selectable shot model.
+// Video shots route automatically: frame anchors use FL2VA, while shots with
+// no Start/End anchors use Ref2VA so character/style/reference media can be
+// sent. Krea-2 is still used by the separate Create Stills preview job via its
+// synthetic shot copy, but is not a user-selectable shot model.
 const STORYBOARD_MODEL = "ref2va";
+function effectiveShotModel(raw) {
+  return raw && (raw.startRef || raw.endRef) ? "fl2va" : STORYBOARD_MODEL;
+}
 
 /* True when this shot's dialogue is spoken directly in the render, in the
    speaking character's own cloned voice (Ref2VA, with that character's own
@@ -90,6 +97,7 @@ const STORYBOARD_MODEL = "ref2va";
    _clones_voice). Mirrors that same rule so the UI and the render agree on
    which shots need a separate TTS dub and which don't. */
 function shotClonesVoice(raw) {
+  if (effectiveShotModel(raw) !== STORYBOARD_MODEL) return false;
   if (raw.dialogueSource === "recording") return false;
   const cast = (state.board.characters || []).filter((c) =>
     (raw.characterIds || []).includes(c.id)
@@ -123,7 +131,7 @@ function dialogueReadiness(raw) {
         code: "dialogue-recording-stale",
         title: "Dialogue recording is out of date",
         body: "This shot uses a separate dialogue recording, but the line or voice direction changed after the take was generated.",
-        action: "Press Generate in the Dialogue panel to create a fresh take before rendering.",
+        action: "Rendering will create a fresh take automatically; use Generate in the Dialogue panel only if you want to preview it first.",
       };
     }
     if (!raw.dialogueAudioUrl) {
@@ -137,7 +145,7 @@ function dialogueReadiness(raw) {
         title: "Dialogue recording required before rendering",
         body: `“Use Dialogue-window recording” is selected, but this line has no generated audio take. ${engineLine}`,
         action: engine && engine.healthy
-          ? "Press Generate in the Dialogue panel, preview the take, then render again."
+          ? "Rendering will create the take automatically; use Generate in the Dialogue panel if you want to preview it first."
           : "Choose a healthy Speech engine in Settings, then press Generate in the Dialogue panel.",
       };
     }
@@ -205,6 +213,55 @@ function renderDialogueBlockers() {
     .filter((entry) => entry.issue);
 }
 
+function canAutoPrepareDialogue(raw) {
+  if (!raw || (raw.dialogueSource || "auto") !== "recording") return false;
+  const engine = state.tts.find((e) => e.id === (state.board.defaults.tts || "none"));
+  return !!(engine && engine.id !== "none" && engine.healthy);
+}
+
+function applyDialogueTake(raw, result, text, style) {
+  raw.dialogueAudioUrl = result.audioUrl;
+  raw.dialogueSpokenText = (text || "").trim();
+  raw.dialogueSpokenStyle = (style || "").trim();
+  if (result.dubUrl) raw.dubUrl = result.dubUrl;
+  if (result.speechLogUrl) raw.speechLogUrl = result.speechLogUrl;
+  if (result.log && result.log.length) state.speechLog[raw.id] = result.log;
+}
+
+/* Generate missing or stale recording takes one at a time. Each /dub request
+   loads and saves the board, so parallel requests could make one completed
+   take disappear when another request saves its copy. Native H3 shots never
+   enter this list and therefore never receive a second voice track. */
+async function prepareDialogueRecordings(entries) {
+  if (!entries.length) return;
+  state.dialoguePreparing = true;
+  try {
+    await saveNow();
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      const raw = shotById(entry.raw.id);
+      if (!raw) throw new Error(`Shot ${entry.raw.id} no longer exists.`);
+      const text = (raw.dialogue || "").trim();
+      const style = raw.dialogueStyle || "";
+      toast(`Generating dialogue ${i + 1} of ${entries.length}: ${raw.title || `Shot ${i + 1}`}…`);
+      try {
+        const result = await API.dub(state.slug, raw.id, text, style, raw.dubMode);
+        if (!result || !result.audioUrl) throw new Error("the speech engine returned no audio");
+        applyDialogueTake(raw, result, text, style);
+        if (result.note) toast(result.note, "warn");
+        else if (result.warning) toast(result.warning, "warn");
+      } catch (err) {
+        if (err.payload && err.payload.log && err.payload.log.length) {
+          state.speechLog[raw.id] = err.payload.log;
+        }
+        throw new Error(`Could not generate dialogue for ${raw.title || raw.id}: ${err.message}`);
+      }
+    }
+  } finally {
+    state.dialoguePreparing = false;
+  }
+}
+
 function showRenderDialogueBlocker(blockers) {
   const first = blockers[0];
   if (!first) return;
@@ -267,7 +324,10 @@ function outputMuted() {
 
 function paintOutputMute(button) {
   const muted = outputMuted();
-  button.textContent = muted ? "🔇 Muted" : "🔊 Sound";
+  button.replaceChildren(
+    stageIconSvg(muted ? "sound-muted" : "sound"),
+    el("span", null, muted ? "Muted" : "Sound")
+  );
   button.dataset.muted = String(muted);
   button.title = muted
     ? "Unmute project output previews"
@@ -541,11 +601,10 @@ function renderBackendBadge() {
   box.title = b.healthy ? state.info.workspace : b.message;
   if (!b.healthy) toast(b.message, "error");
 
-  // FL2VA is retained in the backend for power-user pipelines, but is not a
-  // dependency of this UI. Only warn here about the fixed video model; Krea
-  // is optional and reports its own problem when Create Stills is used.
+  // Both H3 video modes are used automatically. Krea is optional and reports
+  // its own problem when Create Stills is used.
   const unavailable = state.models.filter(
-    (m) => m.id === STORYBOARD_MODEL && !m.available
+    (m) => ["fl2va", STORYBOARD_MODEL].includes(m.id) && !m.available
   );
   if (unavailable.length) {
     toast(
@@ -604,19 +663,30 @@ function setBoard(slug, board, stale) {
 function wireChrome() {
   $("#btnRender").addEventListener("click", async () => {
     const blockers = renderDialogueBlockers();
-    if (blockers.length) {
-      showRenderDialogueBlocker(blockers);
+    const manualBlockers = blockers.filter((entry) => !canAutoPrepareDialogue(entry.raw));
+    if (manualBlockers.length) {
+      showRenderDialogueBlocker(manualBlockers);
       return;
     }
-    await saveNow();
+    const btn = $("#btnRender");
+    btn.disabled = true;
+    let started = false;
     try {
+      await prepareDialogueRecordings(blockers);
+      await saveNow();
       state.status = await API.render(state.slug, undefined, state.board);
+      started = true;
       state.awaitingBatch = true;
       state.followRender = true;
       startPolling();
       render();
     } catch (err) {
       toast(err.message, "error");
+    } finally {
+      if (!started) {
+        state.dialoguePreparing = false;
+        btn.disabled = false;
+      }
     }
   });
 
@@ -1393,7 +1463,7 @@ function paintLive() {
   if (!state.board) return;
   const busy = !!(state.status && state.status.busy);
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
-  $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnRender").disabled = busy || stillsBusy || state.dialoguePreparing || !state.info.backend.healthy;
   $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
@@ -1513,7 +1583,7 @@ function render() {
 
   const busy = !!(state.status && state.status.busy);
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
-  $("#btnRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
+  $("#btnRender").disabled = busy || stillsBusy || state.dialoguePreparing || !state.info.backend.healthy;
   $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
@@ -1559,8 +1629,12 @@ function paintRenderHint() {
   const pending = pendingShots();
   const changed = pending.filter((raw) => !!staleWhy(raw.id)).length;
   const blockers = renderDialogueBlockers();
-  const blockerHint = blockers.length
-    ? ` ${blockers.length} shot${blockers.length === 1 ? "" : "s"} need dialogue setup before rendering.`
+  const autoCount = blockers.filter((entry) => canAutoPrepareDialogue(entry.raw)).length;
+  const manualCount = blockers.length - autoCount;
+  const blockerHint = manualCount
+    ? ` ${manualCount} shot${manualCount === 1 ? "" : "s"} need dialogue setup before rendering.`
+    : autoCount
+    ? ` ${autoCount} missing or stale dialogue take${autoCount === 1 ? "" : "s"} will be generated automatically before rendering.`
     : "";
   $("#btnRender").title = pending.length
     ? `Renders ${pending.length} of ${shots().length} shot(s)` +
@@ -1707,7 +1781,7 @@ function renderRail() {
   const draftOn = !!state.board.defaults.draft;
   dt.checked = draftOn;
   const [cw, ch] = current.split("x").map(Number);
-  const cap = modelCap(STORYBOARD_MODEL) || state.models[0] || null;
+  const cap = modelCap(effectiveShotModel(selectedShot())) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
     ? `Rendering at ${dw}×${dh} and 4 steps, dialogue and sound effects ` +
@@ -2239,8 +2313,17 @@ async function editCharacter(existing) {
         field.value.trim(),
         llm && llm.id
       );
-      descProposal.appendChild(characterDescProposal(r.text, field, descProposal));
-      toast(`Character description proposed by ${r.service}.`);
+      descProposal.appendChild(
+        characterExtractionProposal(
+          {
+            character: r.character || r.text || "",
+            environment: r.environment || "",
+          },
+          field,
+          descProposal
+        )
+      );
+      toast(`Character and environment descriptions proposed by ${r.service}.`);
     } catch (err) {
       castError(`Could not describe the image: ${err.message}`);
     } finally {
@@ -2250,24 +2333,57 @@ async function editCharacter(existing) {
     }
   }
 
-  function characterDescProposal(text, field, slot) {
+  function characterExtractionProposal(result, field, slot) {
     const box = el("div", "proposal");
-    const head = el("div", "proposal-head");
-    head.appendChild(el("strong", null, "Proposed description"));
-    box.appendChild(head);
-    box.appendChild(el("div", "proposal-body", text));
+    const character = (result.character || "").trim();
+    const environment = (result.environment || "").trim();
 
-    const acts = el("div", "proposal-acts");
-    const use = el("button", "btn btn-sm btn-primary", "Use this");
-    use.addEventListener("click", () => {
-      field.value = text;
-      draft.description = text;
-      slot.innerHTML = "";
+    const characterHead = el("div", "proposal-head");
+    characterHead.appendChild(el("strong", null, "Character only"));
+    box.appendChild(characterHead);
+    box.appendChild(el("div", "proposal-body", character));
+
+    const characterActs = el("div", "proposal-acts");
+    const useCharacter = el("button", "btn btn-sm btn-primary", "Use character");
+    useCharacter.addEventListener("click", () => {
+      field.value = character;
+      draft.description = character;
+      useCharacter.textContent = "Character applied";
+      useCharacter.disabled = true;
     });
-    const drop = el("button", "btn btn-sm btn-ghost", "Discard");
-    drop.addEventListener("click", () => (slot.innerHTML = ""));
-    acts.append(use, drop);
-    box.appendChild(acts);
+    characterActs.appendChild(useCharacter);
+    box.appendChild(characterActs);
+
+    if (environment) {
+      const environmentPart = el("div", "proposal-section");
+      const environmentHead = el("div", "proposal-head");
+      environmentHead.appendChild(el("strong", null, "Environment / background"));
+      environmentPart.appendChild(environmentHead);
+      environmentPart.appendChild(el("div", "proposal-body", environment));
+
+      const environmentActs = el("div", "proposal-acts");
+      const useEnvironment = el("button", "btn btn-sm", "Use in scene");
+      useEnvironment.title = "Replace the current project scene description with this environment description";
+      useEnvironment.addEventListener("click", () => {
+        const current = (state.board.sceneDescription || "").trim();
+        if (current && !window.confirm("Replace the current scene description with this environment description?")) return;
+        state.board.sceneDescription = environment;
+        $("#sceneDescription").value = environment;
+        markDirty();
+        useEnvironment.textContent = "Scene updated";
+        useEnvironment.disabled = true;
+        toast("Environment copied to the scene description.");
+      });
+      environmentActs.appendChild(useEnvironment);
+      environmentPart.appendChild(environmentActs);
+      box.appendChild(environmentPart);
+    }
+
+    const discard = el("button", "btn btn-sm btn-ghost", "Discard");
+    discard.addEventListener("click", () => (slot.innerHTML = ""));
+    const discardActs = el("div", "proposal-acts proposal-dismiss");
+    discardActs.appendChild(discard);
+    box.appendChild(discardActs);
     return box;
   }
 
@@ -2397,7 +2513,7 @@ function renderStrip() {
 
     const body = el("div", "shot-body");
     body.appendChild(el("div", "shot-title", raw.title || "Untitled"));
-    const cap = modelCap(STORYBOARD_MODEL);
+    const cap = modelCap(effectiveShotModel(raw));
     // What will actually render, not just what's configured: draft mode
     // shrinks the frame and caps steps at 4 (see draftGeometry / the
     // backend's own _draft_geometry), so this must track that toggle and
@@ -2593,7 +2709,7 @@ function renderEditor() {
     return;
   }
   const shot = view(raw);
-  const cap = modelCap(STORYBOARD_MODEL);
+  const cap = modelCap(effectiveShotModel(raw));
   const idx = shotIndex(raw.id);
   let panelDubRow = null;
 
@@ -2715,10 +2831,7 @@ function renderEditor() {
           // send the line as typed; it may not be saved yet
           const sh = live();
           const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle, sh.dubMode);
-          sh.dialogueAudioUrl = r.audioUrl;
-          if (r.dubUrl) sh.dubUrl = r.dubUrl;
-          if (r.speechLogUrl) sh.speechLogUrl = r.speechLogUrl;
-          if (r.log && r.log.length) state.speechLog[sh.id] = r.log;
+          applyDialogueTake(sh, r, sh.dialogue, sh.dialogueStyle);
           if (r.note) toast(r.note, "warn");
           else if (r.warning) toast(r.warning, "warn");
           else {
@@ -2788,7 +2901,7 @@ function renderEditor() {
     : "Render this shot";
   one.addEventListener("click", async () => {
     const issue = dialogueReadiness(live());
-    if (issue) {
+    if (issue && !canAutoPrepareDialogue(live())) {
       showRenderDialogueBlocker([{ raw: live(), issue }]);
       return;
     }
@@ -2796,16 +2909,20 @@ function renderEditor() {
     // otherwise the button sits clickable for however long those take,
     // which reads as "nothing happened" and invites a second click.
     one.disabled = true;
-    await saveNow();
+    let started = false;
     try {
+      if (issue) await prepareDialogueRecordings([{ raw: live(), issue }]);
+      await saveNow();
       state.status = await API.render(state.slug, [raw.id], state.board);
+      started = true;
       state.awaitingBatch = true;
       state.followRender = true;
       startPolling();
       render();
     } catch (err) {
       toast(err.message, "error");
-      one.disabled = false;
+    } finally {
+      if (!started) one.disabled = false;
     }
   });
   head.appendChild(one);
@@ -2996,8 +3113,8 @@ function renderEditor() {
     const sa = el("textarea", "ta-tall");
     sa.value = raw.soundNote || "";
     sa.placeholder =
-      "Sound accents for THIS clip — what happens sonically here.\n" +
-      "The project background sound is controlled by the rail switch.";
+      "Additional scene-background sounds for THIS clip — not the general Background Sound.\n" +
+      "Use local environmental details such as a nearby bird, distant siren, or passing vehicle.";
     sa.addEventListener("input", () => {
       live().soundNote = sa.value;
       markDirty();
@@ -3007,13 +3124,14 @@ function renderEditor() {
     sa.dataset.fkey = "sound-accents";
 
     const sp2 = el("div");
-    const saHead = paneHint("this clip only — independent of the project background sound mode");
+    const saHead = paneHint("additional local background sound only — do not repeat the general Background Sound");
     saHead.appendChild(el("div", "header-spacer"));
     saHead.appendChild(
       wandButton({
         title: (svc) =>
-          `Propose sound effects for this shot using ${svc.label} (${svc.model}). ` +
-          `Grounded in this shot's own prompt — dialogue is never included. ` +
+          `Propose local background sound accents for this shot using ${svc.label} (${svc.model}). ` +
+          `Adds only local scene-background sounds not already in the general ` +
+          `Background Sound; dialogue and foreground action Foley are never included. ` +
           `Takes up to a minute on a local model, and shows you the result ` +
           `before changing anything.`,
         slot: () => sp2.querySelector(".proposal-slot"),
@@ -3079,9 +3197,6 @@ function renderEditor() {
         else ids.add(ch.id);
         const current = live();
         current.characterIds = [...ids];
-        // Reference media is always sent through the fixed Ref2VA path.
-        if (ids.has(ch.id) && (ch.image || ch.voice) &&
-            current.model !== STORYBOARD_MODEL) current.model = STORYBOARD_MODEL;
         markDirty();
         renderEditor();
       };
@@ -3096,21 +3211,30 @@ function renderEditor() {
         el(
           "div",
           "inline-warn",
-          `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`
+          effectiveShotModel(raw) === "fl2va"
+            ? `${withMedia.length} character reference set(s) are selected, but FL2VA does not send separate Cast media. Bake the character into the Start/End frame or remove the anchors for Ref2VA.`
+            : `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`
         )
       );
     }
     host.appendChild(castPanel);
   }
 
-  // Ref2VA consumes start/end references and additional reference material in
-  // one ordered list. Start/end are semantic visual cues, not hard keyframes.
+  // Start/End anchors activate FL2VA. Without them, the same panel's other
+  // reference material is sent through Ref2VA.
   const isVideoShot = cap && cap.kind !== "image";
   if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     const lbl = el("div", "section-label", "Start & end references");
-    lbl.appendChild(el("span", "hint", "— ordered Ref2VA cues for the opening and closing composition"));
+    const anchorMode = effectiveShotModel(raw) === "fl2va";
+    lbl.appendChild(el(
+      "span",
+      "hint",
+      anchorMode
+        ? "— FL2VA hard anchors for the opening and closing composition"
+        : "— Ref2VA cues for the opening and closing composition"
+    ));
     refPanel.appendChild(lbl);
 
     const slots = el("div", "ref-slots");
@@ -3143,8 +3267,9 @@ function renderEditor() {
       el(
         "div",
         "hint-body",
-        "Ref2VA cannot hard-pin generated frames, but it keeps these references " +
-          "in order and labels them as the intended opening and closing compositions."
+        anchorMode
+          ? "FL2VA wires Start frame and End frame directly to the model's first/last-frame inputs. Separate Cast, style and shot-reference images are not sent on this path."
+          : "With no frame anchors, Ref2VA receives character, style and other reference images as an ordered reference set."
       )
     );
     host.appendChild(refPanel);
@@ -3156,9 +3281,11 @@ function renderEditor() {
     refPanel.appendChild(el("div", "section-label", "Reference images"));
     refPanel.appendChild(shotReferenceImages(raw));
 
-    const note = `${cap.label.split("—")[0].trim()} uses these alongside the ` +
-      `labeled start/end references, cast portraits and project style references. ` +
-      `Tag an image as @name to address it directly in the shot prompt.`;
+    const note = effectiveShotModel(raw) === "fl2va"
+      ? "FL2VA is active because this shot has a Start/End frame anchor. These separate images are retained on the board but are not sent; remove the anchors to use them through Ref2VA."
+      : `${cap.label.split("—")[0].trim()} uses these alongside the ` +
+        `cast portraits and project style references. Tag an image as @name to ` +
+        `address it directly in the shot prompt.`;
     refPanel.appendChild(el("div", "hint-body", note));
     host.appendChild(refPanel);
   }
@@ -3365,7 +3492,7 @@ function updateResolvedPreview() {
    screen, rather than the reader having to guess whether a line about a
    character came from the scene description or the cast. */
 function resolvedParts(raw) {
-  const cap = modelCap(STORYBOARD_MODEL);
+  const cap = modelCap(effectiveShotModel(raw));
   const out = [];
   const push = (source, text) => {
     text = (text || "").trim();
@@ -3382,7 +3509,7 @@ function resolvedParts(raw) {
       const n = (c.name || "").trim();
       const d = (c.description || "").trim();
       if (d) push(`cast · ${n || "unnamed"}`, characterDescription(n, d));
-      if (c.image) {
+      if (c.image && effectiveShotModel(raw) === STORYBOARD_MODEL) {
         push(`cast guidance · ${n || "unnamed"}`,
           `${n || "The selected character"}: use the character portrait ` +
           "and Cast description together to maintain appearance. Use the " +
@@ -3859,7 +3986,7 @@ function renderPreview() {
   const stats = el("dl", "stat-grid");
   [
     ["Status", STATUS_LABELS[shot.status] || shot.status],
-    ["Model", (modelCap(STORYBOARD_MODEL) || {}).label || STORYBOARD_MODEL],
+    ["Model", (modelCap(effectiveShotModel(raw)) || {}).label || effectiveShotModel(raw)],
     ["Runtime", dur(shot.runtimeSeconds)],
     ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, 4 steps)"
                  : raw.renderedAs === "final" ? "final" : "—"],
@@ -4468,7 +4595,6 @@ function refSlot(label, shot, key, pickerTitle = null) {
     const current = shotById(shot.id);
     if (!current) return;
     current[key] = chosen;
-    current.model = STORYBOARD_MODEL;
     markDirty();
     render();
     await saveNow();
@@ -4890,7 +5016,6 @@ async function pickRef(shot, key, pickerTitle = null) {
   const current = shotById(shot.id);
   if (!current) return;
   current[key] = chosen;
-  current.model = STORYBOARD_MODEL;
   markDirty();
   await saveNow();
   render();

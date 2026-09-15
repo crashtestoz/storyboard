@@ -90,25 +90,25 @@ Project
   └─ Shot[]  (ordered)
        ├─ prompt (text)                — this shot's action/camera/mood only
        ├─ start_ref: upload | "last frame of shot N" | none
-       │             Ref2VA ordered visual reference for the opening
-       ├─ end_ref:   upload | none               (Ref2VA closing reference)
-       ├─ model: ref2va                         (fixed for video shots)
+       │             FL2VA hard first-frame anchor when present
+       ├─ end_ref:   upload | none               (FL2VA last-frame anchor)
+       ├─ model: ref2va                         (compatibility default)
        ├─ resolution, frames/duration, steps, seed
        └─ status: draft | queued | running | done | failed
 ```
 
-A shot with `start_ref` set to "last frame of shot N" needs no new vpipe
-capability — every shot already writes its per-frame PNGs (`save-image`
-alongside `save-video`, the same pattern used throughout this project
-tonight), so chaining is just pointing the next shot's anchor loader at
-`shots/N/frames/frame-<max>.png`.
+A shot with `start_ref` set to "last frame of shot N" selects FL2VA and needs
+no new vpipe capability — every shot already writes its per-frame PNGs
+(`save-image` alongside `save-video`), so chaining is just pointing the next
+shot's first-frame anchor loader at `shots/N/frames/frame-<max>.png`.
 
 ## Architecture
 
-**1. Generator** — turns one Shot into a `.vpipeline` file. Video shots use
-the `ref2va` template, with an ordered `references` list built from the Start
-frame, End frame, other shot references, Cast portraits, project `style_refs`,
-and voice clips within Ref2VA's image/audio reference limits. The separate
+**1. Generator** — turns one Shot into a `.vpipeline` file. Video shots with
+Start/End anchors use the `fl2va` template and its direct first/last-frame
+ports. Shots without anchors use the `ref2va` template, with an ordered
+`references` list built from other shot references, Cast portraits, project
+`style_refs`, and voice clips within Ref2VA's image/audio limits. The separate
 `krea2-still` template remains available only to Create Stills previews.
 
 Every shot gets its own project folder (`shots/<n>/`), same convention
@@ -231,8 +231,8 @@ success detection.
 
 ## MVP scope — built
 
-1. Generator for the shot templates. **Done** — Ref2VA video shots with
-   ordered start/end and other references, plus a Krea-2 still preview.
+1. Generator for the shot templates. **Done** — FL2VA anchored video shots,
+   Ref2VA reference-conditioned shots, plus a Krea-2 still preview.
 2. Serial queue + progress parsing. **Done**, including the validation
    contract below and per-shot run logs persisted next to the outputs.
 3. Storyboard strip + per-shot editor, chaining via "last frame of shot N".
