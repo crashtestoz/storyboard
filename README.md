@@ -569,6 +569,26 @@ its own, so a board edited by an assistant is edited exactly the way the UI
 would edit it. Standard library only, same as the rest of this app — nothing
 to `pip install`.
 
+**Why the built-in MCP server is useful.**
+
+- **Talk to the project in plain language** — ask an AI assistant to create a
+  board, add shots, rewrite prompts, configure references, or explain a render
+  failure.
+- **Automate repetitive work** — generate shot lists, apply consistent scene
+  details, prepare dialogue, start renders, monitor progress, and assemble
+  finished clips without repeating UI actions.
+- **One source of truth** — the assistant uses the same API as the browser, so
+  changes made through MCP appear in the UI immediately and follow the same
+  validation and persistence rules.
+- **Keep creative intent separate from backend complexity** — describe the
+  result you want while Storyboard translates it into the configured VPIPE or
+  ComfyUI workflow.
+- **Local-first by design** — the MCP bridge runs locally over standard input
+  and talks to the local Storyboard server; it does not require a separate
+  cloud orchestration service.
+- **Easy to connect** — any MCP-compatible client can use the server, and it
+  can start the Storyboard app automatically when the first tool is called.
+
 **Setup.** Point your MCP client at the script:
 
 ```json
