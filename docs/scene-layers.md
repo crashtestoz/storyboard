@@ -44,14 +44,14 @@ Tags use letters, numbers, hyphens, and underscores. Shared descriptions may use
 tags when those images are supplied in every affected shot.
 
 Selected Cast portraits are attached and named automatically; mentioning the
-character by name is sufficient. Project style images are used when the shot has
-no local reference images. FL2VA uses actual start/end anchors and chaining,
-but does not accept the scene reference list or Cast portraits. Ref2VA accepts
-separately tagged references, but cannot pin an exact opening or closing frame.
-Adding an anchor selects FL2VA. Adding a reference image selects Ref2VA when no
-anchors are present. If both remain stored on a scene, exact FL2VA anchors take
-priority and the reference-image list is not sent because H3 cannot combine the
-two layouts.
+character by name is sufficient. Project style images are included with the
+shot's local references and selected Cast portraits. Storyboard video always
+uses Ref2VA, so the Start frame and End frame controls identify ordered visual
+references alongside the rest of the reference material. Ref2VA cannot pin an
+exact generated opening or closing frame; it receives the two images as labeled
+semantic cues. A chained Start frame resolves to the previous shot's last saved
+frame before the request is generated. The nine-image Ref2VA limit still
+applies to the combined set.
 
 ## Dialogue source
 

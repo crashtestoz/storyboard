@@ -153,7 +153,7 @@ def test_pending(tmp: Path) -> None:
 
     section("the other inputs that decide a render")
     for field, value in (
-        ("model", "ref2va"),
+        ("startRef", {"path": "projects/test/refs/opening.png"}),
         ("frames", 39),
         ("steps", 16),
         ("seed", 7),
@@ -317,17 +317,17 @@ def test_ref2va_reference_priority() -> None:
     shot["dialogueSource"] = "native"
     refs = _ref2va_references(shot, board, paths)
     names = [Path(r).name for r in refs]
-    check("only Ref2VA shot images remain first",
-          names[:2] == ["cockpit-left.jpg", "cockpit-right.jpg"],
+    check("start/end references remain first",
+          names[:2] == ["shot.jpg", "shot-end.jpg"],
           str(names))
-    check("FL2VA anchors are excluded from the Ref2VA list",
-          "shot.jpg" not in names and "shot-end.jpg" not in names,
+    check("Ref2VA receives both labeled frame references",
+          "shot.jpg" in names and "shot-end.jpg" in names,
           str(names))
-    check("shot-local images suppress project style refs",
-          "global-1.jpg" not in names and "global-2.jpg" not in names,
+    check("project style refs join shot-local references",
+          "global-1.jpg" in names and "global-2.jpg" in names,
           str(names))
-    check("character identity comes after shot-local images",
-          names[2] == "character.jpg",
+    check("shot-local images follow the frame references",
+          names[2:4] == ["cockpit-left.jpg", "cockpit-right.jpg"],
           str(names))
     check("voice references come after images", names[-1] == "voice.wav", str(names))
     draft_refs = _ref2va_references(shot, board, paths, include_audio_refs=False)
@@ -337,8 +337,8 @@ def test_ref2va_reference_priority() -> None:
           str(draft_names))
 
 
-def test_ref2va_fallback(tmp: Path) -> None:
-    section("Ref2VA without references renders through FL2VA")
+def test_ref2va_fixed_model(tmp: Path) -> None:
+    section("Ref2VA remains fixed without references")
     workspace = tmp / "fallback"
     for model in ("FL2VA", "Ref2VA"):
         (workspace / "models" / "local" / f"MiniMax-H3-{model}-8bit").mkdir(parents=True)
@@ -348,15 +348,21 @@ def test_ref2va_fallback(tmp: Path) -> None:
     board = a_board(1)
     shot = board["shots"][0]
     shot["model"] = "ref2va"
+    job = backend.prepare(shot, board, paths)
+    pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
+    ref_encoder = next(s for s in pipeline["stages"] if s["type"] == "video-ref-encoder")
+    check("empty references stay on the Ref2VA pipeline",
+          job.payload["model"] == "ref2va"
+          and ref_encoder["config"]["references"] == [])
+    board["styleRefs"] = [{"kind": "upload", "path": "refs/style.png"}]
     before = json.dumps(board, sort_keys=True)
     job = backend.prepare(shot, board, paths)
     pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
-    check("empty references select the text-to-video pipeline",
-          job.payload["model"] == "fl2va"
-          and any(s["type"] == "diffusion-conditioner" for s in pipeline["stages"])
-          and not any(s["type"] == "video-ref-encoder" for s in pipeline["stages"]))
-    check("fallback is explained and does not change the board",
-          "no references: using FL2VA" in job.summary
+    check("a reference selects Ref2VA",
+          job.payload["model"] == "ref2va"
+          and any(s["type"] == "video-ref-encoder" for s in pipeline["stages"]))
+    check("fixed model does not change the board",
+          "FL2VA" not in job.summary
           and json.dumps(board, sort_keys=True) == before)
     for source in ("startRef", "endRef", "referenceImages", "character", "style", "chain"):
         candidate = json.loads(before)
@@ -372,15 +378,13 @@ def test_ref2va_fallback(tmp: Path) -> None:
         else:
             target[source] = [ref] if source == "referenceImages" else ref
         job = backend.prepare(target, candidate, paths)
-        expected = "fl2va" if source in ("startRef", "endRef", "chain") else "ref2va"
-        check(f"{source} selects {expected.upper()}", job.payload["model"] == expected)
+        check(f"{source} keeps Ref2VA", job.payload["model"] == "ref2va")
     (workspace / "models/local/MiniMax-H3-FL2VA-8bit").rmdir()
     try:
-        backend.prepare(shot, board, paths)
-    except ValueError as exc:
-        check("missing fallback model has a clear error", "FL2VA fallback is unavailable" in str(exc))
-    else:
-        check("missing fallback model has a clear error", False)
+        job = backend.prepare(shot, board, paths)
+        check("FL2VA is not required by the fixed path", job.payload["model"] == "ref2va")
+    except ValueError:
+        check("FL2VA is not required by the fixed path", False)
 
 
 def test_rewrite_reference_context() -> None:
@@ -712,7 +716,7 @@ def main() -> int:
         test_pending(tmp)
         test_dialogue_prompting()
         test_ref2va_reference_priority()
-        test_ref2va_fallback(tmp)
+        test_ref2va_fixed_model(tmp)
         test_rewrite_reference_context()
         test_soundscape_modes()
         test_clip_choice(tmp)

@@ -272,12 +272,11 @@ true of every shot) plus a per-shot prompt (action, camera, mood). The editor
 shows the assembled result, so nothing about the composition is hidden.
 
 **Style references and the media library.** Style reference images are
-project-wide. On Ref2VA renders they are sent to vpipe's `video-ref-encoder`
-only when a shot has no local reference images, so they help steer visual
-consistency without overriding a specific cockpit/corridor/etc. reference.
-Ref2VA also offers per-shot **Reference images**; they are subject/style
-references for that clip, not start-frame anchors. Style images are not copied
-into the text prompt for non-reference models.
+project-wide and are sent to vpipe's `video-ref-encoder` with each shot's own
+references and selected Cast media. Every Storyboard video shot uses Ref2VA,
+so start/end references, subject/style images, portraits and the speaker's
+voice reference can travel in one request. The model's nine-image/three-audio
+limits are enforced before rendering.
 
 The image picker scans project `refs/` folders and rendered stills, groups
 exact duplicate images by content hash, and shows where used files are
@@ -305,11 +304,13 @@ to them by name in its prompt. On Ref2VA the portrait becomes an image
 reference and the voice clip a soundtrack reference, respecting that model's
 real limits (9 images, 3 soundtracks, 12 total).
 
-**Frame anchors and chaining.** On FL2VA, a shot can open — and close — on an
-exact frame, including "the last frame of the previous shot", which is how a
-sequence reads as continuous. Ref2VA does not expose start/end anchors; its
-per-shot image is encoded as a reference instead. Verified: a chained FL2VA
-shot's first frame matches its predecessor's last.
+**Start/end references and chaining.** Storyboard video shots always use
+Ref2VA. The Start frame and End frame controls identify the intended opening
+and closing compositions and are sent first in the ordered Ref2VA reference
+list, followed by other shot, Cast and project references. They are semantic
+visual cues rather than FL2VA-style hard-pinned keyframes. “Chain start frame
+from the previous shot” still resolves the previous shot's last saved frame
+into that Start frame reference.
 
 **Transcription is its own capability.** Cloning a voice and recognising
 speech are separate, and one does not imply the other — MOSS clones a voice and

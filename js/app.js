@@ -6,9 +6,8 @@
    the server's view of a shot wins over the local one, since it is the thing
    actually watching the process.
 
-   Model choices, frame-count rules and which shots can take frame anchors all
-   come from /api/info rather than being hardcoded — that is what lets a
-   second backend (ComfyUI) drop in without touching this file.
+   Frame-count rules and available model capabilities come from /api/info.
+   Storyboard video itself intentionally has one fixed model: Ref2VA.
    ========================================================================== */
 
 "use strict";
@@ -80,6 +79,10 @@ const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
+// Storyboard video generation deliberately has one conditioning path. Krea-2
+// is still used by the separate Create Stills preview job via its synthetic
+// shot copy, but is not a user-selectable shot model.
+const STORYBOARD_MODEL = "ref2va";
 
 /* True when this shot's dialogue is spoken directly in the render, in the
    speaking character's own cloned voice (Ref2VA, with that character's own
@@ -87,13 +90,131 @@ const modelCap = (id) => state.models.find((m) => m.id === id) || null;
    _clones_voice). Mirrors that same rule so the UI and the render agree on
    which shots need a separate TTS dub and which don't. */
 function shotClonesVoice(raw) {
-  if (raw.model !== "ref2va") return false;
+  if (raw.dialogueSource === "recording") return false;
   const cast = (state.board.characters || []).filter((c) =>
     (raw.characterIds || []).includes(c.id)
   );
   const inferred = cast.find((c) => c.voice && c.voice.path) || cast[0] || null;
   const speaker = cast.find((c) => c.id === raw.speakerId) || inferred;
   return !!(speaker && speaker.voice && speaker.voice.path);
+}
+
+/* A written line has two possible render paths. Keep this explanation in one
+   place so the Dialogue panel, render buttons and failed-shot diagnostic all
+   describe the same prerequisite instead of making the user discover it by
+   spending a render attempt. */
+function dialogueReadiness(raw) {
+  if (!raw || !(raw.dialogue || "").trim()) return null;
+
+  const source = raw.dialogueSource || "auto";
+  const cast = (state.board.characters || []).filter((c) =>
+    (raw.characterIds || []).includes(c.id)
+  );
+  const inferred = cast.find((c) => c.voice && c.voice.path) || cast[0] || null;
+  const speaker = cast.find((c) => c.id === raw.speakerId) || inferred;
+  const hasVoice = !!(speaker && speaker.voice && speaker.voice.path);
+  const engine = state.tts.find((e) => e.id === (state.board.defaults.tts || "none"));
+
+  if (source === "recording") {
+    if (raw.dialogueAudioUrl &&
+        ((raw.dialogueSpokenText || "").trim() !== raw.dialogue.trim() ||
+         (raw.dialogueSpokenStyle || "").trim() !== (raw.dialogueStyle || "").trim())) {
+      return {
+        code: "dialogue-recording-stale",
+        title: "Dialogue recording is out of date",
+        body: "This shot uses a separate dialogue recording, but the line or voice direction changed after the take was generated.",
+        action: "Press Generate in the Dialogue panel to create a fresh take before rendering.",
+      };
+    }
+    if (!raw.dialogueAudioUrl) {
+      const engineLine = !engine || engine.id === "none"
+        ? "No speech engine is selected."
+        : !engine.healthy
+        ? `${engine.label} is unavailable${engine.message ? `: ${engine.message}` : "."}`
+        : `${engine.label} is selected and ready.`;
+      return {
+        code: "dialogue-recording-missing",
+        title: "Dialogue recording required before rendering",
+        body: `“Use Dialogue-window recording” is selected, but this line has no generated audio take. ${engineLine}`,
+        action: engine && engine.healthy
+          ? "Press Generate in the Dialogue panel, preview the take, then render again."
+          : "Choose a healthy Speech engine in Settings, then press Generate in the Dialogue panel.",
+      };
+    }
+    return null;
+  }
+
+  if (source === "native") {
+    if (!speaker) {
+      return {
+        code: "native-dialogue-no-speaker",
+        title: "H3 native speech needs a cast speaker",
+        body: "H3 native speech is selected, but this shot is not assigned to a character.",
+        action: "Add a character in Cast and assign that character to this shot.",
+      };
+    }
+    if (!hasVoice) {
+      return {
+        code: "native-dialogue-no-voice",
+        title: "H3 native speech needs a reference voice",
+        body: `H3 native speech is selected, but ${speaker.name || "the shot's speaker"} has no reference voice clip.`,
+        action: "Attach a reference voice to the cast member, or switch Dialogue source to Dialogue-window recording.",
+      };
+    }
+    return null;
+  }
+
+  // “auto” is kept for older boards. It can only produce speech reliably when
+  // one of the two explicit paths is already prepared; otherwise H3 is told to
+  // keep the soundtrack ambient and the written line will not be spoken.
+  if (!hasVoice && !raw.dialogueAudioUrl) {
+    return {
+      code: "dialogue-source-ambiguous",
+      title: "Choose how this dialogue should be generated",
+      body: "This legacy dialogue setting has neither a prepared recording nor a cast voice reference for H3 native speech.",
+      action: "Select Dialogue-window recording and generate a take, or select H3 native speech and add a cast reference voice.",
+    };
+  }
+  return null;
+}
+
+function dialogueGuide(host, raw) {
+  if (!host) return;
+  host.innerHTML = "";
+  const issue = dialogueReadiness(raw);
+  if (!issue) {
+    if ((raw.dialogue || "").trim()) {
+      const source = raw.dialogueSource || "auto";
+      host.className = "dialogue-guide field-note";
+      host.textContent = source === "native"
+        ? "✓ H3 native speech is ready; the cast reference voice will be sent to Ref2VA."
+        : raw.dialogueAudioUrl
+        ? "✓ Dialogue take is ready; the generated voice will be mixed after video generation."
+        : "";
+    }
+    return;
+  }
+  host.className = "dialogue-guide inline-warn";
+  host.appendChild(el("strong", null, `${issue.title}. `));
+  host.appendChild(el("span", null, `${issue.body} ${issue.action}`));
+}
+
+function renderDialogueBlockers() {
+  return shots()
+    .map((raw) => ({ raw, issue: dialogueReadiness(raw) }))
+    .filter((entry) => entry.issue);
+}
+
+function showRenderDialogueBlocker(blockers) {
+  const first = blockers[0];
+  if (!first) return;
+  state.selectedId = first.raw.id;
+  state.tab = "dialogue";
+  render();
+  toast(
+    `${blockers.length} shot${blockers.length === 1 ? "" : "s"} need dialogue setup. ${first.issue.title}: ${first.issue.action}`,
+    "error"
+  );
 }
 /* Why this shot's clip is not a render of what the board says now; "" when it
    is current, or when there is nothing rendered to be out of date. */
@@ -397,7 +518,12 @@ function renderBackendBadge() {
   box.title = b.healthy ? state.info.workspace : b.message;
   if (!b.healthy) toast(b.message, "error");
 
-  const unavailable = state.models.filter((m) => !m.available);
+  // FL2VA is retained in the backend for power-user pipelines, but is not a
+  // dependency of this UI. Only warn here about the fixed video model; Krea
+  // is optional and reports its own problem when Create Stills is used.
+  const unavailable = state.models.filter(
+    (m) => m.id === STORYBOARD_MODEL && !m.available
+  );
   if (unavailable.length) {
     toast(
       `${unavailable.length} model(s) not ready: ` +
@@ -454,6 +580,11 @@ function setBoard(slug, board, stale) {
 
 function wireChrome() {
   $("#btnRender").addEventListener("click", async () => {
+    const blockers = renderDialogueBlockers();
+    if (blockers.length) {
+      showRenderDialogueBlocker(blockers);
+      return;
+    }
     await saveNow();
     try {
       state.status = await API.render(state.slug, undefined, state.board);
@@ -666,11 +797,6 @@ function wireChrome() {
     state.board.defaults.stillsSize = e.target.value;
     markDirty();
     render();
-  });
-
-  $("#defModel").addEventListener("change", (e) => {
-    state.board.defaults.model = e.target.value;
-    markDirty();
   });
 
   $("#llmService").addEventListener("change", (e) => {
@@ -1409,15 +1535,19 @@ function pendingShots() {
 function paintRenderHint() {
   const pending = pendingShots();
   const changed = pending.filter((raw) => !!staleWhy(raw.id)).length;
+  const blockers = renderDialogueBlockers();
+  const blockerHint = blockers.length
+    ? ` ${blockers.length} shot${blockers.length === 1 ? "" : "s"} need dialogue setup before rendering.`
+    : "";
   $("#btnRender").title = pending.length
     ? `Renders ${pending.length} of ${shots().length} shot(s)` +
       (changed
         ? `, ${changed} of them because the board changed since they were rendered`
         : "") +
       ", then joins every clip into the final video. A shot already rendered " +
-      "from what the board says now is left alone."
+      "from what the board says now is left alone." + blockerHint
     : "Every shot is already a render of what the board says now — this just " +
-      "joins the clips into the final video.";
+      "joins the clips into the final video." + blockerHint;
 }
 
 function paintMeta() {
@@ -1554,7 +1684,7 @@ function renderRail() {
   const draftOn = !!state.board.defaults.draft;
   dt.checked = draftOn;
   const [cw, ch] = current.split("x").map(Number);
-  const cap = modelCap(state.board.defaults.model) || state.models[0] || null;
+  const cap = modelCap(STORYBOARD_MODEL) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
     ? `Rendering at ${dw}×${dh} and 4 steps, dialogue and sound effects ` +
@@ -1593,17 +1723,6 @@ function renderRail() {
     : `Renders at draft size (384px long edge, 4 steps) — fast, good for ` +
       `judging composition, too small to use as a reference image.`;
 
-  const modelSel = $("#defModel");
-  if (modelSel.dataset.built !== "1") {
-    state.models.forEach((m) => {
-      const o = el("option", null, m.available ? m.label : `${m.label} — unavailable`);
-      o.value = m.id;
-      modelSel.appendChild(o);
-    });
-    modelSel.dataset.built = "1";
-  }
-  modelSel.value = state.board.defaults.model || "fl2va";
-
   const ttsSel = $("#ttsEngine");
   if (ttsSel.dataset.built !== "1") {
     state.tts.forEach((e) => {
@@ -1617,8 +1736,21 @@ function renderRail() {
   ttsSel.value = chosenTts;
   const eng = state.tts.find((e) => e.id === chosenTts);
   const noteBox = $("#ttsNote");
-  noteBox.textContent = eng && !eng.healthy ? eng.message : "";
-  noteBox.className = eng && !eng.healthy ? "field-warn" : "field-note";
+  const recordingLines = shots().filter((raw) =>
+    (raw.dialogue || "").trim() &&
+    (raw.dialogueSource || "auto") === "recording" &&
+    !raw.dialogueAudioUrl
+  ).length;
+  if (eng && !eng.healthy) {
+    noteBox.textContent = eng.message || "This speech engine is unavailable.";
+  } else if (recordingLines) {
+    noteBox.textContent =
+      `${recordingLines} dialogue shot${recordingLines === 1 ? "" : "s"} still need a generated recording. ` +
+      "Select this engine, then use Generate in each shot's Dialogue panel before rendering.";
+  } else {
+    noteBox.textContent = "";
+  }
+  noteBox.className = eng && !eng.healthy || recordingLines ? "field-warn" : "field-note";
 
   const llmSel = $("#llmService");
   const llmAll = (state.info.llm && state.info.llm.services) || [];
@@ -1700,7 +1832,6 @@ function renderRail() {
     q.appendChild(row);
   });
 
-  renderFinal();
 }
 
 /* Built once and left alone: renderRail() runs on every poll tick while a
@@ -1769,8 +1900,8 @@ function ensureSoundscapeWand() {
    rather than in the per-shot preview. Its whole job is to be visibly absent
    when it has not been built: a folder of clips and no video is the failure
    this panel exists to make obvious. */
-function renderFinal() {
-  const host = $("#finalVideo");
+function renderFinal(host = $("#preview .final-video-content")) {
+  if (!host) return;
   const prev = host.querySelector("video");
   if (prev) prev.remove();     // detached, so innerHTML does not destroy it
   host.innerHTML = "";
@@ -1848,6 +1979,16 @@ function renderFinal() {
     acts.appendChild(open);
   }
   host.appendChild(acts);
+}
+
+function renderFinalPane() {
+  const pane = el("div", "final-box final-video-pane");
+  const label = el("div", "section-label");
+  label.append(el("span", null, "Final video"), el("span", "hint", "— every shot, in order"));
+  const content = el("div", "final-video-content");
+  pane.append(label, content);
+  renderFinal(content);
+  return pane;
 }
 
 /* --- cast ---------------------------------------------------------------- */
@@ -2230,7 +2371,7 @@ function renderStrip() {
 
     const body = el("div", "shot-body");
     body.appendChild(el("div", "shot-title", raw.title || "Untitled"));
-    const cap = modelCap(raw.model);
+    const cap = modelCap(STORYBOARD_MODEL);
     // What will actually render, not just what's configured: draft mode
     // shrinks the frame and caps steps at 4 (see draftGeometry / the
     // backend's own _draft_geometry), so this must track that toggle and
@@ -2426,7 +2567,7 @@ function renderEditor() {
     return;
   }
   const shot = view(raw);
-  const cap = modelCap(raw.model);
+  const cap = modelCap(STORYBOARD_MODEL);
   const idx = shotIndex(raw.id);
   let panelDubRow = null;
 
@@ -2499,7 +2640,7 @@ function renderEditor() {
     // dialogue" bug this replaced. So for a shot this applies to, the
     // manual dub controls are replaced with a note instead of shown
     // alongside them.
-    const h3ClonesVoice = raw.model === "ref2va" && !!(speaker && speaker.voice && speaker.voice.path);
+    const h3ClonesVoice = shotClonesVoice(raw);
     if (h3ClonesVoice) {
       dubRow.appendChild(
         el("span", "field-note",
@@ -2517,7 +2658,7 @@ function renderEditor() {
       replaceBox.checked = raw.dubMode === "replace";
       replaceBox.addEventListener("change", () => {
         live().dubMode = replaceBox.checked ? "replace" : "mix";
-        markDirty();
+      markDirty();
       });
       replaceToggle.title =
         "On: the dub replaces the clip's own audio entirely — use this if the " +
@@ -2615,7 +2756,16 @@ function renderEditor() {
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   const one = el("button", "btn btn-sm", "Render this shot");
   one.disabled = !!(state.status && state.status.busy) || stillsBusy;
+  const initialDialogueIssue = dialogueReadiness(raw);
+  one.title = initialDialogueIssue
+    ? `${initialDialogueIssue.title}. ${initialDialogueIssue.action}`
+    : "Render this shot";
   one.addEventListener("click", async () => {
+    const issue = dialogueReadiness(live());
+    if (issue) {
+      showRenderDialogueBlocker([{ raw: live(), issue }]);
+      return;
+    }
     // Disable immediately, not after the save + render round trips —
     // otherwise the button sits clickable for however long those take,
     // which reads as "nothing happened" and invites a second click.
@@ -2740,7 +2890,7 @@ function renderEditor() {
   promptHead.appendChild(
     wandButton({
       title: (svc) =>
-        `Restyle this shot prompt for ${modelLabel(raw.model)} using ` +
+        `Restyle this shot prompt for ${modelLabel(STORYBOARD_MODEL)} using ` +
         `${svc.label} (${svc.model}). Takes up to a minute on a local model, and ` +
         `shows you the result before changing anything.`,
       slot: () => promptPane.querySelector(".proposal-slot"),
@@ -2760,16 +2910,23 @@ function renderEditor() {
 
   if (!cap || cap.supportsAudio) {
     const dlg = el("textarea", "ta-tall");
+    const guide = el("div", "dialogue-guide");
     dlg.value = raw.dialogue || "";
     dlg.placeholder =
       "A line someone speaks in this clip.\n" +
       "Used as a visual cue for mouth movement, then synthesised by the " +
       "speech engine and muxed over the finished clip.";
     dlg.addEventListener("input", () => {
+      const hadDialogue = !!(live().dialogue || "").trim();
       live().dialogue = dlg.value;
       markDirty();
       updateResolvedPreview();
       syncTabDots();
+      dialogueGuide(guide, live());
+      // The speaking controls are only useful once a line exists. Rebuild on
+      // the empty -> non-empty transition so the Generate button appears,
+      // while renderEditor's focus snapshot keeps the caret in the textarea.
+      if (!hadDialogue && dlg.value.trim()) renderEditor();
     });
     dlg.dataset.fkey = "dialogue";
     const style = el("textarea", "ta-compact");
@@ -2781,17 +2938,19 @@ function renderEditor() {
     style.addEventListener("input", () => {
       live().dialogueStyle = style.value;
       markDirty();
+      dialogueGuide(guide, live());
     });
     style.dataset.fkey = "dialogue-style";
     const dp = el("div");
     const source = el("select");
     source.setAttribute("aria-label", "Dialogue source");
-    for (const [value, label] of [["recording", "Use Dialogue-window recording"], ["native", "Generate speech with H3 (Ref2VA + voice reference)"], ["auto", "Legacy automatic selection"]]) {
+    for (const [value, label] of [["recording", "Use separate Dialogue recording (TTS)"], ["native", "H3 native speech (needs cast voice reference)"], ["auto", "Legacy automatic selection"]]) {
       const option = el("option", null, label); option.value = value; source.appendChild(option);
     }
     source.value = raw.dialogueSource || "auto";
     source.onchange = () => { live().dialogueSource = source.value; markDirty(); renderEditor(); };
-    dp.append(paneHint("Dialogue source — recording uses the take you generated and previewed; H3 creates a new performance"), source);
+    dialogueGuide(guide, raw);
+    dp.append(paneHint("Dialogue source — recording uses a generated take; H3 native speech uses the cast member's reference voice"), source, guide);
     dp.append(
       paneHint("spoken words — rendered using the dialogue source selected above"),
       dlg,
@@ -2894,14 +3053,9 @@ function renderEditor() {
         else ids.add(ch.id);
         const current = live();
         current.characterIds = [...ids];
-        // Reference media needs Ref2VA. Exact start/end anchors are a
-        // stronger temporal constraint and keep FL2VA, so the warning below
-        // can explain that tradeoff instead of making the user choose a
-        // technical model merely because they selected a character.
+        // Reference media is always sent through the fixed Ref2VA path.
         if (ids.has(ch.id) && (ch.image || ch.voice) &&
-            !current.startRef && !current.endRef) {
-          current.model = "ref2va";
-        }
+            current.model !== STORYBOARD_MODEL) current.model = STORYBOARD_MODEL;
         markDirty();
         renderEditor();
       };
@@ -2909,32 +3063,28 @@ function renderEditor() {
     });
     castPanel.appendChild(picks);
 
-    // Honest about what actually reaches the model on this shot's model.
     const chosen = cast.filter((c) => (raw.characterIds || []).includes(c.id));
     const withMedia = chosen.filter((c) => c.image || c.voice);
-    if (chosen.length && withMedia.length && cap && !cap.supportsStyleRefs) {
+    if (chosen.length && withMedia.length) {
       castPanel.appendChild(
         el(
           "div",
           "inline-warn",
-          `⚠ Using FL2VA because this shot has an exact start/end frame anchor. ` +
-            `Character descriptions are included, but ${withMedia.length} ` +
-            `character reference image/voice set(s) are not used. ` +
-            `Choose Ref2VA to prioritize character and reference media.`
+          `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`
         )
       );
     }
     host.appendChild(castPanel);
   }
 
-  // Clip references: keep the user's intent on the shot even when the
-  // currently selected model only consumes part of it.
+  // Ref2VA consumes start/end references and additional reference material in
+  // one ordered list. Start/end are semantic visual cues, not hard keyframes.
   const isVideoShot = cap && cap.kind !== "image";
-  if (isVideoShot && raw.model !== "ref2va") {
+  if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
-    const lbl = el("div", "section-label", "Frame anchors");
-    lbl.appendChild(el("span", "hint", "— exact FL2VA opening and closing frames; adding one selects FL2VA"));
+    const lbl = el("div", "section-label", "Start & end references");
+    lbl.appendChild(el("span", "hint", "— ordered Ref2VA cues for the opening and closing composition"));
     refPanel.appendChild(lbl);
 
     const slots = el("div", "ref-slots");
@@ -2955,8 +3105,6 @@ function renderEditor() {
         current.startRef = cb.checked
           ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
           : null;
-        if (cb.checked) current.model = "fl2va";
-        else selectReferenceModel(current);
         markDirty();
         render();
       });
@@ -2965,56 +3113,15 @@ function renderEditor() {
       wrap.appendChild(t);
       refPanel.appendChild(wrap);
     }
-    if (!(cap.supportsStartAnchor || cap.supportsEndAnchor)) {
-      refPanel.appendChild(
-        el(
-          "div",
-          "hint-body",
-          `Adding a start frame, end frame, or chain changes this scene to ` +
-            `FL2VA because Ref2VA cannot pin exact output frames.`
-        )
-      );
-    }
+    refPanel.appendChild(
+      el(
+        "div",
+        "hint-body",
+        "Ref2VA cannot hard-pin generated frames, but it keeps these references " +
+          "in order and labels them as the intended opening and closing compositions."
+      )
+    );
     host.appendChild(refPanel);
-  }
-
-  // Chaining is still useful while editing a Ref2VA shot: choosing it changes
-  // the shot back to FL2VA, where the previous shot's last frame is an exact
-  // start anchor. Keep this continuity control visible even though Ref2VA
-  // hides the separate start/end anchor slots.
-  if (isVideoShot && raw.model === "ref2va" && idx > 0) {
-    const prev = shots()[idx - 1];
-    const continuity = el("div", "panel");
-    continuity.style.marginTop = "var(--sp-3)";
-    continuity.appendChild(
-      el("div", "section-label", "Scene continuity")
-    );
-    continuity.appendChild(
-      el("div", "hint-body", "Continue this scene from the previous scene's last frame. This switches the shot to FL2VA.")
-    );
-    const wrap = el("div");
-    wrap.style.marginTop = "var(--sp-3)";
-    const toggle = el("label", "toggle");
-    const checkbox = el("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = false;
-    checkbox.addEventListener("change", () => {
-      const current = live();
-      current.startRef = checkbox.checked
-        ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
-        : null;
-      if (checkbox.checked) current.model = "fl2va";
-      markDirty();
-      render();
-    });
-    toggle.append(
-      checkbox,
-      el("span", "toggle-track"),
-      el("span", null, `Chain start frame from scene ${idx}`)
-    );
-    wrap.appendChild(toggle);
-    continuity.appendChild(wrap);
-    host.appendChild(continuity);
   }
 
   if (isVideoShot) {
@@ -3023,12 +3130,9 @@ function renderEditor() {
     refPanel.appendChild(el("div", "section-label", "Reference images"));
     refPanel.appendChild(shotReferenceImages(raw));
 
-    const note = cap.supportsStyleRefs
-      ? `${cap.label.split("—")[0].trim()} uses each tagged image as a separate ` +
-        `prompt reference. Adding an exact frame anchor changes the scene to FL2VA, ` +
-        `which cannot also consume this reference list.`
-      : `${cap.label.split("—")[0].trim()} does not use shot reference images, ` +
-        `so adding one changes this scene to Ref2VA.`;
+    const note = `${cap.label.split("—")[0].trim()} uses these alongside the ` +
+      `labeled start/end references, cast portraits and project style references. ` +
+      `Tag an image as @name to address it directly in the shot prompt.`;
     refPanel.appendChild(el("div", "hint-body", note));
     host.appendChild(refPanel);
   }
@@ -3040,66 +3144,10 @@ function renderEditor() {
 
   params.appendChild(
     field(
-      "Generation mode",
-      select(
-        state.models.map((m) => [
-          m.id,
-          m.id === "fl2va"
-            ? "Scene continuity — exact start/end frames (FL2VA)"
-            : m.id === "ref2va"
-              ? "Character and reference images (Ref2VA)"
-              : m.available ? m.label : `${m.label}  — unavailable`,
-        ]),
-        raw.model,
-        (v) => {
-          const sh = live();
-          if (v === "ref2va" && !(sh.startRef?.kind === "chain" || sh.endRef?.kind === "chain")) {
-            if (!Array.isArray(sh.referenceImages)) sh.referenceImages = [];
-            const moveAnchor = (anchor, tag) => {
-              if (!anchor) return;
-              const key = referenceKey(anchor);
-              const existing = sh.referenceImages.find((ref) => referenceKey(ref) === key);
-              if (existing) {
-                if (!existing.tag) existing.tag = tag;
-              } else {
-                sh.referenceImages.push({
-                  ...anchor,
-                  tag,
-                  role: anchor.role || "environment and composition",
-                });
-              }
-            };
-            moveAnchor(sh.startRef, "start-frame");
-            moveAnchor(sh.endRef, "end-frame");
-            sh.startRef = null;
-            sh.endRef = null;
-            sh.model = "ref2va";
-          } else if (v === "fl2va" && !(sh.startRef || sh.endRef)) {
-            const refs = sh.referenceImages || [];
-            const start = refs.find((ref) => ref.tag === "start-frame");
-            const end = refs.find((ref) => ref.tag === "end-frame");
-            if (start) sh.startRef = { ...start, tag: undefined };
-            if (end) sh.endRef = { ...end, tag: undefined };
-            sh.referenceImages = refs.filter(
-              (ref) => ref !== start && ref !== end
-            );
-            sh.model = "fl2va";
-          } else if (sh.startRef || sh.endRef) sh.model = "fl2va";
-          else if ((sh.referenceImages || []).length) sh.model = "ref2va";
-          else sh.model = v;
-          const c = modelCap(v);
-          if (c) {
-            if (!c.resolutions.includes(sh.resolution))
-              sh.resolution = c.resolutions[0];
-            sh.frames = c.frameRule.minimum > sh.frames
-              ? c.frameRule.minimum
-              : sh.frames;
-          }
-          markDirty();
-          render();
-        }
-      ),
-      "Use Scene continuity for exact frame anchors, or Character and reference images for portraits and tagged references."
+      "Generation model",
+      readOnly("MiniMax H3 Ref2VA — fixed"),
+      null,
+      "All storyboard video shots use the same reference-conditioned model."
     )
   );
 
@@ -3300,7 +3348,7 @@ function updateResolvedPreview() {
    screen, rather than the reader having to guess whether a line about a
    character came from the scene description or the cast. */
 function resolvedParts(raw) {
-  const cap = modelCap(raw.model);
+  const cap = modelCap(STORYBOARD_MODEL);
   const out = [];
   const push = (source, text) => {
     text = (text || "").trim();
@@ -3317,7 +3365,7 @@ function resolvedParts(raw) {
       const n = (c.name || "").trim();
       const d = (c.description || "").trim();
       if (d) push(`cast · ${n || "unnamed"}`, characterDescription(n, d));
-      if (raw.model === "ref2va" && c.image) {
+      if (c.image) {
         push(`cast guidance · ${n || "unnamed"}`,
           `${n || "The selected character"}: use the character portrait ` +
           "and Cast description together to maintain appearance. Use the " +
@@ -3468,7 +3516,7 @@ const STAGE_PHASE_KEY = {
 };
 
 function stageTiles(raw, shot) {
-  const isRef2va = raw.model === "ref2va";
+  const isRef2va = true;
   const needsDub = !!(raw.dialogue || "").trim() && !shotClonesVoice(raw);
 
   // icon ids match the <symbol>/<g> ids in index.html's stage-icon sprite —
@@ -3667,7 +3715,11 @@ function renderPreview() {
   const mainTabs = el("div", "tabs");
   mainTabs.classList.add("output-tabs");
   const activeMainTab = state.previewMainTab || "clip";
-  [{ id: "clip", label: "Clip" }, { id: "stills", label: "Stills" }].forEach((t) => {
+  [
+    { id: "clip", label: "Clip" },
+    { id: "final", label: "Final Video" },
+    { id: "stills", label: "Stills" },
+  ].forEach((t) => {
     const b = el("button", "tab");
     b.dataset.tab = t.id;
     b.dataset.on = String(t.id === activeMainTab);
@@ -3682,6 +3734,8 @@ function renderPreview() {
 
   if (activeMainTab === "stills") {
     host.appendChild(renderStillsPane(raw));
+  } else if (activeMainTab === "final") {
+    host.appendChild(renderFinalPane());
   } else {
     const stage = el("div", "preview-stage");
     const video = raw.dubUrl || (shot.outputs || []).find((u) => u.endsWith(".mp4"));
@@ -3783,7 +3837,7 @@ function renderPreview() {
   const stats = el("dl", "stat-grid");
   [
     ["Status", STATUS_LABELS[shot.status] || shot.status],
-    ["Model", (modelCap(raw.model) || {}).label || raw.model],
+    ["Model", (modelCap(STORYBOARD_MODEL) || {}).label || STORYBOARD_MODEL],
     ["Runtime", dur(shot.runtimeSeconds)],
     ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, 4 steps)"
                  : raw.renderedAs === "final" ? "final" : "—"],
@@ -4027,9 +4081,25 @@ function paintStale() {
     });
   }
 
-  renderFinal();
+  const finalPane = document.querySelector("#preview .final-video-content");
+  if (finalPane) renderFinal(finalPane);
   paintMeta();
   paintRenderHint();
+}
+
+function diagnosticGuidance(reason) {
+  const text = (reason || "").toLowerCase();
+  if (text.includes("separate recording") || text.includes("dialogue take exists") ||
+      text.includes("dialogue-window recording")) {
+    return "This line is using the separate-recording path. Choose a healthy Speech engine, press Generate in the Dialogue panel, preview the take, and then render again.";
+  }
+  if (text.includes("recording is out of date")) {
+    return "The dialogue text or voice direction changed after the last take. Press Generate in the Dialogue panel to replace it, then render again.";
+  }
+  if (text.includes("h3 native speech requires") || text.includes("reference voice clip")) {
+    return "H3-native speech needs a cast character assigned to this shot with a reference voice clip. Otherwise choose the separate-recording path.";
+  }
+  return "Check the details above, correct the shot settings, and re-run this shot.";
 }
 
 function diagnostic(raw, shot) {
@@ -4048,9 +4118,17 @@ function diagnostic(raw, shot) {
   head.append(chip(shot.status), el("span", null, titles[shot.status]));
   d.appendChild(head);
 
+  const setupIssue = dialogueReadiness(raw);
   const reason =
-    shot.reason || (shot.validation && shot.validation.reason) || "";
+    shot.reason || (shot.validation && shot.validation.reason) ||
+    (setupIssue ? `${setupIssue.title}. ${setupIssue.body}` : "");
   if (reason) d.appendChild(el("div", "diag-body", reason));
+  if (shot.status === "failed" || shot.status === "blocked") {
+    const next = el("div", "diag-next");
+    next.appendChild(el("strong", null, "Next step: "));
+    next.appendChild(el("span", null, setupIssue ? setupIssue.action : diagnosticGuidance(reason)));
+    d.appendChild(next);
+  }
 
   const checks = shot.validation && shot.validation.checks;
   if (checks && checks.length) {
@@ -4351,7 +4429,6 @@ function refSlot(label, shot, key, pickerTitle = null) {
         const current = shotById(shot.id);
         if (!current) return;
         current[key] = null;
-        selectReferenceModel(current);
         markDirty();
         render();
         await saveNow();
@@ -4369,7 +4446,7 @@ function refSlot(label, shot, key, pickerTitle = null) {
     const current = shotById(shot.id);
     if (!current) return;
     current[key] = chosen;
-    current.model = "fl2va";
+    current.model = STORYBOARD_MODEL;
     markDirty();
     render();
     await saveNow();
@@ -4394,7 +4471,6 @@ function shotReferenceImages(shot) {
         tag: current.referenceImages[i].tag || referenceTagFor(chosen) || "",
         role: current.referenceImages[i].role || "",
       };
-      selectReferenceModel(current);
       markDirty();
       render();
       await saveNow();
@@ -4452,7 +4528,6 @@ function shotReferenceImages(shot) {
       for (const f of files) {
         shot.referenceImages.push(await API.uploadRef(state.slug, f));
       }
-      selectReferenceModel(shot);
       markDirty();
       await saveNow();
       render();
@@ -4514,7 +4589,6 @@ async function addShotReferenceImage(shot) {
     ...chosen,
     tag: referenceTagFor(chosen) || "",
   });
-  selectReferenceModel(shot);
   markDirty();
   await saveNow();
   render();
@@ -4794,18 +4868,10 @@ async function pickRef(shot, key, pickerTitle = null) {
   const current = shotById(shot.id);
   if (!current) return;
   current[key] = chosen;
-  current.model = "fl2va";
+  current.model = STORYBOARD_MODEL;
   markDirty();
   await saveNow();
   render();
-}
-
-function selectReferenceModel(shot) {
-  if (shot.startRef || shot.endRef) {
-    shot.model = "fl2va";
-    return;
-  }
-  if ((shot.referenceImages || []).length) shot.model = "ref2va";
 }
 
 document.addEventListener("DOMContentLoaded", boot);

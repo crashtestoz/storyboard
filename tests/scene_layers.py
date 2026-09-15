@@ -9,7 +9,7 @@ from server.backends.vpipe_backend import (
     _effective_video_model, _reference_bindings,
     _ref2va_references, _resolved_prompt,
 )
-from server.backends.base import ShotPaths
+from server.backends.base import FrameRule, ModelCapability, ShotPaths
 from server.store import default_shot, render_fingerprint
 
 class SceneLayers(unittest.TestCase):
@@ -56,16 +56,30 @@ class SceneLayers(unittest.TestCase):
         self.shot['characterIds']=[]
         self.assertNotIn('Gold plating.',_resolved_prompt(self.shot,self.board,model='ref2va'))
 
-    def test_model_partition_follows_incompatible_inputs(self):
+    def test_storyboard_video_model_is_always_ref2va(self):
         shot = {**self.shot, 'model': 'fl2va'}
         self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
         shot['startRef'] = {'path': 'opening.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
-        self.assertEqual(_reference_bindings(shot, self.board, 'fl2va'), [])
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
+        bindings = _reference_bindings(shot, self.board, 'ref2va')
+        self.assertEqual([b['name'] for b in bindings[:2]], ['Start frame', 'Shot reference'])
         shot.pop('startRef')
         shot['model'] = 'ref2va'
         shot['endRef'] = {'path': 'closing.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
+        self.assertEqual(_reference_bindings(shot, self.board, 'ref2va')[0]['name'], 'End frame')
+
+    def test_project_and_shot_references_are_combined(self):
+        self.board['styleRefs'] = [{'path': 'style.png'}]
+        shot = {**self.shot, 'startRef': {'path': 'opening.png'},
+                'endRef': {'path': 'closing.png'}}
+        refs = _ref2va_references(
+            shot, self.board,
+            ShotPaths(Path('/tmp'), Path('/tmp/shot'), 'shot', Path('/tmp')),
+        )
+        self.assertEqual([Path(r).name for r in refs],
+                         ['opening.png', 'closing.png', 'room.png', 'gold.png',
+                          'style.png', 'voice.wav'])
 
     def test_h3_base_frame_sizes(self):
         self.assertEqual(list(ASPECT_TABLE), ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'])
@@ -89,5 +103,24 @@ class SceneLayers(unittest.TestCase):
         self.assertEqual(result['dialogueSource'], 'H3 native speech')
         self.shot['dialogueSource']='recording'
         self.assertEqual(Handler._api_post(fake, '/api/render-preview')['dialogueSource'], 'Dialogue-window recording')
+
+    def test_create_stills_ignores_dialogue_validation(self):
+        from server.backends.vpipe_backend import VpipeBackend
+        from tempfile import TemporaryDirectory
+
+        backend = VpipeBackend(Path('/tmp/vpipe'), Path('/tmp/workspace'))
+        backend.capability = lambda model: ModelCapability(
+            id='krea2-still', label='Krea test', kind='image',
+            supports_audio=False, frame_rule=FrameRule(),
+            resolutions=['480x480'], available=True,
+        )
+        with TemporaryDirectory() as temp:
+            paths = ShotPaths(Path('/tmp/workspace'), Path(temp), 'test', Path('/tmp'))
+            shot = {'id': 'still-only', 'model': 'krea2-still',
+                    'prompt': 'A person looks toward the camera.',
+                    'dialogueSource': 'recording',
+                    'dialogue': 'This is only for the video.'}
+            spec = backend.prepare(shot, {'defaults': {}}, paths)
+            self.assertEqual(spec.payload['model'], 'krea2-still')
 
 if __name__=='__main__': unittest.main()

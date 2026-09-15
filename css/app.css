@@ -41,11 +41,12 @@ button, input, textarea, select {
 
 .app {
   display: grid;
-  grid-template-rows: var(--header-h) 1fr;
-  grid-template-columns: var(--rail-w) 1fr;
+  grid-template-rows: var(--header-h) auto 1fr;
+  grid-template-columns: 20% 40% 40%;
   grid-template-areas:
-    "header header"
-    "rail   main";
+    "header      header   header"
+    "storyboard  storyboard storyboard"
+    "rail        editor   preview";
   height: 100vh;
 }
 
@@ -112,23 +113,29 @@ button, input, textarea, select {
 
 /* --- main ---------------------------------------------------------------- */
 .main {
-  grid-area: main;
-  display: grid;
-  grid-template-rows: auto 1fr;
-  overflow: hidden;
-  background: var(--bg);
+  display: contents;
 }
 
 .workspace {
-  display: grid;
-  grid-template-columns: minmax(340px, 1fr) minmax(360px, 1.1fr);
-  gap: var(--sp-4);
-  padding: var(--sp-4);
-  overflow: hidden;
-  min-height: 0;
+  display: contents;
 }
 
-.workspace > * { min-height: 0; overflow-y: auto; }
+.workspace > * {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4);
+  background: var(--bg);
+}
+
+#editor {
+  grid-area: editor;
+  border-right: 1px solid var(--border);
+}
+
+#preview {
+  grid-area: preview;
+}
 
 /* ==========================================================================
    Generic bits
@@ -294,6 +301,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
    ========================================================================== */
 
 .strip-wrap {
+  grid-area: storyboard;
+  min-width: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
   padding: var(--sp-3) var(--sp-4);
@@ -309,10 +318,23 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .strip {
   display: flex;
   gap: var(--sp-3);
-  overflow-x: auto;
+  min-width: 0;
+  overflow-x: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: var(--text-dim) var(--bg);
   padding-bottom: var(--sp-2);
   align-items: stretch;
 }
+
+.strip::-webkit-scrollbar { height: 14px; }
+.strip::-webkit-scrollbar-track { background: var(--bg); border-radius: 999px; }
+.strip::-webkit-scrollbar-thumb {
+  background: var(--text-dim);
+  border: 3px solid var(--bg);
+  border-radius: 999px;
+}
+.strip::-webkit-scrollbar-thumb:hover { background: var(--text); }
 
 .strip.dropping {
   outline: 1px dashed var(--accent);
@@ -853,6 +875,17 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .diag-body { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.55; }
 
+.diag-next {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.dialogue-guide { line-height: 1.5; }
+
 .diag-checks {
   list-style: none;
   margin: var(--sp-2) 0 0;
@@ -995,7 +1028,25 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 @media (max-width: 1180px) {
-  .workspace { grid-template-columns: 1fr; }
+  .app {
+    grid-template-rows: var(--header-h) auto auto minmax(420px, auto) minmax(420px, auto);
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "storyboard"
+      "rail"
+      "editor"
+      "preview";
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .rail {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  #editor { border-right: none; border-bottom: 1px solid var(--border); }
 }
 
 /* ==========================================================================
@@ -1532,6 +1583,80 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   color: var(--text-dim);
   line-height: 1.45;
 }
+
+.help-intro,
+.help-tip {
+  margin: var(--sp-3) 0 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+
+.help-recipe {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-3) var(--sp-5);
+  margin-top: var(--sp-4);
+}
+
+.help-recipe > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-2);
+}
+
+.help-recipe strong,
+.help-example strong {
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.help-recipe span {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.help-callout {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-sunken));
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.help-callout strong { color: var(--text); }
+
+.help-examples {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+}
+
+.help-example {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.help-example code {
+  color: var(--text-dim);
+  font: var(--fs-xs)/1.55 var(--font-mono);
+  white-space: normal;
+}
+
+.help-tip { color: var(--text-faint); }
 
 #helpDialog { z-index: 110; }
 

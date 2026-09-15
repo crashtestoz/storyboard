@@ -37,9 +37,17 @@ await vm.runInContext(`(async () => {
       endRef: { path: 'end.png' }, referenceImages: [{ path: 'one.png' }, { path: 'two.png' }] }] };
     return state.board.shots[0];
   };
+  const find = (node, className) => {
+    if (node.className === className) return node;
+    for (const child of node.children || []) {
+      const found = find(child, className);
+      if (found) return found;
+    }
+    return null;
+  };
   const click = (slot, text) => text === 'Replace'
     ? slot.listeners.click()
-    : slot.children.find(c => c.className === 'pick-delete').listeners.click({ stopPropagation() {} });
+    : find(slot, 'pick-delete').listeners.click({ stopPropagation() {} });
   for (const key of ['startRef', 'endRef']) {
     const original = reset();
     const slot = refSlot(key, original, key);
@@ -50,7 +58,6 @@ await vm.runInContext(`(async () => {
     assert.ok(original[key]);
     await click(slot, 'Replace');
     assert.equal(state.board.shots[0][key].path, 'replacement.png');
-    assert.equal(state.board.shots[0].model, 'fl2va');
     chosen = null;
     await click(slot, 'Replace');
     assert.equal(state.board.shots[0][key].path, 'replacement.png');
@@ -67,7 +74,6 @@ await vm.runInContext(`(async () => {
   state.board = JSON.parse(JSON.stringify(state.board));
   await click(slots.children[0], 'Replace');
   assert.equal(state.board.shots[0].referenceImages[0].path, 'replacement.png');
-  assert.equal(state.board.shots[0].model, 'fl2va');
   await click(slots.children[1], 'Remove');
   assert.equal(state.board.shots[0].referenceImages.length, 1);
   assert.equal(original.referenceImages.length, 2);
