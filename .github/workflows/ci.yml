@@ -1,0 +1,34 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check JavaScript syntax
+        run: node --check js/app.js
+
+      - name: Compile Python modules
+        run: python -m py_compile server/*.py server/backends/*.py server/tts/*.py tests/*.py
+
+      - name: Run scene-layer tests
+        run: PYTHONPATH=. python tests/scene_layers.py
+
+      - name: Run render-all tests
+        run: python tests/render_all.py
