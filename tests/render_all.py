@@ -46,6 +46,7 @@ from server.store import (                                     # noqa: E402
     Store,
     default_board,
     default_shot,
+    last_saved_frame,
     render_fingerprint,
     stale_reason,
 )
@@ -201,16 +202,18 @@ def test_pending(tmp: Path) -> None:
     check("the followers say they are following",
           "continues from" in why.get("s3", ""), why.get("s3", ""))
 
-    section("a resolved chain anchor is not an input change")
+    section("a resolved chain anchor is stable, but a corrected one invalidates")
     board = a_board()
     board["shots"][1]["startRef"] = {"kind": "chain", "from": "s1"}
+    board["shots"][1]["startRef"]["resolved"] = "projects/x/shots/01/frames/frame-0123.png"
     board["shots"][1]["renderFingerprint"] = render_fingerprint(
         board["shots"][1], board
     )
-    # What the orchestrator writes into the ref on every run.
-    board["shots"][1]["startRef"]["resolved"] = "projects/x/shots/01/frames/frame-0123.png"
-    check("re-resolving the anchor does not make it look edited",
+    check("re-resolving the same anchor does not make it look edited",
           pending_ids(orch, board) == [])
+    board["shots"][1]["startRef"]["resolved"] = "projects/x/shots/01/frames/frame-0174.png"
+    check("a corrected anchor makes the dependent shot pending",
+          pending_ids(orch, board) == ["s2"])
 
     section("a shot that was never rendered")
     board = a_board()
@@ -496,6 +499,14 @@ def test_assemble(tmp: Path) -> None:
     check("nothing was reported missing", res.missing == [], str(res.missing))
     check("a soundless clip did not desynchronise the cut",
           2.7 < res.seconds < 3.3, f"{res.seconds}s for three 1s clips")
+
+    section("a chain ignores stale frames from a longer previous take")
+    frames_dir = tmp / "stale-frames"
+    frames_dir.mkdir()
+    for number in (0, 174, 242):
+        (frames_dir / f"frame-{number:04d}.png").write_bytes(b"x")
+    check("the current requested tail wins over an old longer tail",
+          last_saved_frame(frames_dir, 175).name == "frame-0174.png")
 
     section("a board with a gap still assembles, and says so")
     (project / "shots" / "02" / "clip.mp4").unlink()

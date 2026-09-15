@@ -32,6 +32,29 @@ BOARD_FILE = "storyboard.json"
 SCHEMA = 1
 
 
+def last_saved_frame(frames_dir: Path, expected_frames: int = 0) -> Path | None:
+    """Return the last frame belonging to the current requested length.
+
+    Re-rendering into ``frame-%04d.png`` does not remove files from a longer
+    previous take. Choosing ``frames[-1]`` therefore made a chained shot use
+    an old frame whenever the new take was shorter. Prefer the highest frame
+    index below the current request; if a short/sketch render has fewer files,
+    its actual last file remains the correct fallback.
+    """
+    frames = sorted(frames_dir.glob("*.png")) if frames_dir.exists() else []
+    if not frames:
+        return None
+    if expected_frames > 0:
+        usable = []
+        for frame in frames:
+            match = re.search(r"-(\d+)$", frame.stem)
+            if match and int(match.group(1)) < expected_frames:
+                usable.append(frame)
+        if usable:
+            return usable[-1]
+    return frames[-1]
+
+
 def slugify(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
     return s[:60] or "untitled"
@@ -155,9 +178,10 @@ def new_id(prefix: str = "s") -> str:
 def _ref_key(ref: Any) -> str | None:
     """A reference reduced to what identifies it, and nothing that moves.
 
-    ``resolved`` is excluded deliberately: the orchestrator writes it into a
-    chain reference on every run, so including it would make every shot look
-    changed the moment the one before it ran.
+    A chain's ``resolved`` frame is included because it is the actual image
+    consumed by the render. The resolver keeps it stable when the source take
+    is unchanged, but changing from a stale longer-take tail to the current
+    tail must invalidate the dependent shot.
     """
     if not ref:
         return None
@@ -166,7 +190,7 @@ def _ref_key(ref: Any) -> str | None:
     if not isinstance(ref, dict):
         return None
     if ref.get("kind") == "chain":
-        return f"chain:{ref.get('from') or ''}"
+        return f"chain:{ref.get('from') or ''}:{ref.get('resolved') or ''}"
     return ref.get("path") or ref.get("url") or ""
 
 
@@ -364,6 +388,7 @@ def default_board(name: str) -> dict[str, Any]:
         },
         "shots": [],
         "finalVideo": None,
+        "outputMuted": False,
         "createdAt": time.time(),
         "updatedAt": time.time(),
     }
@@ -739,10 +764,12 @@ class Store:
                 frames_dir = (
                     self.data_dir / self.shot_rel_dir(slug, src_idx + 1) / "frames"
                 )
-                frames = sorted(frames_dir.glob("*.png")) if frames_dir.exists() else []
-                if not frames:
+                frame = last_saved_frame(
+                    frames_dir, int(shots[src_idx].get("frames") or 0)
+                )
+                if frame is None:
                     continue
-                resolved = str(frames[-1].relative_to(self.data_dir)).replace("\\", "/")
+                resolved = str(frame.relative_to(self.data_dir)).replace("\\", "/")
                 if ref.get("resolved") != resolved:
                     ref["resolved"] = resolved
                     changed = True
@@ -875,6 +902,9 @@ class Store:
         # The assembled cut: {url, builtAt, parts, missing, seconds}. None
         # until the shots have been concatenated at least once.
         board.setdefault("finalVideo", None)
+        # Output playback preference. It belongs to the project so switching
+        # boards does not unexpectedly turn sound back on (or off).
+        board.setdefault("outputMuted", False)
 
         defaults = board.setdefault("defaults", {})
         # The video model is a Storyboard invariant, not a project preference.

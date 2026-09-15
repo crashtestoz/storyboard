@@ -231,16 +231,18 @@ def assemble(
         # concat demands it, and a board *can* hold clips of different sizes:
         # frame size is a project setting now, but shots rendered before it
         # moved kept their own, and draft mode halves it.
-        filters.append(
+        video_filter = (
             f"[{vi}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-            f"fps={fps},format=yuv420p[v{vi}]"
+            f"fps={fps},setpts=PTS-STARTPTS"
         )
+        filters.append(video_filter + f",format=yuv420p[v{vi}]")
         if _has_audio(clip):
-            filters.append(
+            audio_filter = (
                 f"[{vi}:a]aresample={SAMPLE_RATE}:async=1,"
-                f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{vi}]"
+                f"aformat=sample_fmts=fltp:channel_layouts=stereo"
             )
+            filters.append(audio_filter + f",asetpts=PTS-STARTPTS[a{vi}]")
         else:
             # A silent stretch of the right length, so concat still gets one
             # audio stream per segment. Without it a soundless still in the
