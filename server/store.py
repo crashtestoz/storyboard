@@ -3,7 +3,7 @@
 A storyboard is one JSON file, ``storyboard.json``, living in the same folder
 as the shots it produced::
 
-    <workspace>/projects/<slug>/
+    <projects-folder>/<slug>/
         storyboard.json          <- the whole board: scene, refs, shots
         refs/                    <- uploaded reference images
         shots/01/shot.vpipeline  <- generated per render
@@ -18,6 +18,7 @@ than three formats.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -26,6 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 BOARD_FILE = "storyboard.json"
@@ -63,13 +65,17 @@ def slugify(name: str) -> str:
 def _rewrite_slug(node: Any, old: str, new: str) -> Any:
     """Repoint every stored path from one project slug to another.
 
-    Two forms occur: browser URLs (``/media/projects/<slug>/...``) and
-    workspace-relative paths (``projects/<slug>/...``). Both are anchored on
-    ``projects/`` and end at a slash, so a project whose slug is a prefix of
-    another's cannot be caught by accident.
+    Two forms occur: browser URLs (``/media/<slug>/...``) and paths relative
+    to the selected projects folder (``<slug>/...``). Handle the historical
+    ``projects/<slug>/...`` forms too, so an old board can still be renamed
+    before its load-time path migration is saved.
     """
     if isinstance(node, str):
-        return node.replace(f"projects/{old}/", f"projects/{new}/")
+        for prefix in ("/media/projects/", "projects/", "/media/", ""):
+            old_head = f"{prefix}{old}/"
+            if node.startswith(old_head):
+                return f"{prefix}{new}/{node[len(old_head):]}"
+        return node
     if isinstance(node, list):
         return [_rewrite_slug(v, old, new) for v in node]
     if isinstance(node, dict):
@@ -77,12 +83,30 @@ def _rewrite_slug(node: Any, old: str, new: str) -> Any:
     return node
 
 
+def _normalize_media_paths(node: Any) -> Any:
+    """Remove the obsolete internal ``projects/`` storage segment."""
+    if isinstance(node, str):
+        if node.startswith("/media/projects/"):
+            return "/media/" + node[len("/media/projects/"):]
+        if node.startswith("projects/"):
+            return node[len("projects/"):]
+        return node
+    if isinstance(node, list):
+        return [_normalize_media_paths(v) for v in node]
+    if isinstance(node, dict):
+        return {k: _normalize_media_paths(v) for k, v in node.items()}
+    return node
+
+
 def _media_rel(value: str) -> str:
     if value.startswith("/media/"):
         value = value[len("/media/"):]
     if value.startswith("projects/"):
-        return value
-    return ""
+        value = value[len("projects/"):]
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts or "." in path.parts:
+        return ""
+    return str(path)
 
 
 def _file_digest(path: Path) -> str:
@@ -137,10 +161,12 @@ def _collect_media_usages(board: dict[str, Any]) -> dict[str, list[str]]:
         if c.get("id")
     }
 
+    _add_usage(usages, (board.get("assembly") or {}).get("backgroundAudio"), "Continuous background audio")
     for i, ref in enumerate(board.get("styleRefs") or [], start=1):
         _add_usage(usages, ref, f"Style reference {i}")
 
     for idx, shot in enumerate(shots, start=1):
+        _add_usage(usages, shot.get("continuityRef"), "Continuity", index=idx, shot=shot)
         _add_usage(usages, shot.get("startRef"), "Start", index=idx, shot=shot)
         _add_usage(usages, shot.get("endRef"), "End", index=idx, shot=shot)
         for ref_idx, ref in enumerate(shot.get("referenceImages") or [], start=1):
@@ -190,8 +216,10 @@ def _ref_key(ref: Any) -> str | None:
     if not isinstance(ref, dict):
         return None
     if ref.get("kind") == "chain":
-        return f"chain:{ref.get('from') or ''}:{ref.get('resolved') or ''}"
-    return ref.get("path") or ref.get("url") or ""
+        return (f"chain:{ref.get('from') or ''}:{ref.get('resolved') or ''}"
+                + (":" + ref["contentHash"] if ref.get("contentHash") else ""))
+    key = ref.get("path") or ref.get("url") or ""
+    return key + (":" + ref["contentHash"] if ref.get("contentHash") else "")
 
 
 def speech_fingerprint(shot: dict, board: dict) -> str:
@@ -269,6 +297,8 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "draft": bool(defaults.get("draft")),
         "sketch": bool(defaults.get("draft")) and bool(defaults.get("sketch")),
     }
+    if shot.get("continuityRef"):
+        payload["continuityRef"] = _ref_key(shot["continuityRef"])
     if payload["draft"]:
         payload["draftProfile"] = "384-long-edge-4-step-with-audio"
     if payload["sketch"]:
@@ -323,6 +353,7 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         # mumbled dialogue, which "mix" would otherwise leave audible under
         # the real line as a second, overlapping voice.
         "dubMode": "mix",
+        "continuityRef": None,
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
@@ -403,7 +434,7 @@ def default_board(name: str) -> dict[str, Any]:
 
 @dataclass
 class Store:
-    """Project folders under ``<data_dir>/projects``.
+    """Project folders directly under the selected ``data_dir``.
 
     Two roots, deliberately separate:
 
@@ -430,7 +461,7 @@ class Store:
 
     @property
     def root(self) -> Path:
-        return self.data_dir / "projects"
+        return self.data_dir
 
     # -- locations ------------------------------------------------------- #
 
@@ -451,7 +482,7 @@ class Store:
         stays relative so a board keeps working when the data directory moves,
         which is what makes a project folder portable.
         """
-        return f"projects/{slugify(slug)}/shots/{index:02d}"
+        return f"{slugify(slug)}/shots/{index:02d}"
 
     # -- listing --------------------------------------------------------- #
 
@@ -591,6 +622,7 @@ class Store:
             raise FileNotFoundError(f"no storyboard at {bp}")
         board = json.loads(bp.read_text())
         before_migrate = json.dumps(board, sort_keys=True, separators=(",", ":"))
+        board = _normalize_media_paths(board)
         board = self.migrate(board)
         migrated = json.dumps(board, sort_keys=True, separators=(",", ":")) != before_migrate
         # Self-heal on the way out: a board saved before rehoming existed,
@@ -602,6 +634,35 @@ class Store:
         healed = migrated
         healed = self._rehome_media(slug, board) or healed
         healed = self._resolve_chain_previews(slug, board) or healed
+        audio_refs = [(c.get("voice") or {}) for c in board.get("characters", [])]
+        audio_refs.append((board.get("assembly") or {}).get("backgroundAudio") or {})
+        for voice in audio_refs:
+            path = self.data_dir / voice.get("path", "")
+            if path.is_file() and path.resolve().is_relative_to(self.data_dir.resolve()):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                if voice.get("contentHash") != digest:
+                    voice["contentHash"] = digest
+                    healed = True
+        # Upgrade matching legacy fingerprints when first adding content hashes.
+        # Once upgraded, later changes at the same path invalidate the take.
+        legacy = copy.deepcopy(board)
+        for character in legacy.get("characters", []):
+            (character.get("voice") or {}).pop("contentHash", None)
+        for scene in legacy.get("shots", []):
+            for key in ("startRef", "endRef", "continuityRef"):
+                if isinstance(scene.get(key), dict):
+                    scene[key].pop("contentHash", None)
+        for scene, old in zip(board.get("shots", []), legacy.get("shots", [])):
+            if scene.get("speechFingerprint") == speech_fingerprint(old, legacy):
+                fingerprint = speech_fingerprint(scene, board)
+                if scene["speechFingerprint"] != fingerprint:
+                    scene["speechFingerprint"] = fingerprint
+                    healed = True
+            if scene.get("renderFingerprint") == render_fingerprint(old, legacy):
+                fingerprint = render_fingerprint(scene, board)
+                if scene["renderFingerprint"] != fingerprint:
+                    scene["renderFingerprint"] = fingerprint
+                    healed = True
         if healed:
             board = self.save(slug, board)
         return board
@@ -737,7 +798,7 @@ class Store:
         the project" bug from a resolvable case to an unresolvable one.
         """
         rel = _ref_path(ref)
-        if not rel or rel.startswith(f"projects/{slug}/"):
+        if not rel or rel.startswith(f"{slug}/"):
             return ref
         try:
             adopted = self.adopt(slug, rel)
@@ -761,7 +822,7 @@ class Store:
         shots = board.get("shots") or []
         index_by_id = {s.get("id"): i for i, s in enumerate(shots)}
         for shot in shots:
-            for key in ("startRef", "endRef"):
+            for key in ("startRef", "endRef", "continuityRef"):
                 ref = shot.get(key)
                 if not isinstance(ref, dict) or ref.get("kind") != "chain":
                     continue
@@ -777,6 +838,10 @@ class Store:
                 if frame is None:
                     continue
                 resolved = str(frame.relative_to(self.data_dir)).replace("\\", "/")
+                content_hash = hashlib.sha256(frame.read_bytes()).hexdigest()
+                if ref.get("contentHash") != content_hash:
+                    ref["contentHash"] = content_hash
+                    changed = True
                 if ref.get("resolved") != resolved:
                     ref["resolved"] = resolved
                     changed = True
@@ -817,7 +882,7 @@ class Store:
                 changed = changed or new is not ch["image"]
                 ch["image"] = new
         for shot in board.get("shots") or []:
-            for key in ("startRef", "endRef"):
+            for key in ("startRef", "endRef", "continuityRef"):
                 if shot.get(key):
                     new = self._rehome_ref(slug, shot[key])
                     changed = changed or new is not shot[key]
@@ -951,6 +1016,7 @@ class Store:
             shot.setdefault("dialogueVoice", "")
             shot.setdefault("dubUrl", None)
             shot.setdefault("dubMode", "mix")
+            shot.setdefault("continuityRef", None)
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])

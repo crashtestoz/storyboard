@@ -295,14 +295,20 @@
 
         <section>
         <div class="section-label">
-          Global projects folder
-          <span class="hint">— every project's files, server-wide</span>
+          Storyboard data folder
+          <span class="hint">— each project is stored directly inside this folder</span>
         </div>
         <div class="field">
           <label>Folder path</label>
           <input type="text" id="dataDirInput" autocomplete="off" spellcheck="false">
         </div>
         <div class="field-note" id="dataDirWarn"></div>
+        <div class="field-note">
+          Example: choosing <code>/Volumes/Media/storyboard-projects</code>
+          stores a board under
+          <code>/Volumes/Media/storyboard-projects/my-board/</code>.
+          Changing this setting does not move existing folders.
+        </div>
         <div class="rename-row" style="margin-top:var(--sp-2)">
           <button class="btn btn-sm" id="btnSaveDataDir">Save &amp; restart server</button>
         </div>

@@ -45,8 +45,8 @@ def seeded_board(st: Store, slug_name: str) -> str:
     board["shots"] = [shot]
     board["characters"] = [{
         "id": "c1", "name": "Kira", "description": "a wiry pilot",
-        "image": {"path": f"projects/{slug}/refs/kira.png",
-                  "url": f"/media/projects/{slug}/refs/kira.png",
+        "image": {"path": f"{slug}/refs/kira.png",
+                  "url": f"/media/{slug}/refs/kira.png",
                   "label": "kira.png"},
         "voice": None, "voiceText": "",
     }]
@@ -68,7 +68,10 @@ def broken_paths(st: Store, board: dict) -> list[str]:
     missing: list[str] = []
 
     def walk(node: object) -> None:
-        if isinstance(node, str) and "projects/" in node:
+        if isinstance(node, str) and (
+            node.startswith("/media/")
+            or node.startswith(tuple(f"{d.name}/" for d in st.root.iterdir() if d.is_dir()))
+        ):
             rel = node[len("/media/"):] if node.startswith("/media/") else node
             if not (st.data_dir / rel).exists():
                 missing.append(node)
@@ -91,15 +94,15 @@ def test_rename(tmp: Path) -> None:
     new_slug, board = st.rename(slug, "Canyon Chase")
     check("slug follows the new name", new_slug == "canyon-chase", new_slug)
     check("display name is set", board["name"] == "Canyon Chase")
-    check("folder moved", (st.data_dir / "projects/canyon-chase").is_dir())
-    check("old folder gone", not (st.data_dir / f"projects/{slug}").exists())
+    check("folder moved", (st.data_dir / "canyon-chase").is_dir())
+    check("old folder gone", not (st.data_dir / f"{slug}").exists())
     blob = json.dumps(board)
-    check("no stale references to the old slug", f"projects/{slug}/" not in blob)
+    check("no stale references to the old slug", f"{slug}/" not in blob)
     check("every recorded path still resolves", not broken_paths(st, board),
           str(broken_paths(st, board)))
     check("cast portrait repointed",
           board["characters"][0]["image"]["url"]
-          == "/media/projects/canyon-chase/refs/kira.png")
+          == "/media/canyon-chase/refs/kira.png")
 
     # a name that slugifies to the same thing must not move anything
     same, board2 = st.rename("canyon-chase", "Canyon  Chase!!")
@@ -111,7 +114,7 @@ def test_rename(tmp: Path) -> None:
     taken, _ = st.rename(other, "Canyon Chase")
     check("collision gets a suffix", taken == "canyon-chase-2", taken)
     check("the original survives a collision",
-          (st.data_dir / "projects/canyon-chase/storyboard.json").is_file())
+          (st.data_dir / "canyon-chase/storyboard.json").is_file())
 
     try:
         st.rename("canyon-chase", "   ")
@@ -129,14 +132,14 @@ def test_rename(tmp: Path) -> None:
     a = seeded_board(st, "test")
     b = seeded_board(st, "test video")
     board_a = st.load(a)
-    board_a["shots"][0]["thumb"] = f"/media/projects/{b}/shots/01/other.png"
+    board_a["shots"][0]["thumb"] = f"/media/{b}/shots/01/other.png"
     st.save(a, board_a)
     moved, board_a = st.rename(a, "Renamed")
     check("another project's path is left alone",
-          board_a["shots"][0]["thumb"] == f"/media/projects/{b}/shots/01/other.png",
+          board_a["shots"][0]["thumb"] == f"/media/{b}/shots/01/other.png",
           board_a["shots"][0]["thumb"])
     check("this project's own paths still move",
-          board_a["shots"][0]["outputs"][0] == f"/media/projects/{moved}/shots/01/clip.mp4",
+          board_a["shots"][0]["outputs"][0] == f"/media/{moved}/shots/01/clip.mp4",
           board_a["shots"][0]["outputs"][0])
 
 
@@ -149,7 +152,7 @@ def test_independent_data_dir(tmp: Path) -> None:
 
     slug = seeded_board(st, "Elsewhere")
     check("projects live under the data dir",
-          (data / "projects" / slug / "storyboard.json").is_file())
+          (data / slug / "storyboard.json").is_file())
     check("nothing is written into the workspace",
           not (ws / "projects").exists())
 
@@ -182,7 +185,30 @@ def test_independent_data_dir(tmp: Path) -> None:
     st2 = Store(workspace=ws)
     check("data dir defaults to the workspace", st2.data_dir == ws)
     check("default layout is the historical one",
-          st2.root == ws / "projects")
+          st2.root == ws)
+
+
+def test_legacy_paths_migrate(tmp: Path) -> None:
+    print("\n-- legacy projects/ paths --")
+    st = Store(workspace=tmp, data_dir=tmp)
+    slug = seeded_board(st, "Legacy")
+    raw = json.loads(st.board_path(slug).read_text())
+    image = raw["characters"][0]["image"]
+    image["path"] = "projects/" + image["path"]
+    image["url"] = "/media/projects/" + image["url"][len("/media/"):]
+    raw["shots"][0]["outputs"] = [
+        "/media/projects/" + raw["shots"][0]["outputs"][0][len("/media/"):]
+    ]
+    st.board_path(slug).write_text(json.dumps(raw))
+
+    migrated = st.load(slug)
+    check("reference path loses obsolete projects prefix",
+          migrated["characters"][0]["image"]["path"] == f"{slug}/refs/kira.png")
+    check("media URL loses obsolete projects prefix",
+          migrated["characters"][0]["image"]["url"] == f"/media/{slug}/refs/kira.png")
+    check("generated output URL is migrated",
+          migrated["shots"][0]["outputs"][0] == f"/media/{slug}/shots/01/clip.mp4")
+    check("migration is persisted", "projects/" not in st.board_path(slug).read_text())
 
 
 def test_library_delete(tmp: Path) -> None:
@@ -191,19 +217,19 @@ def test_library_delete(tmp: Path) -> None:
     slug = seeded_board(st, "Library")
     board = st.load(slug)
     board["styleRefs"] = [{
-        "path": f"projects/{slug}/refs/style.png",
-        "url": f"/media/projects/{slug}/refs/style.png",
+        "path": f"{slug}/refs/style.png",
+        "url": f"/media/{slug}/refs/style.png",
         "label": "style.png",
     }]
     board["shots"][0]["characterIds"] = ["c1"]
     board["shots"][0]["startRef"] = {
-        "path": f"projects/{slug}/refs/start.png",
-        "url": f"/media/projects/{slug}/refs/start.png",
+        "path": f"{slug}/refs/start.png",
+        "url": f"/media/{slug}/refs/start.png",
         "label": "start.png",
     }
     board["shots"][0]["referenceImages"] = [{
-        "path": f"projects/{slug}/refs/cockpit.png",
-        "url": f"/media/projects/{slug}/refs/cockpit.png",
+        "path": f"{slug}/refs/cockpit.png",
+        "url": f"/media/{slug}/refs/cockpit.png",
         "label": "cockpit.png",
     }]
     st.save(slug, board)
@@ -256,7 +282,8 @@ def main() -> int:
     try:
         test_rename(tmp / "a")
         test_independent_data_dir(tmp / "b")
-        test_library_delete(tmp / "c")
+        test_legacy_paths_migrate(tmp / "c")
+        test_library_delete(tmp / "d")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

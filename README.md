@@ -145,7 +145,7 @@ models are available.
 Storyboards and uploads are saved under:
 
 ```text
-<data-dir>/projects/<board-slug>/
+<projects-folder>/<board-slug>/
 ```
 
 By default, `--data-dir` is a fixed path baked in at
@@ -159,13 +159,15 @@ own location:
 export SBV_DATA_DIR=/path/to/storyboard-data
 ```
 
-or from the app itself: **⚙ Settings → Global projects folder**, which saves
+or from the app itself: **⚙ Settings → Storyboard data folder**, which saves
 the path to `server-config.json` (next to `llm-services.json`) and restarts
 the server onto it — no flag or environment variable needed. Priority, highest
 first: `--data-dir` flag, `SBV_DATA_DIR`, `server-config.json`, then that
 baked-in default — so a launch script that already pins one of the first two
 keeps working untouched, and Settings tells you so if it would otherwise be
-overridden.
+overridden. Select the folder that directly contains the project folders. For
+example, selecting `/Volumes/Media/storyboard-projects` stores a board at
+`/Volumes/Media/storyboard-projects/<board-slug>/`.
 
 ### 5. Fetch speech models, if using local MOSS
 
@@ -189,10 +191,10 @@ the models were prepared in — it is not ours to choose.
 
 `--data-dir` is yours: storyboards and uploaded references. It **defaults to
 whatever `DEFAULT_DATA_DIR` in `server/__main__.py` says** (so projects land
-in `<that path>/projects/`), but it can be anywhere, which is the point — a
+directly inside that path), but it can be anywhere, which is the point — a
 storyboard and its reference images are documents, and should not have to
 live inside another tool's runtime directory to be usable. Set `--data-dir`,
-`SBV_DATA_DIR`, or Settings → Global projects folder to your own path; don't
+`SBV_DATA_DIR`, or Settings → Storyboard data folder to your own path; don't
 rely on the shipped default.
 Nothing is moved automatically when you point it somewhere new; the startup
 banner names any boards left behind in the old location and prints the `mv` to
@@ -299,7 +301,7 @@ choice never gets committed at all.
 ## Where things live
 
 ```
-<workspace>/projects/<board-slug>/
+<projects-folder>/<board-slug>/
 ├── storyboard.json      the whole board: scene, sound, cast, shots
 ├── final.mp4            every shot, joined in order
 ├── refs/                reference images and voice clips (uploads and picks)
@@ -634,7 +636,7 @@ other than localhost.
 | `sbv_describe_character` | drafting a character description from their portrait |
 | `sbv_start_render` / `sbv_stop_render` / `sbv_status` | **Render** / **Stop** / the live progress rail |
 | `sbv_assemble` | joining rendered clips into `final.mp4` on demand |
-| `sbv_set_data_dir` / `sbv_restart_server` | **⚙ Settings → Global projects folder** |
+| `sbv_set_data_dir` / `sbv_restart_server` | **⚙ Settings → Storyboard data folder** |
 
 Since a board is a single JSON document, most edits — the scene description,
 sound, cast, per-shot prompt/dialogue/model/reference fields — go through
@@ -656,6 +658,7 @@ buttons (render, dub, rename, transcribe, and so on).
 python3 tests/store_paths.py             # renaming, and an independent data dir
 python3 tests/speak_line.py              # who speaks, and previewing without a render
 python3 tests/render_all.py              # what "Render all" picks up, and the final cut
+python3 tests/continuity.py              # continuity references, dialogue reuse, trims and transitions
 node tests/edits-persist.mjs             # every edit reaches the server, not just the first
 node tests/poll-does-not-rebuild.mjs     # the poll must not rebuild a focused subtree
 ```
@@ -752,8 +755,8 @@ output — and carries the caret across when it does.
 - Board editing is a whole-board save, so two browser tabs on one board are
   last-write-wins. The render queue writes the board too, so an edit made
   during a long shot can be overwritten when that shot finishes.
-- The cut is a straight concatenation: no transitions, no per-shot trimming,
-  and no separate audio bed across the whole piece.
+- Reference continuity guides the next scene but does not guarantee exact
+  opening-frame matches, motion continuity, or lip-sync with recorded dialogue.
 - `library()` (the pick-an-existing-image grid) scans the data directory only.
   Images sitting elsewhere in the vpipe workspace are not offered; upload them
   or copy them into a project folder.

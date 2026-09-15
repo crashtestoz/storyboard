@@ -113,6 +113,8 @@ const API = {
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/dub`,
         text === undefined ? {} : { text, style: style || "", dubMode: dubMode || "mix" }),
 
+  prepareDialogue: (slug) => req("POST", "/api/prepare-dialogue", { slug }),
+
   render: (slug, shotIds, board) =>
     req("POST", "/api/render", { slug, shotIds, board }),
 

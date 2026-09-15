@@ -2228,3 +2228,9 @@ textarea.ta-compact {
   gap: var(--sp-2);
   align-items: center;
 }
+
+/* Side-by-side cut review keeps both sides of a join visible. */
+.boundary-review { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.boundary-review video { width: 100%; min-width: 0; }
+.final-video-content details .field-note { display: block; margin: 8px 0; }
+.final-video-content details input[type="number"] { width: 80px; }

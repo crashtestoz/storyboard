@@ -25,13 +25,9 @@ UI_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKSPACE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe-work/sandbox")
 DEFAULT_VPIPE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe/build/apps/vpipe/vpipe")
 # Storyboards and uploads are the user's documents, not vpipe's runtime state,
-# so they live under one fixed root at the top of this machine's ai-diffusers
-# tree (Store keeps them at <data-dir>/projects/<slug>/, so this is the
-# *parent* of "projects", making the actual root /Volumes/KINGSTON/ai-diffusers/
-# projects/) rather than inside whichever workspace/sandbox vpipe happens to
-# be pointed at. Existing projects under the old default (vpipe-work/sandbox)
-# are left in place — this only changes where a fresh launch looks by default.
-DEFAULT_DATA_DIR = Path("/Volumes/KINGSTON/ai-diffusers")
+# so they live in one selected folder outside whichever workspace/sandbox
+# vpipe happens to use. Project folders live directly beneath this directory.
+DEFAULT_DATA_DIR = Path("/Volumes/KINGSTON/ai-diffusers/storyboard-projects")
 
 
 def _configured_data_dir(ui_root: Path) -> Path | None:
@@ -183,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     print(BANNER)
     print(f"  backend    {backend.id} — {backend.label}")
     print(f"  workspace  {workspace}   (vpipe's — models and registry)")
-    print(f"  projects   {data_dir / 'projects'}"
+    print(f"  projects   {data_dir}"
           + ("   (inside the workspace)" if data_dir == workspace else ""))
     print(f"  serving    {shown}")
     if bind == "0.0.0.0":
@@ -229,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
                 if len(left) > 8:
                     print(f"             ... and {len(left) - 8} more")
                 print(f"             Move them when ready:  mv {old}/* "
-                      f"{data_dir / 'projects'}/")
+                      f"{data_dir}/")
                 print("             (nothing is moved automatically — they are "
                       "your files)")
                 print("")

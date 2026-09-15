@@ -417,7 +417,7 @@ class ShotPaths:
 
     workspace: Path          # cwd the backend will run in (vpipe's models live here)
     abs_dir: Path            # <data_dir>/<rel_dir>
-    rel_dir: str             # e.g. "projects/falcon/shots/02", relative to data_dir
+    rel_dir: str             # e.g. "falcon/shots/02", relative to data_dir
     data_dir: Path | None = None   # where projects live; defaults to workspace
 
     def __post_init__(self) -> None:

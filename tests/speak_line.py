@@ -150,11 +150,11 @@ def board_with_cast() -> dict:
     return {
         "characters": [
             {"id": "c1", "name": "Kira", "description": "a pilot",
-             "voice": {"path": "projects/x/refs/kira.wav"}, "voiceText": "hello there"},
+             "voice": {"path": "x/refs/kira.wav"}, "voiceText": "hello there"},
             {"id": "c2", "name": "Vex", "description": "a courier",
              "voice": None, "voiceText": ""},
             {"id": "c3", "name": "Narrator", "description": "unseen",
-             "voice": {"path": "projects/x/refs/narr.wav"}, "voiceText": "once upon"},
+             "voice": {"path": "x/refs/narr.wav"}, "voiceText": "once upon"},
         ]
     }
 
@@ -290,15 +290,12 @@ def test_replace_mode_drops_original_audio(tmp: Path) -> None:
           abs(_duration(mixed.video) - 2.0) < 0.2,
           _duration(mixed.video))
 
-    # Replaced: no bed track to hold the video open, so -shortest cuts the
-    # dub down to the spoken line -- proof the original audio is really gone,
-    # not just quieted, which is the point when the clip's own generated
-    # audio already carries an unwanted voice.
+    # Replacement pads the short line so the final frame remains available.
     replaced = dub_shot(StubEngine(seconds=1.0), clip=clip, shot_dir=shot_dir,
                         text="short line", keep_original_audio=False)
     check("replaced dub succeeds", replaced.ok, replaced.error)
-    check("replaced dub is cut to the spoken line, not the clip",
-          abs(_duration(replaced.video) - 1.0) < 0.2,
+    check("replaced dub preserves the full clip for continuity",
+          abs(_duration(replaced.video) - 2.0) < 0.2,
           _duration(replaced.video))
 
 

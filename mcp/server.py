@@ -583,7 +583,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "sbv_set_data_dir",
-        "description": "Change the global projects folder (same field as ⚙ Settings → Global projects folder). Takes effect after sbv_restart_server.",
+        "description": "Change the projects folder (same field as ⚙ Settings → Storyboard data folder). Project directories live directly inside it; takes effect after sbv_restart_server.",
         "inputSchema": {
             "type": "object",
             "properties": {"data_dir": {"type": "string", "description": "Absolute path."}},

@@ -255,7 +255,8 @@ def mux_speech(
 
     out = shot_dir / "clip-dubbed.mp4"
 
-    if keep_original_audio:
+    from .assemble import _has_audio
+    if keep_original_audio and _has_audio(clip):
         # Mix speech over the generated soundtrack rather than replacing it:
         # the engine roar and spray are part of what the video model made, and
         # dropping them for one line would be a downgrade. Speech is lifted a
@@ -274,7 +275,7 @@ def mux_speech(
     else:
         argv = [
             ffmpeg, "-y", "-i", str(clip), "-i", str(speech),
-            "-map", "0:v", "-map", "1:a",
+            "-map", "0:v", "-map", "1:a", "-af", "apad",
             "-c:v", "copy", "-c:a", "aac", "-shortest", str(out),
         ]
 

@@ -553,6 +553,8 @@ class VpipeBackend(Backend):
         # right before spending full-quality render time on it. Sketch is
         # silent by design, so there is no voice to clone into and no point
         # sending the reference at all.
+        if shot.get("continuityRef") and not _ref_source(shot["continuityRef"], paths):
+            raise ValueError("Previous scene reference has not been resolved; render its source first")
         refs = _ref2va_references(
             shot, project, paths, include_audio_refs=with_audio, sketch=sketch
         )
@@ -1168,7 +1170,7 @@ def _has_downstream_chain(shot: dict, project: dict) -> bool:
     if not shot_id:
         return False
     for other in project.get("shots") or []:
-        for key in ("startRef", "endRef"):
+        for key in ("startRef", "endRef", "continuityRef"):
             ref = other.get(key)
             if (
                 isinstance(ref, dict)
@@ -1282,6 +1284,11 @@ def _resolved_prompt(
             "their identity, layout and continuity while following the shot "
             "action."
         )
+    if shot.get("continuityRef") and model == "ref2va":
+        parts.append("Continue naturally from the previous scene reference. Preserve its environment, "
+                     "lighting, character position and direction of motion at the opening, while "
+                     "using the original cast portraits for identity. This is continuity guidance, "
+                     "not a fixed first frame.")
     for entry in bindings:
         parts.append(f"{entry['token']}: {entry['name']} reference; use for {entry['role']} only")
     shot_prompt = (shot.get("prompt") or "").strip()
@@ -1340,6 +1347,8 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
     remains a compatibility/default field; this decision is intentionally
     derived from the actual inputs so old boards route correctly too.
     """
+    if shot.get("continuityRef") and (shot.get("startRef") or shot.get("endRef")):
+        raise ValueError("Choose reference continuity or Start/End frame anchors, not both")
     requested = (
         shot.get("model")
         or (project.get("defaults") or {}).get("model")
@@ -1408,6 +1417,9 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
     """One ordered manifest shared by prompt labels and image encoder inputs."""
     candidates = []
     if model == "ref2va":
+        if shot.get("continuityRef"):
+            candidates.append((shot["continuityRef"], "Previous scene",
+                               "opening composition, position, lighting and direction of travel; retain original cast identity"))
         if shot.get("startRef"):
             candidates.append((shot["startRef"], "Start frame", "opening frame and composition"))
         if shot.get("endRef"):
@@ -1431,6 +1443,9 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
         if tag and (not re.fullmatch(r"[A-Za-z0-9_-]+", tag) or tag in tags):
             raise ValueError(f"Reference tags must be unique letters, digits, hyphens or underscores: @{tag}")
         if key in seen:
+            existing = next(entry for entry in result if entry["token"] == seen[key])
+            existing["name"] += " / " + name
+            existing["role"] += "; " + (data.get("role") or role)
             if tag:
                 raise ValueError("Use one reference entry per tagged image")
             continue
@@ -1448,6 +1463,8 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
 def _shot_reference_images(shot: dict) -> list[Any]:
     """All image references for Ref2VA, including labeled frame references."""
     refs = []
+    if shot.get("continuityRef"):
+        refs.append(shot["continuityRef"])
     if shot.get("startRef"):
         refs.append(shot.get("startRef"))
     if shot.get("endRef"):

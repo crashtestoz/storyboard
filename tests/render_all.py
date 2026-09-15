@@ -87,7 +87,7 @@ def a_board(n: int = 3) -> dict:
         shot["title"] = f"Shot {i + 1}"
         shot["prompt"] = f"Something happens, take {i + 1}."
         shot["status"] = "done"
-        shot["outputs"] = [f"/media/projects/test/shots/{i + 1:02d}/clip.mp4"]
+        shot["outputs"] = [f"/media/test/shots/{i + 1:02d}/clip.mp4"]
         board["shots"].append(shot)
     # Stamp each one as a render of what the board currently says.
     for shot in board["shots"]:
@@ -154,7 +154,7 @@ def test_pending(tmp: Path) -> None:
 
     section("the other inputs that decide a render")
     for field, value in (
-        ("startRef", {"path": "projects/test/refs/opening.png"}),
+        ("startRef", {"path": "test/refs/opening.png"}),
         ("frames", 39),
         ("steps", 16),
         ("seed", 7),
@@ -205,13 +205,13 @@ def test_pending(tmp: Path) -> None:
     section("a resolved chain anchor is stable, but a corrected one invalidates")
     board = a_board()
     board["shots"][1]["startRef"] = {"kind": "chain", "from": "s1"}
-    board["shots"][1]["startRef"]["resolved"] = "projects/x/shots/01/frames/frame-0123.png"
+    board["shots"][1]["startRef"]["resolved"] = "x/shots/01/frames/frame-0123.png"
     board["shots"][1]["renderFingerprint"] = render_fingerprint(
         board["shots"][1], board
     )
     check("re-resolving the same anchor does not make it look edited",
           pending_ids(orch, board) == [])
-    board["shots"][1]["startRef"]["resolved"] = "projects/x/shots/01/frames/frame-0174.png"
+    board["shots"][1]["startRef"]["resolved"] = "x/shots/01/frames/frame-0174.png"
     check("a corrected anchor makes the dependent shot pending",
           pending_ids(orch, board) == ["s2"])
 
@@ -240,7 +240,7 @@ def test_dialogue_prompting() -> None:
             "id": "c1",
             "name": "Kira",
             "description": "Kira: a focused pilot in a worn flight jacket",
-            "image": {"kind": "upload", "path": "projects/x/refs/kira.jpg"},
+            "image": {"kind": "upload", "path": "x/refs/kira.jpg"},
         }
     ]
     shot = board["shots"][0]
@@ -261,7 +261,7 @@ def test_dialogue_prompting() -> None:
     shot["model"] = "ref2va"
     shot["startRef"] = None
     shot["referenceImages"] = [
-        {"kind": "upload", "path": "projects/x/refs/corridor.jpg"}
+        {"kind": "upload", "path": "x/refs/corridor.jpg"}
     ]
     shot["prompt"] = "A tracking shot follows Kira from behind."
     prompt = _resolved_prompt(shot, board, with_audio=True, model="ref2va")
@@ -293,26 +293,26 @@ def test_ref2va_reference_priority() -> None:
             "id": "c1",
             "name": "Kira",
             "description": "pilot",
-            "image": {"kind": "upload", "path": "projects/x/refs/character.jpg"},
-            "voice": {"kind": "upload", "path": "projects/x/refs/voice.wav"},
+            "image": {"kind": "upload", "path": "x/refs/character.jpg"},
+            "voice": {"kind": "upload", "path": "x/refs/voice.wav"},
         }
     ]
     board["styleRefs"] = [
-        {"kind": "upload", "path": "projects/x/refs/global-1.jpg"},
-        {"kind": "upload", "path": "projects/x/refs/global-2.jpg"},
+        {"kind": "upload", "path": "x/refs/global-1.jpg"},
+        {"kind": "upload", "path": "x/refs/global-2.jpg"},
     ]
     shot = board["shots"][0]
     shot["characterIds"] = ["c1"]
-    shot["startRef"] = {"kind": "upload", "path": "projects/x/refs/shot.jpg"}
-    shot["endRef"] = {"kind": "upload", "path": "projects/x/refs/shot-end.jpg"}
+    shot["startRef"] = {"kind": "upload", "path": "x/refs/shot.jpg"}
+    shot["endRef"] = {"kind": "upload", "path": "x/refs/shot-end.jpg"}
     shot["referenceImages"] = [
-        {"kind": "upload", "path": "projects/x/refs/cockpit-left.jpg"},
-        {"kind": "upload", "path": "projects/x/refs/cockpit-right.jpg"},
+        {"kind": "upload", "path": "x/refs/cockpit-left.jpg"},
+        {"kind": "upload", "path": "x/refs/cockpit-right.jpg"},
     ]
     paths = ShotPaths(
         workspace=Path("/tmp/ws"),
-        abs_dir=Path("/tmp/ws/projects/x/shots/01"),
-        rel_dir="projects/x/shots/01",
+        abs_dir=Path("/tmp/ws/x/shots/01"),
+        rel_dir="x/shots/01",
         data_dir=Path("/tmp/ws"),
     )
 
@@ -394,23 +394,23 @@ def test_rewrite_reference_context() -> None:
             "id": "c1",
             "name": "Kira",
             "description": "pilot",
-            "image": {"kind": "upload", "path": "projects/x/refs/kira-portrait.jpg"},
-            "voice": {"kind": "upload", "path": "projects/x/refs/kira.wav"},
+            "image": {"kind": "upload", "path": "x/refs/kira-portrait.jpg"},
+            "voice": {"kind": "upload", "path": "x/refs/kira.wav"},
         }
     ]
     shot = board["shots"][0]
     shot["characterIds"] = ["c1"]
     shot["startRef"] = {
         "kind": "upload",
-        "path": "projects/x/refs/bright-white-corridor.jpeg",
+        "path": "x/refs/bright-white-corridor.jpeg",
     }
     shot["endRef"] = {
         "kind": "upload",
-        "path": "projects/x/refs/final-frame.png",
+        "path": "x/refs/final-frame.png",
     }
     shot["referenceImages"] = [
-        {"kind": "upload", "path": "projects/x/refs/black-ribbed-doorway.webp"},
-        {"kind": "upload", "path": "projects/x/refs/not-a-picture.mp3"},
+        {"kind": "upload", "path": "x/refs/black-ribbed-doorway.webp"},
+        {"kind": "upload", "path": "x/refs/not-a-picture.mp3"},
     ]
     cast = [board["characters"][0]]
 
@@ -660,14 +660,14 @@ def test_load_heals_foreign_refs(tmp: Path) -> None:
     board["characters"] = [{
         "id": "c1", "name": "Hero",
         "image": {
-            "path": f"projects/{other_slug}/refs/hero.png",
-            "url": f"/media/projects/{other_slug}/refs/hero.png",
+            "path": f"{other_slug}/refs/hero.png",
+            "url": f"/media/{other_slug}/refs/hero.png",
             "label": "hero.png",
         },
     }]
     board["styleRefs"] = [{
-        "path": f"projects/{other_slug}/refs/hero.png",
-        "url": f"/media/projects/{other_slug}/refs/hero.png",
+        "path": f"{other_slug}/refs/hero.png",
+        "url": f"/media/{other_slug}/refs/hero.png",
         "label": "hero.png",
     }]
     store.save(slug, board)
@@ -676,9 +676,9 @@ def test_load_heals_foreign_refs(tmp: Path) -> None:
     char_image = reloaded["characters"][0]["image"]
     style = reloaded["styleRefs"][0]
     check("a foreign character portrait is rehomed on load",
-          char_image["path"].startswith(f"projects/{slug}/"), char_image["path"])
+          char_image["path"].startswith(f"{slug}/"), char_image["path"])
     check("a foreign style ref is rehomed on load",
-          style["path"].startswith(f"projects/{slug}/"), style["path"])
+          style["path"].startswith(f"{slug}/"), style["path"])
     check("the fix is saved, not just returned in memory",
           json.loads(store.board_path(slug).read_text())["styleRefs"][0]["path"]
           == style["path"])
@@ -700,8 +700,8 @@ def test_import_rehomes_media(tmp: Path) -> None:
     refs_dir.mkdir(parents=True, exist_ok=True)
     (refs_dir / "mood.png").write_bytes(b"x" * 32)
     src_board["styleRefs"] = [{
-        "path": f"projects/{src_slug}/refs/mood.png",
-        "url": f"/media/projects/{src_slug}/refs/mood.png",
+        "path": f"{src_slug}/refs/mood.png",
+        "url": f"/media/{src_slug}/refs/mood.png",
         "label": "mood.png",
     }]
     store.save(src_slug, src_board)
@@ -713,10 +713,10 @@ def test_import_rehomes_media(tmp: Path) -> None:
 
     style = (new_board.get("styleRefs") or [None])[0] or {}
     check("the imported style ref points into the new project",
-          style.get("path", "").startswith(f"projects/{new_slug}/"),
+          style.get("path", "").startswith(f"{new_slug}/"),
           style.get("path"))
     check("the style ref image was copied into the new project",
-          (tmp / "projects" / new_slug / "refs" / "mood.png").is_file())
+          (tmp / new_slug / "refs" / "mood.png").is_file())
     check("the source project's own file is untouched",
           (refs_dir / "mood.png").is_file())
 
@@ -726,8 +726,8 @@ def test_import_rehomes_media(tmp: Path) -> None:
     reloaded = store.load(new_slug)
     style = (reloaded.get("styleRefs") or [None])[0] or {}
     check("the copy's style ref survives the source project being deleted",
-          (tmp / "projects" / new_slug / "refs" / "mood.png").is_file()
-          and style.get("path", "").startswith(f"projects/{new_slug}/"),
+          (tmp / new_slug / "refs" / "mood.png").is_file()
+          and style.get("path", "").startswith(f"{new_slug}/"),
           style.get("path"))
 
 
