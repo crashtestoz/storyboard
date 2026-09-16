@@ -1648,6 +1648,34 @@ def _estimate_seconds(w: int, h: int, frames: int, steps: int,
     return fixed + denoise
 
 
+def estimate_render_seconds(shot: dict, project: dict) -> float | None:
+    """Predicted wall-clock seconds to render *shot*, for a human (or the
+    Storyboard AD assistant) asking "how long will this take" before
+    spending the time. None for a shot that renders as a still
+    (``krea2-still``) or whose reference setup is currently invalid, since
+    the frame-based formula below does not apply to either.
+
+    Built from the same pieces the render path itself uses — model
+    selection, draft geometry — and calls the same :func:`_estimate_seconds`
+    the runtime-plausibility check validates a finished run against, so a
+    prediction given before rendering and that check's baseline never
+    quietly disagree.
+    """
+    try:
+        model, _ = _effective_video_model(shot, project)
+    except ValueError:
+        return None
+    if model == "krea2-still":
+        return None
+    defaults = project.get("defaults") or {}
+    w, h = _wh(shot.get("resolution") or defaults.get("resolution") or "960x544")
+    frames = shot.get("frames") or defaults.get("frames") or 124
+    steps = shot.get("steps") or defaults.get("steps") or 8
+    if defaults.get("draft"):
+        w, h, steps = _draft_geometry(w, h, steps)
+    return _estimate_seconds(w, h, frames, steps, model)
+
+
 def _overall(phase_pct: dict[str, float]) -> float:
     """Blend per-phase percentages into one overall number.
 

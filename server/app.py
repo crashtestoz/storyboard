@@ -306,10 +306,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/info":
             ok, msg = ctx.backend.health()
+            from .hardware import describe_hardware
             return self._send_json(
                 {
                     "backend": {"id": ctx.backend.id, "label": ctx.backend.label,
                                 "healthy": ok, "message": msg},
+                    "hardware": describe_hardware(),
                     "workspace": str(ctx.workspace),
                     "dataDir": str(ctx.data_dir),
                     "dataDirSource": ctx.data_dir_source,

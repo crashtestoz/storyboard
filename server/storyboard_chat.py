@@ -8,7 +8,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .backends.vpipe_backend import estimate_render_seconds
+from .hardware import describe_hardware
 from .llm import LLMService
+from .store import stale_reason
 
 
 def _load_mcp_tools() -> list[dict[str, str]]:
@@ -40,9 +43,24 @@ def _mcp_reference() -> str:
         return ""
     lines = [f"- {t['name']}: {t['description']}" for t in tools]
     return (
-        "MCP TOOLS (mcp/server.py — an external MCP client such as Claude "
-        "Desktop or Claude Code can call these directly; you cannot):\n"
+        "MCP TOOLS (background reference only — mcp/server.py's own catalogue, "
+        "for an external MCP client to call directly. Never mention these "
+        "names, \"MCP\", or an external app to the user: where one of these "
+        "describes something you can also do, use your matching action above "
+        "instead; it explains mechanics like why Generate is disabled on a "
+        "native-dialogue shot, or what a render actually does behind the "
+        "Render button):\n"
         + "\n".join(lines)
+    )
+
+
+def _hardware_reference() -> str:
+    hw = describe_hardware()
+    return (
+        "HARDWARE THIS SERVER RUNS ON: " + hw["summary"] + ". Every shot's "
+        "estimatedRenderSeconds in context was computed for this machine; "
+        "state that when giving a time, and that it is an estimate, not a "
+        "measurement — actual runtime still varies with what else is running."
     )
 
 
@@ -56,7 +74,9 @@ def _mcp_reference() -> str:
 # that reuses a cached prompt prefix (llama.cpp, vLLM, and similar) pays for
 # it once per conversation rather than once per message.
 STORYBOARD_KNOWLEDGE = """\
-HOW STORYBOARD WORKS (reference — you cannot trigger any of this yourself; see Rules):
+HOW STORYBOARD WORKS (reference — rendering and dialogue synthesis you can \
+trigger yourself via your own actions; the rest is the app's own mechanics, \
+useful for explaining what is happening):
 
 Board = sceneDescription (project-wide look, auto-prepended to every shot — \
 never repeat it in a shot prompt) + soundscape (project background bed; can \
@@ -74,28 +94,31 @@ and shot refs (limits: 9 images, 3 audio, 12 total).
 
 Dialogue has two independent mechanisms, chosen per shot via dialogueSource:
 - "recording" (default): a separate TTS take, cloned from the speaking \
-character's reference voice clip. Generate / sbv_dub_shot can synthesise it \
-any time, before or after rendering; dubMode "mix" layers it over the clip's \
-own audio, "replace" replaces it. This call is also the fit check: its \
-response warns if the spoken line runs longer than the shot's frames (at the \
-fixed 24fps) or, once rendered, the actual clip.
+character's reference voice clip. Your dub_shot action synthesises it any \
+time, before or after rendering, the same as Generate on the Dialogue tab \
+does; dubMode "mix" layers it over the clip's own audio, "replace" replaces \
+it. It is also the fit check: the result warns if the spoken line runs \
+longer than the shot's frames (at the fixed 24fps) or, once rendered, the \
+actual clip.
 - "native": only valid on a Ref2VA shot whose speaker has a reference voice \
 clip. H3 generates that shot's speech itself, lip-synced, during rendering, \
 from the voice already sent in as an audio reference. There is no separate \
-take: Generate is disabled in the UI and sbv_dub_shot refuses over MCP. The \
-only way to get this shot's audio is to render it (sbv_start_render / the \
-Render button).
+take: Generate is disabled in the UI and dub_shot refuses on this shot for \
+you too. The only way to get this shot's audio is to render it — propose \
+start_render.
 dialogueStyle is delivery direction ("tired", "quiet", "breathy") sent to \
 the engine — never spoken aloud itself.
 
 Render rate is fixed at 24fps everywhere: a shot's length in seconds is \
 frames / 24.
 
-Render/assemble: sbv_start_render queues shots and renders one at a time; \
-sbv_status polls progress; sbv_stop_render cancels. A shot goes "stale" once \
-its saved fields diverge from what its last render used. sbv_assemble joins \
-rendered clips (the dubbed version wins while current) into final.mp4, in \
-shot order.
+Render/assemble: your start_render action queues shots and renders one at a \
+time; live progress shows in the app's own Render panel, which you cannot see \
+or poll — tell the user to look there, or wait for your next message once \
+they say it finished. stop_render cancels a run in progress. A shot goes \
+"stale" once its saved fields diverge from what its last render used — that \
+is the shot's needsRender flag in context. assemble joins rendered clips \
+(the dubbed version wins while current) into final.mp4, in shot order.
 
 Draft mode renders small and fast (capped resolution, 4 steps, no generated \
 audio) for blocking iteration before a full-quality pass.
@@ -106,11 +129,14 @@ You are the Storyboard AD, the user's assistant director. Help the user review, 
 the storyboard currently open in the app. Be concise, concrete, and candid
 about continuity, camera direction, pacing, visual consistency, and sound.
 
-You have the authoring portion of the Storyboard MCP surface available as
-reviewable proposals: set project scene/sound fields, add or update cast, and
-add or update shots. The app, not you, assigns IDs and saves changes. Never
-claim a change is already applied. If the user asks for an edit, include it as
-an action and say that it is ready to apply.
+You can propose two kinds of action, both reviewable, neither ever silent:
+edits to the board's own fields (scene/sound, cast, shots), and operations —
+rendering, dialogue synthesis, stopping a render, assembling the cut. The app,
+not you, assigns IDs, saves edits, and runs operations; nothing happens until
+the user clicks Apply on your proposal. Never claim an edit is already saved
+or an operation already ran. If the user asks for either, include it as an
+action and say what it will do once applied — not how they could do it
+themselves.
 
 Return ONLY one JSON object with this shape:
 {"message":"your response","actions":[]}
@@ -121,6 +147,10 @@ Allowed actions:
 {"tool":"update_character","characterId":"existing id","fields":{"name":"...","description":"..."}}
 {"tool":"add_shot","shot":{"title":"...","prompt":"...","soundNote":"...","dialogue":"...","dialogueStyle":"...","characterIds":["existing id"],"frames":124,"steps":8,"seed":0}}
 {"tool":"update_shot","shotId":"existing id","fields":{"title":"...","prompt":"...","soundNote":"...","dialogue":"...","dialogueStyle":"...","characterIds":["existing id"],"frames":124,"steps":8,"seed":0}}
+{"tool":"start_render","shotIds":["existing id", ...]}
+{"tool":"dub_shot","shotId":"existing id"}
+{"tool":"stop_render"}
+{"tool":"assemble"}
 
 Rules:
 - Use only the allowed tools and fields. Never invent IDs.
@@ -131,18 +161,37 @@ Rules:
 - For a request to build a board, propose a coherent sequence of add_shot
   actions. Keep a single response to 24 actions or fewer.
 - For discussion, review, or questions, return an empty actions array.
-- You cannot render video, synthesise or dub audio, start/stop a render, or
-  trigger any other side-effecting action — only the field edits above. If
-  asked to do one, say so and name the actual way: the matching button here
-  in the app (Render, or Generate on that shot's Dialogue tab), or the
-  matching tool in the MCP TOOLS list below for an MCP client (Claude
-  Desktop, Claude Code, etc.) to call. Never say only that you can't — use
-  the HOW STORYBOARD WORKS and MCP TOOLS reference below to name the real
-  path, including any precondition it has (e.g. native dialogue has none).
+- start_render, dub_shot, stop_render and assemble are real actions you can
+  take, not descriptions of what someone else could do. Asked to render,
+  generate/dub audio, stop a render, or assemble the cut, propose the
+  matching action directly — omit start_render's shotIds to mean every shot
+  that still needs it (see needsRender in context).
+- Before proposing dub_shot, check that shot's dialogueSource: it only works
+  when "recording" (or unset). For "native" dialogue, propose start_render
+  instead and say why — that shot's audio only comes from rendering it.
+- Skip proposing start_render for a shot whose needsRender is already false,
+  unless the user explicitly wants a re-render — say it is already rendered
+  and current instead.
+- To answer "how long will this take", read that shot's estimatedRenderSeconds
+  from context and give a rounded, plain-language figure, noting it is an
+  estimate for this machine (see HARDWARE below), not a measurement. Never
+  invent your own number, and never claim to watch a render's progress
+  yourself — say the app's Render panel shows that live.
+- Never mention MCP, an "MCP client", tool names like sbv_*, or an external
+  app (Claude Desktop, Claude Code) to the user — those are for other
+  software, not something to relay in conversation. The MCP TOOLS list below
+  is background reference for you alone. For a request nothing above covers
+  (renaming or deleting the board, server settings, uploading a reference
+  file, transcribing a clip, describing a character from a portrait), say
+  plainly you can't do it from chat and, if the app has a control for it,
+  name that control in plain terms instead.
 - Do not wrap the JSON in markdown fences or add text outside it.
 """
 
-CHAT_SYSTEM_PROMPT = CHAT_SYSTEM_PROMPT + "\n" + STORYBOARD_KNOWLEDGE + "\n" + _mcp_reference()
+CHAT_SYSTEM_PROMPT = (
+    CHAT_SYSTEM_PROMPT + "\n" + STORYBOARD_KNOWLEDGE + "\n"
+    + _hardware_reference() + "\n\n" + _mcp_reference()
+)
 
 BOARD_FIELDS = {"sceneDescription", "soundscape"}
 CHARACTER_FIELDS = {"name", "description"}
@@ -155,7 +204,11 @@ SHOT_FIELDS = {
 def compact_board_context(
     board: dict[str, Any], selected_id: str | None = None
 ) -> dict[str, Any]:
-    """Keep authoring data; omit render outputs, logs, URLs, and status."""
+    """Keep authoring data, plus just enough render state to act on: whether
+    a shot still needs a render and, if so, roughly how long that would take
+    on this machine. Full outputs, logs and URLs are still omitted — those
+    are for the app's own panels, not for deciding what to propose.
+    """
     defaults = board.get("defaults") or {}
     characters = [
         {
@@ -167,12 +220,16 @@ def compact_board_context(
     ]
     shots = []
     for index, shot in enumerate(board.get("shots") or [], 1):
+        needs_render = not shot.get("outputs") or bool(stale_reason(shot, board))
+        estimated_seconds = estimate_render_seconds(shot, board) if needs_render else None
         shots.append({
             "number": index, "id": shot.get("id"),
             "title": shot.get("title") or "", "prompt": shot.get("prompt") or "",
             "soundNote": shot.get("soundNote") or "",
             "dialogue": shot.get("dialogue") or "",
             "dialogueStyle": shot.get("dialogueStyle") or "",
+            "dialogueSource": shot.get("dialogueSource") or "recording",
+            "hasDialogueTake": bool(shot.get("dialogueAudioUrl")),
             "characterIds": shot.get("characterIds") or [],
             "frames": shot.get("frames", defaults.get("frames", 124)),
             "steps": shot.get("steps", defaults.get("steps", 8)),
@@ -180,6 +237,10 @@ def compact_board_context(
             "hasStartFrame": bool(shot.get("startRef")),
             "hasEndFrame": bool(shot.get("endRef")),
             "referenceImageCount": len(shot.get("referenceImages") or []),
+            "needsRender": needs_render,
+            "estimatedRenderSeconds": (
+                round(estimated_seconds) if estimated_seconds is not None else None
+            ),
         })
     return {
         "name": board.get("name") or "Untitled storyboard",
@@ -248,6 +309,23 @@ def validate_actions(actions: Any, board: dict[str, Any]) -> list[dict[str, Any]
                 fields["characterIds"] = [v for v in fields["characterIds"] if v in character_ids]
             if fields:
                 clean.append({"tool": tool, "shotId": raw["shotId"], "fields": fields})
+        elif tool == "start_render":
+            requested = raw.get("shotIds")
+            action: dict[str, Any] = {"tool": tool}
+            if isinstance(requested, list):
+                # Omitting the key means "every shot that needs it" (the same
+                # rule the render endpoint itself uses for a missing list) —
+                # kept that way rather than sent as an empty list, so a model
+                # that filtered every requested id out here does not
+                # accidentally render nothing instead of everything.
+                wanted = [v for v in requested if isinstance(v, str) and v in shot_ids]
+                if wanted:
+                    action["shotIds"] = wanted
+            clean.append(action)
+        elif tool == "dub_shot" and raw.get("shotId") in shot_ids:
+            clean.append({"tool": tool, "shotId": raw["shotId"]})
+        elif tool in ("stop_render", "assemble"):
+            clean.append({"tool": tool})
     return clean
 
 
