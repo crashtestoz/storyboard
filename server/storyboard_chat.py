@@ -12,6 +12,8 @@ from .backends.vpipe_backend import estimate_render_seconds
 from .hardware import describe_hardware
 from .llm import LLMService
 from .store import stale_reason
+from .web_search import format_results as format_search_results
+from .web_search import search as web_search
 
 
 def _load_mcp_tools() -> list[dict[str, str]]:
@@ -193,6 +195,21 @@ CHAT_SYSTEM_PROMPT = (
     + _hardware_reference() + "\n\n" + _mcp_reference()
 )
 
+# Appended only on a request where Settings has a search URL configured
+# (blank by default — see server/web_search.py). Kept out of the base prompt
+# above so a deployment with no search engine linked never even offers the
+# capability, rather than offering it and always failing.
+SEARCH_CAPABILITY_PROMPT = """
+You may also research the web. When answering needs something outside this \
+board and your own knowledge might be stale, incomplete, or wrong — current \
+events, prices, specs, or other real-world reference facts — add one more \
+key, named search, to that same JSON object, holding a concise query string. \
+You will be given the results and one more turn to give the final answer \
+using them; say plainly if they didn't help rather than guessing. Do not set \
+search a second time in the same exchange. Leave it empty or omit it for \
+anything answerable from the board and your own knowledge.
+"""
+
 BOARD_FIELDS = {"sceneDescription", "soundscape"}
 CHARACTER_FIELDS = {"name", "description"}
 SHOT_FIELDS = {
@@ -329,24 +346,48 @@ def validate_actions(actions: Any, board: dict[str, Any]) -> list[dict[str, Any]
     return clean
 
 
+def _first_json_object(text: str) -> Any:
+    """Parse just the first JSON value in *text*, ignoring anything after it.
+
+    A small local model occasionally repeats its whole reply two or three
+    times back to back instead of stopping — a generation/repetition
+    failure, not a formatting one. ``json.loads`` on that concatenation
+    raises, and used to fall all the way back to showing the user the raw,
+    repeated text verbatim. Decoding from the first ``{`` and stopping at
+    the matching ``}`` recovers the (valid, singular) first copy instead.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        doc, _end = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return None
+    return doc
+
+
 def _parse_reply(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if fenced:
-        text = fenced.group(1)
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError:
-        return {"message": text or "The model returned an empty response.", "actions": []}
+        text = fenced.group(1).strip()
+    doc = _first_json_object(text)
+    if doc is None:
+        return {"message": text or "The model returned an empty response.", "actions": [], "search": ""}
     if not isinstance(doc, dict):
-        return {"message": text, "actions": []}
-    return {"message": str(doc.get("message") or "").strip(), "actions": doc.get("actions")}
+        return {"message": text, "actions": [], "search": ""}
+    return {
+        "message": str(doc.get("message") or "").strip(),
+        "actions": doc.get("actions"),
+        "search": str(doc.get("search") or "").strip(),
+    }
 
 
 def chat(
     service: LLMService, board: dict[str, Any], message: str,
     history: list[dict[str, Any]] | None = None,
     selected_id: str | None = None,
+    search_url: str = "",
 ) -> dict[str, Any]:
     message = (message or "").strip()
     if not message:
@@ -367,7 +408,19 @@ def chat(
         + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
         + "\n\nUSER:\n" + message
     )
-    parsed = _parse_reply(service.complete(CHAT_SYSTEM_PROMPT, user, timeout=180.0))
+    search_url = (search_url or "").strip()
+    system = CHAT_SYSTEM_PROMPT + ("\n" + SEARCH_CAPABILITY_PROMPT if search_url else "")
+    parsed = _parse_reply(service.complete(system, user, timeout=180.0))
+    query = parsed.get("search") if search_url else ""
+    if query:
+        results = web_search(search_url, query)
+        followup = (
+            user
+            + f"\n\nSEARCH RESULTS for \"{query}\":\n" + format_search_results(results)
+            + "\n\nAnswer the user now using these results if they help; say "
+              "so plainly if they don't. Do not request another search."
+        )
+        parsed = _parse_reply(service.complete(system, followup, timeout=180.0))
     return {
         "message": parsed["message"] or "I prepared the requested storyboard changes.",
         "actions": validate_actions(parsed.get("actions"), board),
