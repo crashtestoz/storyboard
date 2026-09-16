@@ -52,6 +52,11 @@ const state = {
   followRender: true,
   // A render may be preceded by several sequential speech-engine calls.
   dialoguePreparing: false,
+  // Browser-session conversations, separated by board. Proposed edits remain
+  // attached to a turn until the user explicitly applies them.
+  chats: {},
+  chatBusy: false,
+  bladeOpen: false,
 };
 
 /* Mirrors RERUNNABLE in server/orchestrator.py: the statuses a whole-board
@@ -568,11 +573,339 @@ function projectBatchOutcome(status) {
 }
 
 /* ==========================================================================
+   Storyboard AD blade
+   ========================================================================== */
+
+// Kept per browser, not on the board itself: this is a scratchpad for
+// talking to Storyboard AD, not authored storyboard content, so it has no
+// business in the JSON an MCP client or a collaborator reads. Persisting it
+// is purely so a page refresh (or an accidental tab close) doesn't throw an
+// in-progress conversation away.
+const CHAT_STORAGE_PREFIX = "storyboardToVideo.chat.";
+const CHAT_HISTORY_LIMIT = 60;
+
+function chatStorageKey(slug) {
+  return CHAT_STORAGE_PREFIX + slug;
+}
+
+function loadPersistedChat(slug) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(chatStorageKey(slug)) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistChat(slug) {
+  if (!slug) return;
+  try {
+    // A "thinking…" bubble mid-request is not worth restoring as itself;
+    // the reply (or the "Chat failed" turn) that replaces it is what matters.
+    const turns = (state.chats[slug] || []).filter((t) => !t.pending).slice(-CHAT_HISTORY_LIMIT);
+    if (turns.length) localStorage.setItem(chatStorageKey(slug), JSON.stringify(turns));
+    else localStorage.removeItem(chatStorageKey(slug));
+  } catch {
+    // Private browsing, storage disabled, or quota exceeded — the
+    // conversation just won't survive a refresh this time.
+  }
+}
+
+function clearPersistedChat(slug) {
+  if (!slug) return;
+  try { localStorage.removeItem(chatStorageKey(slug)); } catch { /* optional storage */ }
+}
+
+function chatTurns() {
+  if (!state.slug) return [];
+  if (!state.chats[state.slug]) state.chats[state.slug] = loadPersistedChat(state.slug);
+  return state.chats[state.slug];
+}
+
+function positionAssistantBlade() {
+  const strip = document.querySelector(".strip-wrap");
+  if (!strip) return;
+  const bottom = Math.max(0, Math.min(window.innerHeight - 180, strip.getBoundingClientRect().bottom));
+  document.documentElement.style.setProperty("--blade-top", `${Math.round(bottom)}px`);
+}
+
+function setBladeOpen(open) {
+  state.bladeOpen = !!open;
+  const blade = $("#assistantBlade");
+  blade.classList.toggle("open", state.bladeOpen);
+  blade.style.transform = "";
+  $("#bladeHandle").setAttribute("aria-expanded", String(state.bladeOpen));
+  $("#bladeHandle").title = state.bladeOpen
+    ? "Close Storyboard AD" : "Open Storyboard AD";
+  if (state.bladeOpen) {
+    positionAssistantBlade();
+    renderAssistantChat();
+    setTimeout(() => $("#bladeInput").focus(), 190);
+  }
+}
+
+function paintBladeContext() {
+  const box = $("#bladeContext");
+  if (!box || !state.board) return;
+  const raw = selectedShot();
+  box.textContent = `${state.board.name} · ${shots().length} shot${shots().length === 1 ? "" : "s"}` +
+    (raw ? ` · focused on ${raw.title || "selected shot"}` : " · whole board");
+  const svc = currentLLM();
+  $("#bladeModel").textContent = svc
+    ? `${svc.label}${svc.model ? ` · ${svc.model}` : ""}`
+    : "No prompt rewriting model configured";
+}
+
+function proposalSummary(action) {
+  if (action.tool === "set_board_fields") return "Update project scene or sound";
+  if (action.tool === "add_character") return `Add cast member “${action.character.name}”`;
+  if (action.tool === "update_character") {
+    const c = (state.board.characters || []).find((x) => x.id === action.characterId);
+    return `Update cast member “${c ? c.name : action.characterId}”`;
+  }
+  if (action.tool === "add_shot") return `Add shot “${action.shot.title || "Untitled shot"}”`;
+  if (action.tool === "update_shot") {
+    const s = shotById(action.shotId);
+    return `Update shot “${s ? s.title : action.shotId}”`;
+  }
+  return action.tool;
+}
+
+function renderAssistantChat() {
+  const host = $("#bladeMessages");
+  if (!host) return;
+  host.innerHTML = "";
+  const turns = chatTurns();
+  if (!turns.length) {
+    const empty = el("div", "chat-empty");
+    empty.append(
+      el("strong", null, "Your board is already in context."),
+      el("span", null, "Ask for a continuity review, explore a change, or describe a sequence to build. Edits arrive as proposals you can inspect before applying.")
+    );
+    host.appendChild(empty);
+  }
+  turns.forEach((turn) => {
+    host.appendChild(el("div", `chat-message ${turn.role}${turn.pending ? " pending" : ""}${turn.error ? " error" : ""}`, turn.content));
+    if (turn.actions && turn.actions.length && !turn.dismissed) {
+      const proposal = el("div", `chat-proposal${turn.applied ? " applied" : ""}`);
+      proposal.appendChild(el("div", "chat-proposal-head",
+        turn.applied ? `${turn.actions.length} change${turn.actions.length === 1 ? "" : "s"} applied`
+          : `${turn.actions.length} proposed change${turn.actions.length === 1 ? "" : "s"}`));
+      const list = el("div", "chat-proposal-list");
+      turn.actions.forEach((action) => list.appendChild(el("div", null, `• ${proposalSummary(action)}`)));
+      proposal.appendChild(list);
+      if (!turn.applied) {
+        const buttons = el("div", "chat-proposal-actions");
+        const apply = el("button", "btn btn-sm btn-primary", "Apply changes");
+        apply.addEventListener("click", async () => {
+          apply.disabled = true;
+          try {
+            applyAssistantActions(turn.actions);
+            turn.applied = true;
+            persistChat(state.slug);
+            await saveNow();
+            render();
+            renderAssistantChat();
+            toast("Storyboard changes applied.");
+          } catch (err) {
+            apply.disabled = false;
+            toast(`Could not apply changes: ${err.message}`, "error");
+          }
+        });
+        const discard = el("button", "btn btn-sm btn-ghost", "Discard");
+        discard.addEventListener("click", () => {
+          turn.dismissed = true;
+          persistChat(state.slug);
+          renderAssistantChat();
+        });
+        buttons.append(apply, discard);
+        proposal.appendChild(buttons);
+      }
+      host.appendChild(proposal);
+    }
+  });
+  host.scrollTop = host.scrollHeight;
+  paintBladeContext();
+}
+
+function assistantId(prefix) {
+  const tail = globalThis.crypto && crypto.randomUUID
+    ? crypto.randomUUID().replaceAll("-", "").slice(0, 8)
+    : Math.random().toString(16).slice(2, 10);
+  return prefix + tail;
+}
+
+function assistantShot(fields) {
+  const d = state.board.defaults || {};
+  return Object.assign({
+    id: assistantId("s"), title: "New shot", prompt: "", soundNote: "",
+    characterIds: [], dialogue: "", dialogueSource: "recording", dialogueStyle: "",
+    dialogueVoice: "", speakerId: "", dialogueAudioUrl: null, dubUrl: null,
+    dubMode: "mix", continuityRef: null, startRef: null, endRef: null,
+    referenceImages: [], model: STORYBOARD_MODEL,
+    resolution: d.resolution || "960x544", frames: d.frames || 124,
+    steps: d.steps || 8, seed: 0, status: "draft", reason: "", progress: 0,
+    runtimeSeconds: null, outputs: [], validation: null, thumb: null, logUrl: null,
+    renderedAs: null, renderFingerprint: null, dialogueSpokenText: "",
+    dialogueSpokenStyle: "",
+  }, fields || {});
+}
+
+function applyAssistantActions(actions) {
+  let lastAdded = null;
+  actions.forEach((action) => {
+    if (action.tool === "set_board_fields") Object.assign(state.board, action.fields);
+    if (action.tool === "add_character") {
+      state.board.characters.push(Object.assign({
+        id: assistantId("c"), name: "", description: "", image: null,
+        voice: null, voiceText: "",
+      }, action.character));
+    }
+    if (action.tool === "update_character") {
+      const target = (state.board.characters || []).find((c) => c.id === action.characterId);
+      if (target) Object.assign(target, action.fields);
+    }
+    if (action.tool === "add_shot") {
+      lastAdded = assistantShot(action.shot);
+      state.board.shots.push(lastAdded);
+    }
+    if (action.tool === "update_shot") {
+      const target = shotById(action.shotId);
+      if (target) Object.assign(target, action.fields);
+    }
+  });
+  if (!state.selectedId && lastAdded) state.selectedId = lastAdded.id;
+  markDirty();
+}
+
+const AD_THINKING_LINES = [
+  "Flipping through the storyboard…",
+  "Consulting the shot list…",
+  "Reviewing the dailies…",
+  "Checking continuity…",
+  "Blocking the next shot…",
+  "Calling action…",
+  "Scouting the board…",
+  "Marking up the script…",
+  "Framing this up…",
+  "Storyboarding some thoughts…",
+  "Taking direction…",
+  "Rolling camera…",
+  "Slating this take…",
+  "Panning for ideas…",
+];
+
+function randomADThinkingLine() {
+  return AD_THINKING_LINES[Math.floor(Math.random() * AD_THINKING_LINES.length)];
+}
+
+async function sendAssistantMessage() {
+  if (state.chatBusy || !state.board) return;
+  const input = $("#bladeInput");
+  const content = input.value.trim();
+  if (!content) return;
+  const svc = currentLLM();
+  if (!svc || svc.id === "none" || !svc.healthy) {
+    toast(svc && svc.message ? svc.message : "Choose a healthy Prompt rewriting model in Settings.", "error");
+    return;
+  }
+  const turns = chatTurns();
+  const history = turns.filter((t) => !t.pending && !t.error)
+    .map((t) => ({role: t.role, content: t.content}));
+  turns.push({role: "user", content});
+  const pending = {role: "assistant", content: randomADThinkingLine(), pending: true};
+  turns.push(pending);
+  persistChat(state.slug);
+  input.value = "";
+  state.chatBusy = true;
+  $("#bladeSend").disabled = true;
+  renderAssistantChat();
+  try {
+    await saveNow();
+    const result = await API.chat(state.slug, content, history, state.selectedId, svc.id);
+    Object.assign(pending, {content: result.message, actions: result.actions || [], pending: false});
+  } catch (err) {
+    Object.assign(pending, {content: `Chat failed: ${err.message}`, pending: false, error: true});
+  } finally {
+    state.chatBusy = false;
+    $("#bladeSend").disabled = false;
+    persistChat(state.slug);
+    renderAssistantChat();
+    input.focus();
+  }
+}
+
+function wireAssistantBlade() {
+  const blade = $("#assistantBlade");
+  const handle = $("#bladeHandle");
+  let drag = null;
+  let suppressClick = false;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const width = blade.getBoundingClientRect().width;
+    drag = {startX: event.clientX, startOffset: state.bladeOpen ? 0 : width, width, moved: false};
+    blade.classList.add("dragging");
+    handle.setPointerCapture(event.pointerId);
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!drag) return;
+    const offset = Math.max(0, Math.min(drag.width, drag.startOffset + event.clientX - drag.startX));
+    drag.offset = offset;
+    drag.moved ||= Math.abs(event.clientX - drag.startX) > 4;
+    blade.style.transform = `translateX(${offset}px)`;
+  });
+  handle.addEventListener("pointerup", (event) => {
+    if (!drag) return;
+    handle.releasePointerCapture(event.pointerId);
+    suppressClick = true;
+    const open = drag.moved ? (drag.offset == null ? drag.startOffset : drag.offset) < drag.width / 2 : !state.bladeOpen;
+    drag = null;
+    blade.classList.remove("dragging");
+    setBladeOpen(open);
+  });
+  handle.addEventListener("click", (event) => {
+    if (suppressClick && event.detail) {
+      suppressClick = false;
+      event.preventDefault();
+      return;
+    }
+    setBladeOpen(!state.bladeOpen);
+  });
+  $("#bladeClose").addEventListener("click", () => setBladeOpen(false));
+  $("#bladeNewChat").addEventListener("click", () => {
+    if (state.slug) {
+      state.chats[state.slug] = [];
+      clearPersistedChat(state.slug);
+    }
+    renderAssistantChat();
+  });
+  $("#bladeComposer").addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendAssistantMessage();
+  });
+  $("#bladeInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendAssistantMessage();
+    }
+  });
+  window.addEventListener("resize", positionAssistantBlade);
+  window.addEventListener("scroll", positionAssistantBlade, {passive: true});
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.bladeOpen) setBladeOpen(false);
+  });
+  positionAssistantBlade();
+  renderAssistantChat();
+}
+
+/* ==========================================================================
    Boot
    ========================================================================== */
 
 async function boot() {
   wireChrome();
+  wireAssistantBlade();
 
   try {
     state.info = await API.info();
@@ -668,6 +1001,7 @@ function setBoard(slug, board, stale) {
   state.dirty = false;
   $("#saveState").textContent = "saved";
   render();
+  if (state.bladeOpen) renderAssistantChat();
   refreshStatus();
 }
 
@@ -1318,6 +1652,7 @@ async function deleteProject() {
     state.board = null;
     state.dirty = false;
     try { localStorage.removeItem(LAST_OPENED_KEY); } catch { /* optional storage */ }
+    clearPersistedChat(slug);
     window.location.reload();
   } catch (err) {
     state.deletingBoard = false;
@@ -1339,9 +1674,19 @@ async function renameProject() {
     // Any unsaved edits must land first: the rename reloads the board from
     // disk, and would otherwise discard them.
     await saveNow();
+    const oldSlug = state.slug;
     const r = await API.renameBoard(state.slug, name);
     state.slug = r.slug;
     state.board = r.board;
+    // Renaming moves the project's folder, and the chat's storage key
+    // follows it — otherwise a refresh would find no history under the new
+    // slug and stale history sitting orphaned under the old one.
+    if (r.slug !== oldSlug) {
+      state.chats[r.slug] = state.chats[oldSlug] || loadPersistedChat(oldSlug);
+      delete state.chats[oldSlug];
+      persistChat(r.slug);
+      clearPersistedChat(oldSlug);
+    }
     state.boards = (await API.listBoards()).boards;
     state.sig = null;
     render();
@@ -1648,6 +1993,8 @@ function render() {
 
   paintMeta();
   paintRenderHint();
+  paintBladeContext();
+  positionAssistantBlade();
   focusRestore(snap);
 }
 
@@ -4613,8 +4960,8 @@ function proposalBox(r, onUse, slot) {
 
 function currentLLM() {
   const want = (state.board && state.board.defaults && state.board.defaults.llm) ||
-    (state.info.llm && state.info.llm.default);
-  const all = (state.info.llm && state.info.llm.services) || [];
+    (state.info && state.info.llm && state.info.llm.default);
+  const all = (state.info && state.info.llm && state.info.llm.services) || [];
   return all.find((s) => s.id === want) || all.find((s) => s.id !== "none") || null;
 }
 

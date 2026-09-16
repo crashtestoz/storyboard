@@ -137,6 +137,37 @@
       </div>
     </main>
 
+    <!-- Hidden by default; its handle remains visible at the right edge. -->
+    <aside class="assistant-blade" id="assistantBlade" aria-label="Storyboard AD">
+      <button class="blade-handle" id="bladeHandle" type="button"
+        aria-expanded="false" aria-controls="bladePanel" title="Open Storyboard AD">
+        <span class="blade-handle-mark" aria-hidden="true">‹</span>
+        <span class="blade-handle-label">Storyboard AD</span>
+      </button>
+      <div class="blade-panel" id="bladePanel">
+        <header class="blade-head">
+          <div>
+            <div class="blade-title">Storyboard AD</div>
+            <div class="blade-model" id="bladeModel">Prompt rewriting model</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="bladeNewChat" type="button"
+            title="Clear this board's chat">New chat</button>
+          <button class="btn btn-ghost btn-sm blade-close" id="bladeClose" type="button"
+            aria-label="Close Storyboard AD">×</button>
+        </header>
+        <div class="blade-context" id="bladeContext"></div>
+        <div class="blade-messages" id="bladeMessages" aria-live="polite"></div>
+        <form class="blade-composer" id="bladeComposer">
+          <textarea id="bladeInput" rows="3"
+            placeholder="Review the board, revise a shot, or build a sequence…"></textarea>
+          <div class="blade-compose-row">
+            <span class="blade-compose-hint">Enter to send · Shift+Enter for a new line</span>
+            <button class="btn btn-primary" id="bladeSend" type="submit">Send</button>
+          </div>
+        </form>
+      </div>
+    </aside>
+
   </div>
 
   <div id="picker" class="modal" hidden>

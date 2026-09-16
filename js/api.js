@@ -62,6 +62,9 @@ const API = {
   rewrite: (slug, { shotId, field, text, service } = {}) =>
     req("POST", "/api/rewrite", { slug, shotId, field, text, service }),
 
+  chat: (slug, message, history, selectedShotId, service) =>
+    req("POST", "/api/chat", { slug, message, history, selectedShotId, service }),
+
   describeCharacter: (image, voice, name, description, service) =>
     req("POST", "/api/describe-character", {
       image, voice, name, description, service,

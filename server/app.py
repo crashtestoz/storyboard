@@ -15,6 +15,7 @@ Routes
 ``POST /api/boards/<slug>/rename``   rename ``{name}`` — moves the folder too
 ``POST /api/rewrite``          restyle a shot prompt, the scene description, or the
                                 background sound with a local language model
+``POST /api/chat``             discuss the board and propose reviewed edits
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
@@ -50,6 +51,7 @@ from .backends.base import Backend
 from .orchestrator import Orchestrator
 from .llm import LLMService, describe_character, describe_still_phases, rewrite_prompt
 from .llm import load_services as load_llm_services
+from .storyboard_chat import chat as storyboard_chat
 from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts import load_engines as load_tts_engines
 from .tts.base import TTSEngine
@@ -588,6 +590,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(
                 {"text": proposal, "service": service.label, "model": service.model}
             )
+
+        if path == "/api/chat":
+            payload = self._read_json() or {}
+            slug = payload.get("slug")
+            if not slug:
+                raise ValueError("slug is required")
+            board = ctx.store.load(slug)
+            service = ctx.llm(
+                payload.get("service") or (board.get("defaults") or {}).get("llm")
+            )
+            return self._send_json(storyboard_chat(
+                service,
+                board,
+                payload.get("message") or "",
+                history=payload.get("history") or [],
+                selected_id=payload.get("selectedShotId"),
+            ))
 
         if path == "/api/describe-character":
             payload = self._read_json() or {}

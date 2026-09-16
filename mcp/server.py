@@ -490,7 +490,14 @@ TOOLS: list[dict[str, Any]] = [
         "name": "sbv_dub_shot",
         "description": (
             "Synthesise a shot's spoken dialogue in its speaking character's cloned voice, and mux it "
-            "over the clip if one has been rendered. Works before the shot is rendered."
+            "over the clip if one has been rendered. Works before the shot is rendered — call it "
+            "before sbv_start_render to hear the line and check it fits: the response's 'warning' "
+            "field names it when the spoken line runs longer than the shot's planned frames (or, "
+            "once rendered, longer than the actual clip), so a shot can be lengthened or the line "
+            "shortened before spending render time on it. Only for a shot whose dialogueSource is "
+            "'recording' (a separate TTS take) or unset. Refuses on 'native' dialogueSource: H3 "
+            "generates that shot's speech itself, lip-synced, during rendering — there is nothing to "
+            "synthesise beforehand, so the only way to get its audio is sbv_start_render."
         ),
         "inputSchema": {
             "type": "object",
