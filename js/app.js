@@ -274,6 +274,18 @@ async function prepareDialogueRecordings(entries) {
   }
 }
 
+/* The mechanical half of "speak this line": synthesise, then fold the take
+   into the shot. Shared by the per-shot Generate button and Storyboard AD's
+   dub_shot action so both go through the exact same call — the caller
+   builds whatever toast/message fits its own UI from the result. */
+async function runDubShot(shotId) {
+  const raw = shotById(shotId);
+  if (!raw) throw new Error("That shot no longer exists.");
+  const r = await API.dub(state.slug, shotId, raw.dialogue, raw.dialogueStyle, raw.dubMode);
+  applyDialogueTake(raw, r, raw.dialogue, raw.dialogueStyle);
+  return r;
+}
+
 function showRenderDialogueBlocker(blockers) {
   const first = blockers[0];
   if (!first) return;
@@ -668,6 +680,22 @@ function proposalSummary(action) {
     const s = shotById(action.shotId);
     return `Update shot “${s ? s.title : action.shotId}”`;
   }
+  if (action.tool === "start_render") {
+    if (action.shotIds && action.shotIds.length) {
+      const names = action.shotIds.map((id) => {
+        const s = shotById(id);
+        return s ? s.title || id : id;
+      });
+      return `Start rendering ${names.join(", ")}`;
+    }
+    return "Start rendering every shot that needs it";
+  }
+  if (action.tool === "dub_shot") {
+    const s = shotById(action.shotId);
+    return `Generate dialogue for “${s ? s.title : action.shotId}”`;
+  }
+  if (action.tool === "stop_render") return "Stop the current render";
+  if (action.tool === "assemble") return "Assemble the final cut";
   return action.tool;
 }
 
@@ -700,13 +728,13 @@ function renderAssistantChat() {
         apply.addEventListener("click", async () => {
           apply.disabled = true;
           try {
-            applyAssistantActions(turn.actions);
+            const messages = await applyAssistantActions(turn.actions);
             turn.applied = true;
             persistChat(state.slug);
-            await saveNow();
             render();
             renderAssistantChat();
-            toast("Storyboard changes applied.");
+            if (messages.length) messages.forEach((m) => toast(m));
+            else toast("Storyboard changes applied.");
           } catch (err) {
             apply.disabled = false;
             toast(`Could not apply changes: ${err.message}`, "error");
@@ -751,7 +779,7 @@ function assistantShot(fields) {
   }, fields || {});
 }
 
-function applyAssistantActions(actions) {
+function applyBoardEditActions(actions) {
   let lastAdded = null;
   actions.forEach((action) => {
     if (action.tool === "set_board_fields") Object.assign(state.board, action.fields);
@@ -775,7 +803,60 @@ function applyAssistantActions(actions) {
     }
   });
   if (!state.selectedId && lastAdded) state.selectedId = lastAdded.id;
-  markDirty();
+  if (actions.length) markDirty();
+}
+
+// Actions with a real, side-effecting operation behind them, as opposed to a
+// board-field edit. Kept as one set so applyAssistantActions can split a
+// proposal into "apply these fields" and "then run these" without the two
+// kinds of action needing to know about each other.
+const OPERATION_TOOLS = new Set(["start_render", "dub_shot", "stop_render", "assemble"]);
+
+/* Runs one operation action and returns a human sentence describing what
+   happened, for the toast(s) shown after a proposal is applied. Shares the
+   exact same runStartRender/runDubShot/runStopRender/runAssembleNow calls
+   the UI's own buttons use — Storyboard AD triggering a render looks, to the
+   server, identical to a click. */
+async function runAssistantOperation(action) {
+  if (action.tool === "start_render") {
+    await runStartRender(action.shotIds);
+    return action.shotIds && action.shotIds.length
+      ? "Started rendering the requested shot(s)."
+      : "Started rendering every shot that needs it.";
+  }
+  if (action.tool === "dub_shot") {
+    const r = await runDubShot(action.shotId);
+    if (r.warning) return r.warning;
+    if (r.note) return r.note;
+    return `Spoke the line (${r.seconds}s)${r.muxed ? " and mixed it onto the clip." : "."}`;
+  }
+  if (action.tool === "stop_render") {
+    await runStopRender();
+    return "Stopping — waiting for the current shot to wind down.";
+  }
+  if (action.tool === "assemble") {
+    const res = await runAssembleNow();
+    const f = res.finalVideo;
+    return f.partial
+      ? `Assembled ${f.parts.length} clip(s), but ${f.missing.length} shot(s) are not rendered.`
+      : `Assembled ${f.parts.length} clip(s) — ${f.seconds}s.`;
+  }
+  return "";
+}
+
+/* Field edits apply first (in memory) so a render or dub proposed in the
+   same turn picks up whatever was just changed — e.g. "update the dialogue
+   for shot 2 and render it" should render the new line, not the old one. */
+async function applyAssistantActions(actions) {
+  const editActions = actions.filter((a) => !OPERATION_TOOLS.has(a.tool));
+  const opActions = actions.filter((a) => OPERATION_TOOLS.has(a.tool));
+  applyBoardEditActions(editActions);
+  if (editActions.length) await saveNow();
+  const messages = [];
+  for (const action of opActions) {
+    messages.push(await runAssistantOperation(action));
+  }
+  return messages.filter(Boolean);
 }
 
 const AD_THINKING_LINES = [
@@ -1009,26 +1090,55 @@ function setBoard(slug, board, stale) {
    Chrome (header + rail controls)
    ========================================================================== */
 
+/* The mechanical half of starting a render: check/auto-prepare dialogue,
+   save, and queue it. Shared by the header Render button, a single shot's
+   "Render this shot" button, and Storyboard AD's start_render action, so a
+   render proposed in chat goes through exactly the same checks as one
+   clicked in the UI. Throws (rather than failing silently) when a blocker
+   needs manual attention, so a caller that cannot show its own dialog —
+   the chat path — still surfaces that the render did not start. */
+async function runStartRender(shotIds) {
+  const targets = shotIds && shotIds.length
+    ? shotIds.map((id) => shotById(id)).filter(Boolean)
+    : shots();
+  const blockers = targets
+    .map((raw) => ({ raw, issue: dialogueReadiness(raw) }))
+    .filter((entry) => entry.issue);
+  const manualBlockers = blockers.filter((entry) => !canAutoPrepareDialogue(entry.raw));
+  if (manualBlockers.length) {
+    showRenderDialogueBlocker(manualBlockers);
+    throw new Error("Some shots need dialogue prepared manually before rendering.");
+  }
+  if (blockers.length) await prepareDialogueRecordings(blockers);
+  await saveNow();
+  state.status = await API.render(state.slug, shotIds && shotIds.length ? shotIds : undefined, state.board);
+  state.awaitingBatch = true;
+  state.followRender = true;
+  startPolling();
+  render();
+}
+
+async function runStopRender() {
+  state.status = await API.stop();
+  render();
+}
+
+async function runAssembleNow() {
+  const res = await API.assemble(state.slug);
+  takeStale(res);
+  state.board.finalVideo = res.finalVideo;
+  render();
+  return res;
+}
+
 function wireChrome() {
   $("#btnRender").addEventListener("click", async () => {
-    const blockers = renderDialogueBlockers();
-    const manualBlockers = blockers.filter((entry) => !canAutoPrepareDialogue(entry.raw));
-    if (manualBlockers.length) {
-      showRenderDialogueBlocker(manualBlockers);
-      return;
-    }
     const btn = $("#btnRender");
     btn.disabled = true;
     let started = false;
     try {
-      await prepareDialogueRecordings(blockers);
-      await saveNow();
-      state.status = await API.render(state.slug, undefined, state.board);
+      await runStartRender();
       started = true;
-      state.awaitingBatch = true;
-      state.followRender = true;
-      startPolling();
-      render();
     } catch (err) {
       toast(err.message, "error");
     } finally {
@@ -1045,9 +1155,7 @@ function wireChrome() {
     const was = btn.textContent;
     btn.textContent = "assembling…";
     try {
-      const res = await API.assemble(state.slug);
-      takeStale(res);
-      state.board.finalVideo = res.finalVideo;
+      const res = await runAssembleNow();
       const f = res.finalVideo;
       toast(
         f.partial
@@ -1055,7 +1163,6 @@ function wireChrome() {
           : `Assembled ${f.parts.length} clip(s) — ${f.seconds}s.`,
         f.partial ? "warn" : "info"
       );
-      render();
     } catch (err) {
       toast(`Could not assemble: ${err.message}`, "error");
     } finally {
@@ -1066,8 +1173,7 @@ function wireChrome() {
 
   $("#btnStop").addEventListener("click", async () => {
     try {
-      state.status = await API.stop();
-      render();
+      await runStopRender();
       toast("Stopping — waiting for the current shot to wind down.");
     } catch (err) {
       toast(err.message, "error");
@@ -3331,8 +3437,7 @@ function renderEditor() {
         try {
           // send the line as typed; it may not be saved yet
           const sh = live();
-          const r = await API.dub(state.slug, raw.id, sh.dialogue, sh.dialogueStyle, sh.dubMode);
-          applyDialogueTake(sh, r, sh.dialogue, sh.dialogueStyle);
+          const r = await runDubShot(raw.id);
           if (r.note) toast(r.note, "warn");
           else if (r.warning) toast(r.warning, "warn");
           else {
@@ -3401,25 +3506,14 @@ function renderEditor() {
     ? `${initialDialogueIssue.title}. ${initialDialogueIssue.action}`
     : "Render this shot";
   one.addEventListener("click", async () => {
-    const issue = dialogueReadiness(live());
-    if (issue && !canAutoPrepareDialogue(live())) {
-      showRenderDialogueBlocker([{ raw: live(), issue }]);
-      return;
-    }
     // Disable immediately, not after the save + render round trips —
     // otherwise the button sits clickable for however long those take,
     // which reads as "nothing happened" and invites a second click.
     one.disabled = true;
     let started = false;
     try {
-      if (issue) await prepareDialogueRecordings([{ raw: live(), issue }]);
-      await saveNow();
-      state.status = await API.render(state.slug, [raw.id], state.board);
+      await runStartRender([raw.id]);
       started = true;
-      state.awaitingBatch = true;
-      state.followRender = true;
-      startPolling();
-      render();
     } catch (err) {
       toast(err.message, "error");
     } finally {

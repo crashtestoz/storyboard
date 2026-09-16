@@ -9,8 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server.storyboard_chat import chat, compact_board_context, validate_actions  # noqa: E402
-from server.store import default_board, default_character, default_shot  # noqa: E402
+from server.storyboard_chat import (  # noqa: E402
+    CHAT_SYSTEM_PROMPT, chat, compact_board_context, validate_actions,
+)
+from server.store import (  # noqa: E402
+    default_board, default_character, default_shot, render_fingerprint,
+)
 
 
 class FakeLLM:
@@ -81,6 +85,46 @@ class StoryboardChatTests(unittest.TestCase):
                       self.board, "Review this")
         self.assertEqual(result["actions"], [])
         self.assertIn("pacing works", result["message"])
+
+    def test_context_flags_render_need_and_estimates_only_when_needed(self):
+        context = compact_board_context(self.board)
+        shot_ctx = context["shots"][0]
+        # setUp's shot has an output but no matching renderFingerprint, so
+        # store.stale_reason calls it stale — it still needs a render.
+        self.assertTrue(shot_ctx["needsRender"])
+        self.assertIsInstance(shot_ctx["estimatedRenderSeconds"], int)
+        self.assertEqual(shot_ctx["dialogueSource"], "recording")
+
+        current = self.board["shots"][0]
+        current["renderFingerprint"] = render_fingerprint(current, self.board)
+        context = compact_board_context(self.board)
+        shot_ctx = context["shots"][0]
+        self.assertFalse(shot_ctx["needsRender"])
+        self.assertIsNone(shot_ctx["estimatedRenderSeconds"])
+
+    def test_operation_actions_are_allow_listed(self):
+        sid = self.board["shots"][0]["id"]
+        actions = validate_actions([
+            {"tool": "start_render", "shotIds": [sid, "invented"]},
+            {"tool": "dub_shot", "shotId": sid},
+            {"tool": "dub_shot", "shotId": "invented"},
+            {"tool": "stop_render"},
+            {"tool": "assemble"},
+            {"tool": "start_render"},
+        ], self.board)
+        self.assertEqual(actions, [
+            {"tool": "start_render", "shotIds": [sid]},
+            {"tool": "dub_shot", "shotId": sid},
+            {"tool": "stop_render"},
+            {"tool": "assemble"},
+            {"tool": "start_render"},
+        ])
+
+    def test_prompt_offers_operations_instead_of_pointing_at_mcp(self):
+        for tool in ("start_render", "dub_shot", "stop_render", "assemble"):
+            self.assertIn(tool, CHAT_SYSTEM_PROMPT)
+        self.assertNotIn("you cannot render", CHAT_SYSTEM_PROMPT.lower())
+        self.assertIn("never mention mcp", CHAT_SYSTEM_PROMPT.lower())
 
 
 if __name__ == "__main__":
