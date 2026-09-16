@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .assemble import FPS
 from .tts.base import SpeechResult, TTSEngine
 
 
@@ -121,6 +122,21 @@ def speaker_for(shot: dict, board: dict) -> dict | None:
     return cast[in_shot[0]] if in_shot else None
 
 
+def fit_warning(spoken: float, target: float, *, basis: str, tense: str) -> str:
+    """A line vs. a length it has to sit inside of — the one check both a
+    pre-render fit estimate and a post-mux truncation report boil down to.
+
+    *basis* names what *target* seconds belongs to, e.g. "the clip" or
+    "the shot's planned 96 frames (24fps)".
+    """
+    if not target or spoken <= target + 0.15:
+        return ""
+    return (
+        f"the spoken line runs {spoken:.1f}s but {basis} is only {target:.1f}s, "
+        f"so it {tense} — lengthen the shot or shorten the line"
+    )
+
+
 def _duration(path: Path) -> float:
     """Media length via ffprobe; 0.0 when it cannot be determined."""
     ffprobe = shutil.which("ffprobe")
@@ -190,12 +206,18 @@ def dub_shot(
     reference_text: str = "",
     style: str = "",
     keep_original_audio: bool = True,
+    planned_frames: int = 0,
 ) -> DubResult:
     """Synthesise *text*, and mux it onto *clip* if the clip exists.
 
     A missing clip is not an error. The speech is the useful artefact on its
     own — you can hear whether the line and the voice are right — and there is
-    no reason to withhold it until the shot has been rendered.
+    no reason to withhold it until the shot has been rendered. That includes
+    the fit check: *planned_frames* (the shot's own ``frames`` setting, at the
+    fixed render rate ``FPS``) says how long the clip will be once it exists,
+    so a line that will not fit is caught here, before paying for a render to
+    find out — the same reasoning that keeps speech out of the render path at
+    all (see the module docstring).
     """
     speech = speak_line(engine, shot_dir=shot_dir, text=text, voice=voice,
                         reference=reference, reference_text=reference_text,
@@ -206,8 +228,16 @@ def dub_shot(
     speech_path = speech.path
 
     if not clip.exists():
-        # Nothing to lay it over yet; the line itself is still the point.
-        return DubResult(ok=True, video=None, audio=speech_path, speech=speech)
+        # Nothing to lay it over yet, so check the length it will eventually
+        # have to fit rather than an actual clip's.
+        spoken = speech.seconds or _duration(speech_path)
+        planned_seconds = planned_frames / FPS if planned_frames else 0.0
+        warning = fit_warning(
+            spoken, planned_seconds,
+            basis=f"the shot's planned {planned_frames} frames ({FPS}fps)",
+            tense="will be cut off once rendered",
+        )
+        return DubResult(ok=True, video=None, audio=speech_path, speech=speech, warning=warning)
 
     muxed, error, log, warning = mux_speech(
         clip=clip, speech=speech_path, shot_dir=shot_dir,
@@ -287,13 +317,6 @@ def mux_speech(
     # -shortest keeps the muxed file to the video's length, so a line longer
     # than its clip is cut off. That is the right file to produce, but it must
     # not happen silently — the fix is a longer clip or a shorter line.
-    warning = ""
     spoken = speech_seconds or _duration(speech)
-    clip_seconds = _duration(clip)
-    if clip_seconds and spoken > clip_seconds + 0.15:
-        warning = (
-            f"the spoken line runs {spoken:.1f}s but the clip is only "
-            f"{clip_seconds:.1f}s, so it is cut off — lengthen the shot or "
-            f"shorten the line"
-        )
+    warning = fit_warning(spoken, _duration(clip), basis="the clip", tense="is cut off")
     return out, "", [], warning

@@ -560,6 +560,36 @@ shows progress and the result waits for approval. For a service needing a key,
 use `apiKeyEnv` to name an environment variable rather than putting the key in
 this tracked file.
 
+The **Storyboard AD** handle on the right edge opens a chat with that same selected
+prompt-rewriting model. It receives a compact authoring snapshot of the open
+board—scene, cast, shot prompts, dialogue, timing, reference presence, and the
+focused shot—while render outputs and logs are left out to save context. It can
+review the board or propose scene, cast, and shot changes using the authoring
+part of Storyboard's MCP vocabulary. Proposed edits are never silent: they are
+shown as an Apply/Discard card, and only **Apply changes** saves them to the
+board. Chat history is kept per board, in the browser's own storage, and
+survives a page refresh.
+
+Storyboard AD deliberately **cannot** render video, synthesise or dub audio,
+or start/stop anything — it only proposes the field edits above, because those
+are reviewable before they touch the board and a render or a spoken take is
+not. Asked to do one of those, it says so and points at the actual way to:
+the **Render** button, or **Generate** on a shot's Dialogue tab, here in the
+app; or, for scripting it, the full MCP server below, which has tools like
+`sbv_dub_shot` and `sbv_start_render` that an external MCP client (Claude
+Desktop, Claude Code) can call directly.
+
+It knows enough to say which, too: its system prompt (`server/storyboard_chat.py`)
+carries a compact, hand-written reference on how a board actually works —
+dialogueSource, model auto-selection, frame rate, staleness — plus the full
+MCP tool catalogue, read live from `mcp/server.py`'s own tool list rather
+than copied in, so the two surfaces cannot silently drift apart. That
+reference sits in the *system* prompt rather than the per-board context that
+changes every turn, since the system prompt is the one part of the request
+identical across a whole conversation — the natural place to put something
+large but static, and the part a backend with its own prompt caching
+(llama.cpp, vLLM, and similar) reuses instead of re-billing every message.
+
 ## MCP: driving Storyboard from an AI assistant
 
 `mcp/server.py` is an [MCP](https://modelcontextprotocol.io) server that
@@ -643,6 +673,21 @@ sound, cast, per-shot prompt/dialogue/model/reference fields — go through
 `sbv_get_board` → edit the object → `sbv_save_board`, exactly as the browser's
 own autosave does; the other tools are the actions the UI has as their own
 buttons (render, dub, rename, transcribe, and so on).
+
+**Checking a line fits before you render.** `sbv_dub_shot` always synthesises
+the line, whether or not the shot has been rendered yet, so it doubles as a
+fit check: call it right after writing a shot's dialogue, and its response's
+`warning` field says so if the spoken line runs longer than the shot's
+`frames` (at the fixed 24fps render rate) — before a render has been paid for,
+that comparison is against the planned length; after, it is against the
+actual clip. No warning means the line fits either way.
+
+This only applies to a shot using a separate TTS take (`dialogueSource:
+"recording"`, the default). A shot set to H3 native speech has no separate
+take to check or preview — the video model generates that shot's speech
+itself, lip-synced, while rendering — so `sbv_dub_shot` refuses on one with a
+message pointing at `sbv_start_render` instead. The UI's own Generate button
+is disabled on such a shot for the same reason.
 
 **Example prompts**, once the tool is connected:
 

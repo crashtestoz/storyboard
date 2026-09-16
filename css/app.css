@@ -1069,6 +1069,176 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 /* ==========================================================================
+   Storyboard AD blade
+   ========================================================================== */
+
+.assistant-blade {
+  position: fixed;
+  z-index: 800;
+  top: var(--blade-top, 220px);
+  right: 0;
+  bottom: 0;
+  width: 30vw;
+  min-width: 360px;
+  max-width: 560px;
+  background: var(--panel);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(100%);
+  transition: transform 180ms ease-out;
+  will-change: transform;
+}
+
+.assistant-blade.open { transform: translateX(0); }
+.assistant-blade.dragging { transition: none; }
+
+.blade-handle {
+  position: absolute;
+  left: -43px;
+  top: 50%;
+  width: 43px;
+  min-height: 116px;
+  transform: translateY(-50%);
+  border: 1px solid var(--border-strong);
+  border-right: 0;
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  background: var(--panel-raised);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: ew-resize;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-2);
+  touch-action: none;
+}
+
+.blade-handle:hover,
+.blade-handle:focus-visible { color: var(--accent); border-color: var(--accent); }
+
+.blade-handle-mark {
+  font-size: 22px;
+  line-height: 1;
+  transition: transform 180ms ease-out;
+}
+
+.assistant-blade.open .blade-handle-mark { transform: rotate(180deg); }
+
+.blade-handle-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.blade-panel {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+}
+
+.blade-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-raised);
+}
+
+.blade-head > div:first-child { min-width: 0; flex: 1; }
+.blade-title { font-size: var(--fs-md); font-weight: 600; }
+.blade-model {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.blade-context {
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+}
+
+.blade-messages {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+
+.chat-empty {
+  margin: auto 0;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.chat-empty strong { display: block; color: var(--text); font-size: var(--fs-md); }
+
+.chat-message {
+  max-width: 92%;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-message.user {
+  align-self: flex-end;
+  background: var(--accent-ghost);
+  border-color: var(--accent-dim);
+}
+
+.chat-message.assistant { align-self: flex-start; background: var(--panel-raised); }
+.chat-message.pending { color: var(--text-dim); }
+.chat-message.error { border-color: var(--err); color: var(--err); }
+
+.chat-proposal {
+  align-self: stretch;
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-ghost);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+}
+
+.chat-proposal-head { font-weight: 600; margin-bottom: var(--sp-2); }
+.chat-proposal-list { color: var(--text-dim); font-size: var(--fs-sm); }
+.chat-proposal-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
+.chat-proposal.applied { border-color: var(--ok); background: var(--ok-ghost); }
+
+.blade-composer {
+  border-top: 1px solid var(--border);
+  background: var(--panel-raised);
+  padding: var(--sp-3);
+}
+
+.blade-composer textarea { min-height: 72px; resize: vertical; }
+.blade-compose-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.blade-compose-hint { flex: 1; color: var(--text-faint); font-size: var(--fs-xs); }
+
+@media (max-width: 720px) {
+  .assistant-blade { width: 88vw; min-width: 0; max-width: none; }
+  .blade-compose-hint { display: none; }
+}
+
+/* ==========================================================================
    Added when the UI was wired to the server
    ========================================================================== */
 
