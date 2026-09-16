@@ -83,6 +83,10 @@ const API = {
   // after, so the caller has to poll info() to know when it's back.
   restartServer: () => req("POST", "/api/server-settings/restart"),
 
+  // Also saved to server-config.json, but read fresh on every chat turn —
+  // no restart needed. An empty string disables web search again.
+  setSearchUrl: (searchUrl) => req("POST", "/api/server-settings", { searchUrl }),
+
   addShot: (slug, patch) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots`, patch || {}),
 

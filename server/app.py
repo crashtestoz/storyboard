@@ -26,8 +26,11 @@ Routes
 ``POST /api/stills``            start/mid/end Krea-2 previews ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
-``POST /api/server-settings``   set the global projects folder ``{dataDir}`` —
-                                 read back from /api/info; takes effect on restart
+``POST /api/server-settings``   set the global projects folder ``{dataDir}``
+                                 (takes effect on restart) and/or the Storyboard
+                                 AD's optional web search URL ``{searchUrl}``
+                                 (takes effect immediately) — read back from
+                                 /api/info
 ``POST /api/server-settings/restart``  restart the process onto the new folder
 ``GET  /media/<path>``          generated clips / frames / uploads
 """
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import posixpath
 import re
 import threading
@@ -151,6 +155,29 @@ class Context:
     def llm(self, sid: str | None) -> LLMService:
         services = self.llm_services()
         return services.get(sid or self.default_llm) or services.get("none")
+
+    def search_url(self) -> str:
+        """The search engine URL the Storyboard AD may use for web research.
+
+        Any SearXNG-compatible JSON search API — SearXNG itself is just an
+        example, not a requirement. Optional and blank by default. The
+        SBV_SEARCH_URL env var wins if
+        set (same override precedence as SBV_DATA_DIR); otherwise this reads
+        server-config.json fresh on every call — the same "no restart
+        needed" treatment as tts_engines()/llm_services() above, since
+        toggling it is just as cheap and just as safe to pick up mid-session.
+        """
+        env = os.environ.get("SBV_SEARCH_URL", "").strip()
+        if env:
+            return env.rstrip("/")
+        cfg = self.ui_root / SERVER_CONFIG_NAME
+        if not cfg.exists():
+            return ""
+        try:
+            doc = json.loads(cfg.read_text())
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return str(doc.get("searchUrl") or "").strip().rstrip("/")
 
     def transcriber(self, kind: str | None) -> TTSEngine | None:
         """A healthy engine that can transcribe — the asked-for one if it can.
@@ -315,6 +342,10 @@ class Handler(BaseHTTPRequestHandler):
                     "workspace": str(ctx.workspace),
                     "dataDir": str(ctx.data_dir),
                     "dataDirSource": ctx.data_dir_source,
+                    "search": {
+                        "url": ctx.search_url(),
+                        "overridden": bool(os.environ.get("SBV_SEARCH_URL", "").strip()),
+                    },
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
                     "llm": {
                         "default": ctx.default_llm,
@@ -608,6 +639,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload.get("message") or "",
                 history=payload.get("history") or [],
                 selected_id=payload.get("selectedShotId"),
+                search_url=ctx.search_url(),
             ))
 
         if path == "/api/describe-character":
@@ -708,29 +740,45 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/server-settings":
             payload = self._read_json() or {}
-            raw = (payload.get("dataDir") or "").strip()
-            if not raw:
-                raise ValueError("dataDir is required")
-            target = Path(raw).expanduser()
-            if not target.is_absolute():
-                raise ValueError("dataDir must be an absolute path")
-            try:
-                target.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ValueError(f"cannot use that folder: {exc}") from exc
-            doc = {"dataDir": str(target)}
+            if "dataDir" not in payload and "searchUrl" not in payload:
+                raise ValueError("nothing to save")
             cfg = ctx.ui_root / SERVER_CONFIG_NAME
-            tmp = cfg.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(doc, indent=2) + "\n")
-            tmp.replace(cfg)
-            return self._send_json(
-                {
-                    "ok": True,
+            doc: dict[str, Any] = {}
+            if cfg.exists():
+                try:
+                    doc = json.loads(cfg.read_text())
+                except (OSError, json.JSONDecodeError):
+                    doc = {}
+            result: dict[str, Any] = {"ok": True}
+            if "dataDir" in payload:
+                raw = (payload.get("dataDir") or "").strip()
+                if not raw:
+                    raise ValueError("dataDir is required")
+                target = Path(raw).expanduser()
+                if not target.is_absolute():
+                    raise ValueError("dataDir must be an absolute path")
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    raise ValueError(f"cannot use that folder: {exc}") from exc
+                doc["dataDir"] = str(target)
+                result.update({
                     "dataDir": str(target),
                     "active": str(target) == str(ctx.data_dir),
                     "overridden": ctx.data_dir_source in ("cli", "env"),
-                }
-            )
+                })
+            if "searchUrl" in payload:
+                # Optional and blank by default — an empty string disables
+                # web search again rather than being rejected as invalid.
+                raw = (payload.get("searchUrl") or "").strip()
+                if raw and not re.match(r"^https?://", raw):
+                    raise ValueError("searchUrl must start with http:// or https://")
+                doc["searchUrl"] = raw
+                result["searchUrl"] = raw
+            tmp = cfg.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, indent=2) + "\n")
+            tmp.replace(cfg)
+            return self._send_json(result)
 
         if path == "/api/server-settings/restart":
             if ctx.orch.busy:

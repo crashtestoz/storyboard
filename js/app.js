@@ -1204,6 +1204,7 @@ function wireChrome() {
   $("#btnRename").addEventListener("click", renameProject);
   $("#btnDeleteBoard").addEventListener("click", deleteProject);
   $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
+  $("#btnSaveSearchUrl").addEventListener("click", saveSearchUrl);
 
   $("#settingsClose").addEventListener("click", () => {
     $("#settings").hidden = true;
@@ -1690,6 +1691,7 @@ function openSettings() {
   $("#btnRename").disabled = true;
   $("#btnDeleteBoard").disabled = !state.board || state.deletingBoard;
   paintDataDir();
+  paintSearchUrl();
   $("#settings").hidden = false;
 }
 
@@ -1704,6 +1706,18 @@ function paintDataDir() {
       "that flag/variable is removed from however this server is launched."
     : "";
   warn.classList.toggle("field-warn", overridden);
+}
+
+function paintSearchUrl() {
+  const search = (state.info && state.info.search) || {};
+  $("#searchUrlInput").value = search.url || "";
+  const warn = $("#searchUrlWarn");
+  warn.textContent = search.overridden
+    ? "This server was started with SBV_SEARCH_URL set, which always wins — " +
+      "saving a URL here won't take effect until that variable is removed " +
+      "from however this server is launched."
+    : "";
+  warn.classList.toggle("field-warn", !!search.overridden);
 }
 
 /** Mirror of the server's slugify, for previewing the folder a rename lands in. */
@@ -1851,6 +1865,27 @@ async function saveDataDirAndRestart() {
     );
   } catch (err) {
     toast(`Could not save the Storyboard data folder: ${err.message}`, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
+}
+
+async function saveSearchUrl() {
+  const url = $("#searchUrlInput").value.trim();
+  const btn = $("#btnSaveSearchUrl");
+  btn.disabled = true;
+  const was = btn.textContent;
+  try {
+    btn.textContent = "saving…";
+    const r = await API.setSearchUrl(url);
+    if (state.info) {
+      state.info.search = { url: r.searchUrl, overridden: false };
+    }
+    paintSearchUrl();
+    toast(url ? "Web search enabled for the Storyboard AD." : "Web search disabled.");
+  } catch (err) {
+    toast(`Could not save the search URL: ${err.message}`, "error");
   } finally {
     btn.disabled = false;
     btn.textContent = was;

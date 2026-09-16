@@ -347,6 +347,29 @@
         </div>
         </section>
 
+        <section>
+        <div class="section-label">
+          Web search
+          <span class="hint">— optional; lets the Storyboard AD research things beyond this board</span>
+        </div>
+        <div class="field">
+          <label>Search engine URL</label>
+          <input type="text" id="searchUrlInput" autocomplete="off" spellcheck="false" placeholder="e.g. http://10.0.0.200:31808 (SearXNG)">
+        </div>
+        <div class="field-note" id="searchUrlWarn"></div>
+        <div class="field-note">
+          Points at a search engine already running somewhere on your
+          network that answers SearXNG's JSON search API — SearXNG itself is
+          just one example; anything speaking the same
+          <code>/search?q=...&amp;format=json</code> interface works. Leave
+          blank to skip — the AD answers from the board and its own
+          knowledge only, exactly as before.
+        </div>
+        <div class="rename-row" style="margin-top:var(--sp-2)">
+          <button class="btn btn-sm" id="btnSaveSearchUrl">Save</button>
+        </div>
+        </section>
+
       </div>
       <div class="modal-foot">
         These apply to the whole storyboard. Scene description, background

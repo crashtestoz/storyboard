@@ -840,9 +840,10 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   margin-bottom: var(--sp-3);
 }
 
-/* Clip and final-video tabs share one locked viewport footprint. The final
-   pane contains metadata and actions below it, but those must not change the
-   dimensions of the screen that holds the video. */
+/* Clip and final-video tabs share one locked viewport footprint — this box
+   never resizes, whatever it is currently showing. The final pane contains
+   metadata and actions below it, but those must not change the dimensions
+   of the screen that holds the video. */
 .preview-stage,
 .final-video-viewport {
   width: 100%;
@@ -850,7 +851,25 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   flex: 0 0 auto;
 }
 
-.preview-stage img { width: 100%; height: 100%; object-fit: contain; }
+/* position:absolute + inset:0, not width/height:100% in normal flow: a grid
+   item under place-items:center (set above) is sized to its own content
+   instead of being stretched to the grid area, so a plain 100%/100% on a
+   replaced element like <img>/<video> never actually resolved — it fell
+   back to its intrinsic aspect ratio and overflowed the box edge to edge
+   instead of being contained by it, however tall or wide the source media
+   actually was. Absolute positioning resolves the percentages against
+   .preview-stage's own padding box directly (it is already position:
+   relative), sidestepping that grid-sizing step entirely, so object-fit:
+   contain gets a real box to fit into and correctly letterboxes/pillarboxes
+   any source aspect ratio inside this fixed-shape frame. */
+.preview-stage img,
+.preview-stage video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
 
 .preview-actions {
   display: flex;
@@ -1346,10 +1365,10 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   padding: var(--sp-2);
 }
 
+/* position/inset/width/height/object-fit live on the combined
+   .preview-stage img, .preview-stage video rule above; only the video's own
+   black letterbox fill is specific to it. */
 .preview-stage video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
   background: #000;
 }
 
