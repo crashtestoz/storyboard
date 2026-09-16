@@ -34,6 +34,8 @@ const state = {
   // from disk.
   speechLog: {},
   saveTimer: null,
+  pendingSaves: new Set(),
+  deletingBoard: false,
   // Set when we start a batch, cleared when its end has been reported. A
   // whole-board run with nothing to render still has work to do — it
   // assembles the cut — and can finish between two polls, so "was busy last
@@ -449,12 +451,15 @@ function markDirty() {
 }
 
 async function saveNow() {
-  if (!state.slug || !state.board) return;
+  if (!state.slug || !state.board || state.deletingBoard) return;
   clearTimeout(state.saveTimer);
+  let request;
   try {
     $("#saveState").textContent = "saving…";
     const sent = state.board;
-    const res = await API.saveBoard(state.slug, state.board);
+    request = API.saveBoard(state.slug, state.board);
+    state.pendingSaves.add(request);
+    const res = await request;
     const board = res.board;
     // Every save re-answers "does the render still match?", so the badges
     // follow the words rather than waiting for the next render.
@@ -481,6 +486,8 @@ async function saveNow() {
   } catch (err) {
     $("#saveState").textContent = "save failed";
     toast(`Could not save: ${err.message}`, "error");
+  } finally {
+    state.pendingSaves.delete(request);
   }
 }
 
@@ -755,6 +762,7 @@ function wireChrome() {
     }
   });
   $("#btnRename").addEventListener("click", renameProject);
+  $("#btnDeleteBoard").addEventListener("click", deleteProject);
   $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
 
   $("#settingsClose").addEventListener("click", () => {
@@ -1240,6 +1248,7 @@ function openSettings() {
   $("#projName").value = state.board ? state.board.name : "";
   paintProjPath();
   $("#btnRename").disabled = true;
+  $("#btnDeleteBoard").disabled = !state.board || state.deletingBoard;
   paintDataDir();
   $("#settings").hidden = false;
 }
@@ -1276,6 +1285,45 @@ function paintProjPath() {
   note.classList.toggle("field-warn", slug !== state.slug);
   if (slug !== state.slug) {
     note.textContent += "   ← the folder moves here";
+  }
+}
+
+async function deleteProject() {
+  if (!state.board || state.deletingBoard) return;
+  const { slug, board } = state;
+  if (state.dialoguePreparing || state.status?.busy || state.status?.stills?.busy) {
+    toast("Wait for rendering or dialogue preparation to finish before deleting a storyboard.", "warn");
+    return;
+  }
+  const typed = prompt(
+    `Delete storyboard “${board.name}”?\n\nThis removes its scene descriptions and settings. Rendered videos and reference files are kept.\n\nType the exact storyboard name to continue:`,
+    ""
+  );
+  if (typed === null) return;
+  if (typed !== board.name) {
+    toast("Name did not match. Nothing was deleted.", "warn");
+    return;
+  }
+  if (!confirm(`Permanently delete storyboard “${board.name}”?\n\nThis cannot be undone in the app. Videos and reference files will remain on disk.`)) return;
+  state.deletingBoard = true;
+  const btn = $("#btnDeleteBoard");
+  btn.disabled = true;
+  clearTimeout(state.saveTimer);
+  try {
+    // Let already-sent saves finish before removing the board.
+    await Promise.allSettled([...state.pendingSaves]);
+    await API.deleteBoard(slug, typed);
+    stopPolling();
+    state.slug = null;
+    state.board = null;
+    state.dirty = false;
+    try { localStorage.removeItem(LAST_OPENED_KEY); } catch { /* optional storage */ }
+    window.location.reload();
+  } catch (err) {
+    state.deletingBoard = false;
+    btn.disabled = false;
+    toast(`Delete failed: ${err.message}`, "error");
+    if (state.dirty) markDirty();
   }
 }
 

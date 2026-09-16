@@ -116,7 +116,7 @@ const out = await evaluate(`(async () => {
               document.getElementById("saveState").textContent === "saved",
               "reads: " + document.getElementById("saveState").textContent]);
   } finally {
-    await API.deleteBoard(slug);
+    await API.deleteBoard(slug, (await API.getBoard(slug)).board.name);
     state.boards = (await API.listBoards()).boards;
     const first = state.boards[0];
     if (first) await openBoard(first.slug);

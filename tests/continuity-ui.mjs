@@ -52,7 +52,7 @@ const result = await evaluate(`(async () => {
     return 'pass: live continuity controls, persistence, resolved references, cut settings and dialogue-only queue';
   } finally {
     clearTimeout(state.saveTimer); stopPolling();
-    if (slug) await API.deleteBoard(slug);
+    if (slug) await API.deleteBoard(slug, (await API.getBoard(slug)).board.name);
     state.slug = null; state.board = null;
   }
 })()`);
