@@ -53,7 +53,8 @@ const API = {
     req("PUT", `/api/boards/${encodeURIComponent(slug)}`, board),
   createBoard: (name) => req("POST", "/api/boards", { name }),
   importBoard: (board, name) => req("POST", "/api/boards", { board, name }),
-  deleteBoard: (slug) => req("DELETE", `/api/boards/${encodeURIComponent(slug)}`),
+  deleteBoard: (slug, confirmName) =>
+    req("DELETE", `/api/boards/${encodeURIComponent(slug)}`, { confirmName }),
 
   // A rewrite proposal, for a shot prompt (`shotId`) or a project-level
   // field (`field`: "sceneDescription" | "soundscape"). `text` is sent

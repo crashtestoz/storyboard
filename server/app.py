@@ -245,6 +245,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "not found")
         try:
             board = self._read_json()
+            # A stale browser tab must not recreate a deleted storyboard.
+            self.ctx.store.load(m.group(1))
             saved = self.ctx.store.save(m.group(1), board)
             return self._send_json(
                 {
@@ -281,8 +283,19 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)", path)
         if not m:
             return self._err(404, "not found")
-        self.ctx.store.delete(m.group(1))
-        return self._send_json({"ok": True})
+        try:
+            if self.ctx.orch.busy or self.ctx.orch.stills_busy:
+                return self._err(409, "Wait for rendering to finish before deleting a storyboard.")
+            payload = self._read_json() or {}
+            board = self.ctx.store.load(m.group(1))
+            if not board.get("name") or payload.get("confirmName") != board["name"]:
+                return self._err(400, "Type the exact storyboard name to confirm deletion.")
+            self.ctx.store.delete(m.group(1))
+            return self._send_json({"ok": True})
+        except FileNotFoundError as exc:
+            return self._err(404, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return self._err(400, str(exc))
 
     # -- API: GET -------------------------------------------------------- #
 
