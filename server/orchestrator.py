@@ -1080,7 +1080,23 @@ class Orchestrator:
             rel = Path(p).relative_to(self.data_dir)
         except ValueError:
             return str(p)
-        return "/media/" + str(rel).replace("\\", "/")
+        url = "/media/" + str(rel).replace("\\", "/")
+        # A re-render overwrites clip.mp4 (and the thumb frame, dub, log...)
+        # at the SAME path every time, and media is served with Cache-Control
+        # max-age=60 (_send_file). Without something in the URL that changes
+        # when the file's bytes do, both the browser's cache and the front
+        # end's own <video>/<img> reuse (renderPreview's `reuse()`, keyed on
+        # the src string) keep showing the take from before this render —
+        # the file on disk is right, only the tab is stale. mtime is exactly
+        # "did the bytes change", so it is the version, not a random cache
+        # buster: two renders that raced to the same mtime second would
+        # collide, but that only means one extra stale second, not a wrong
+        # file.
+        try:
+            url = f"{url}?t={int(Path(p).stat().st_mtime)}"
+        except OSError:
+            pass
+        return url
 
     def _mark_remaining_cancelled(self) -> None:
         board = self.store.load(self._slug) if self._slug else None
