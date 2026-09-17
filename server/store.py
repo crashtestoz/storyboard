@@ -282,9 +282,14 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "referenceImages": [
             _ref_key(r) for r in (shot.get("referenceImages") or [])
         ],
-        "model": shot.get("model") or defaults.get("model") or "",
+        "model": (requested_model := shot.get("model") or defaults.get("model") or "ref2va"),
+        # Mirrors vpipe_backend.py's _effective_video_model / app.js's
+        # effectiveShotModel: krea2-still and wan-i2v are explicit engine
+        # choices that short-circuit before the anchor check; everything
+        # else routes on Start/End anchors. Keep the three in sync -- this
+        # is what decides whether switching engines marks a clip stale.
         "effectiveModel": (
-            "krea2-still" if (shot.get("model") or defaults.get("model")) == "krea2-still"
+            requested_model if requested_model in ("krea2-still", "wan-i2v")
             else "fl2va" if shot.get("startRef") or shot.get("endRef")
             else "ref2va"
         ),
@@ -357,9 +362,10 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
-        # Ref2VA is the no-anchor default; the backend selects FL2VA whenever
-        # Start frame or End frame is supplied.
-        "model": "ref2va",
+        # No per-shot "model" field -- the video engine is a project-wide
+        # choice (board.defaults.model). Ref2VA is the no-anchor default;
+        # the backend selects FL2VA whenever Start frame or End frame is
+        # supplied. See migrate()'s note on why this key must stay absent.
         "resolution": d.get("resolution", "960x544"),
         "frames": d.get("frames", 124),
         "steps": d.get("steps", 8),
@@ -979,8 +985,13 @@ class Store:
         board.setdefault("outputMuted", False)
 
         defaults = board.setdefault("defaults", {})
-        # The video model is a Storyboard invariant, not a project preference.
-        defaults["model"] = "ref2va"
+        # Ref2VA is the automatic default when nothing else is chosen. An
+        # explicit alternate ENGINE (currently only wan-i2v) is a real
+        # per-project choice made in Settings -- setdefault only, never
+        # force-assign, or every save/load would silently discard it (see
+        # _effective_video_model in vpipe_backend.py and effectiveShotModel
+        # in app.js, which both read this field).
+        defaults.setdefault("model", "ref2va")
         defaults.setdefault("resolution", "960x544")
         defaults.setdefault("frames", 124)
         defaults.setdefault("steps", 8)
@@ -1020,12 +1031,14 @@ class Store:
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])
-            shot.setdefault("model", defaults["model"])
-            # The persisted model is retained as the compatibility/default
-            # value. The backend derives the actual H3 mode from Start/End
-            # anchors, so older boards route correctly without migration.
-            if shot.get("model") != "ref2va":
-                shot["model"] = "ref2va"
+            # No per-shot override exists -- only the project-wide
+            # defaults.model above. H3's FL2VA/Ref2VA split is derived from
+            # Start/End anchors, never stored, so a shot-level "model" field
+            # serves no purpose; worse, since _effective_video_model checks
+            # shot.model BEFORE defaults.model, a value force-written here
+            # would permanently shadow the project default and silently
+            # defeat it for every shot. Drop it instead of writing one in.
+            shot.pop("model", None)
             shot.setdefault("resolution", defaults["resolution"])
             shot.setdefault("frames", defaults["frames"])
             shot.setdefault("steps", defaults["steps"])

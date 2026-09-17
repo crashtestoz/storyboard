@@ -3,7 +3,7 @@
 Generates a `.vpipeline` file per shot and runs it with
 ``vpipe --launch <file>``, parsing stdout for progress.
 
-The four templates here are transcriptions of pipelines that were built and
+The five templates here are transcriptions of pipelines that were built and
 run by hand against real models, not guesses from documentation:
 
 *   ``fl2va``          — text to video+audio
@@ -13,12 +13,22 @@ run by hand against real models, not guesses from documentation:
 *   ``ref2va``         — ``video-ref-encoder`` with a reference image list,
                          carrying subject/style across the whole clip
 *   ``krea2-still``    — a single image, for cheap prompt previews
+*   ``wan-i2v``        — text (+ optional Start frame anchor) to silent
+                         video on Wan 2.2's A14B, port 5 fed the same shape
+                         of ``vae-encode`` FL2VA uses, minus End frame
+                         (Wan's DiT has no port for one) and minus audio
+                         (Wan has none)
 
-Two hard-won details are encoded rather than left to the user:
+Hard-won details encoded rather than left to the user:
 
 *   MiniMax H3 frame counts must be ``17n + 5`` **and** produce at least 8
     latent frames. ``frames: 5`` is accepted by the generate stage and then
     silently fails at VAE decode, writing nothing — hence a minimum of 39.
+*   Wan frame counts must be ``4k + 1`` (its VAE's own chunking; see
+    ``WAN_FRAME_RULE``).
+*   Wan is not guidance-distilled the way H3 is: a negative prompt has to be
+    wired to ``diffusion-conditioner`` and on to ``generate-video``'s iport1
+    or its ``guidance_scale`` config is a no-op (see ``WAN_NEGATIVE_PROMPT``).
 *   ``i8_gemm`` is a lossy speed mode that does nothing on M4 and changes the
     picture on M5, so it is off by default here; quality is the point of a
     long unattended render.
@@ -70,6 +80,28 @@ H3_FRAME_RULE = FrameRule(
 # text-to-video and the reference image silently does nothing.
 H3_SIZE_ALIGN = 32
 
+# Wan's video VAE compresses in 4-frame chunks after a 1-frame first chunk
+# (4k+1) -- see MetalWanVae::align_num_frames in vpipe -- so only 4k+1 has a
+# latent form at all; a count that misses it is rounded UP, never truncated.
+# There is no documented decode floor the way H3 has one (>= 8 latent
+# frames), but a handful of frames is not a clip worth generating, so the
+# minimum below is a practical floor, not a model limit.
+WAN_FRAME_RULE = FrameRule(
+    kind="affine",
+    step=4,
+    offset=1,
+    minimum=41,
+    note="Wan packs video 4 frames at a time after a 1-frame first chunk, "
+         "so only 4k+1 has a latent form; 41 (~1.7s @ 24fps) is a "
+         "practical floor for a clip worth generating, not a hard model "
+         "minimum.",
+)
+
+# Wan's VAE is 8x spatial and the DiT patches 2x on top (H3's VAE is 16x,
+# hence its 32 above), so Wan's legal grid is 16 -- see GenerateVideoStage's
+# wan branch in vpipe (align_size_(8 * patch_h, 8 * patch_w)).
+WAN_SIZE_ALIGN = 16
+
 # H3-Base generates at a 768-pixel short edge by default. The first entry in
 # each group is that base canvas, rounded to the model's required multiple of
 # 32. The smaller entries are useful local preview canvases. The separate
@@ -90,6 +122,10 @@ H3_BASE_RESOLUTIONS = [group[0] for group in ASPECT_TABLE.values()]
 # ALL_RESOLUTIONS is offered but untested.
 H3_TESTED = ["960x544", "832x480", "1344x768"]
 KREA_TESTED = ["1024x1024"]
+# Empty on purpose: no resolution has actually been rendered with this model
+# on this machine yet (unlike H3/Krea-2 above, whose lists came from a real
+# run). Offered at every size in ALL_RESOLUTIONS, tested at none.
+WAN_TESTED: list[str] = []
 
 # Prepended to the prompt in sketch mode (see the "sketch" local in
 # prepare()) — a plain style instruction, not a technical trick, so it goes
@@ -102,6 +138,20 @@ KREA_TESTED = ["1024x1024"]
 # whole job with a reference is to reproduce what it shows. This text still
 # matters for a shot with no reference images to sketch (plain FL2VA) and as
 # a second push alongside a sketchified reference.
+# Wan, unlike H3, is NOT guidance-distilled -- classifier-free guidance is
+# only real when a negative prompt is wired in (see generate-video-stage.h's
+# iport1 doc: without one, guidance is forced to 1 and the second forward
+# pass is skipped, i.e. the guidance_scale config knob does nothing). This
+# is the negative prompt Wan's own reference examples ship.
+WAN_NEGATIVE_PROMPT = (
+    "Bright tones, overexposed, static, blurred details, subtitles, style, "
+    "artwork, painting, picture, still, overall gray, worst quality, low "
+    "quality, JPEG compression artifacts, ugly, incomplete, extra fingers, "
+    "poorly drawn hands, poorly drawn faces, deformed, disfigured, "
+    "malformed limbs, fused fingers, cluttered background, three legs, "
+    "many people in the background, walking backwards"
+)
+
 SKETCH_STYLE_PREFIX = (
     "STYLE: black-and-white hand-drawn pencil storyboard sketch — heavy, "
     "dark graphite contour lines on plain white paper, loose scratchy "
@@ -210,6 +260,7 @@ class VpipeBackend(Backend):
         ref2va = self._model_present("local/MiniMax-H3-Ref2VA-8bit")
         krea = self._model_present("krea/Krea-2-Turbo")
         lora = self._model_present("mgwr/M87")
+        wan_i2v = self._model_present("local/Wan2.2-I2V-A14B-8bit")
 
         return [
             ModelCapability(
@@ -250,6 +301,29 @@ class VpipeBackend(Backend):
                 unavailable_reason=""
                 if ref2va
                 else "local/MiniMax-H3-Ref2VA-8bit not prepared in this workspace",
+            ),
+            ModelCapability(
+                id="wan-i2v",
+                label="Wan 2.2 · I2V-A14B — text / start frame → video (silent)",
+                kind="video",
+                # Wan's I2V conditioning is one clip-shaped tensor; iport6
+                # (End frame) is documented as IGNORED by wan outright, not
+                # just unwired-by-default, so this template never sends one.
+                supports_start_anchor=True,
+                supports_end_anchor=False,
+                supports_style_refs=False,
+                supports_audio=False,
+                frame_rule=WAN_FRAME_RULE,
+                resolutions=ALL_RESOLUTIONS,
+                tested_resolutions=WAN_TESTED,
+                size_align=WAN_SIZE_ALIGN,
+                # Not distilled -- the checkpoint's own reference examples
+                # run ~40 steps at guidance 3.5, a real multiple of H3's 8.
+                default_steps=40,
+                available=wan_i2v,
+                unavailable_reason=""
+                if wan_i2v
+                else "local/Wan2.2-I2V-A14B-8bit not prepared in this workspace",
             ),
             ModelCapability(
                 id="krea2-still",
@@ -338,10 +412,16 @@ class VpipeBackend(Backend):
             and shot.get("dialogueSource") == "native"
             and not _clones_voice(shot, project, model)
         ):
+            if model == "ref2va" or model == "fl2va":
+                raise ValueError(
+                    "H3 native speech requires Ref2VA and a cast speaker with a "
+                    "reference voice clip. Remove the Start/End frame anchors, add "
+                    "the voice clip, or switch Dialogue source to a separate recording."
+                )
             raise ValueError(
-                "H3 native speech requires Ref2VA and a cast speaker with a "
-                "reference voice clip. Remove the Start/End frame anchors, add "
-                "the voice clip, or switch Dialogue source to a separate recording."
+                f"Native voice cloning is a MiniMax H3 Ref2VA feature; {model} "
+                "has no such capability. Switch Dialogue source to a separate "
+                "recording, or select Ref2VA."
             )
         prompt = _resolved_prompt(
             shot,
@@ -424,6 +504,11 @@ class VpipeBackend(Backend):
                 spec, outputs = self._ref2va_spec(
                     shot, project, paths, prompt, width, height, render_frames,
                     steps, seed, draft, save_frames, with_audio, sketch
+                )
+            elif model == "wan-i2v":
+                spec, outputs = self._wan_i2v_spec(
+                    shot, paths, prompt, width, height, render_frames, steps,
+                    seed, save_frames, sketch
                 )
             else:
                 spec, outputs = self._fl2va_spec(
@@ -540,6 +625,91 @@ class VpipeBackend(Backend):
         # the with_audio comment in prepare(): draft trims the picture, not
         # the sound; sketch is the one case that trims both.
         stages += _decode_and_save(paths, audio=with_audio, save_frames=save_frames)
+        return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
+               _outputs(paths)
+
+    def _wan_i2v_spec(self, shot, paths, prompt, w, h, frames, steps, seed,
+                      save_frames=True, sketch=False):
+        """Text-to-video, plus an optional Start-frame anchor on port 5.
+
+        Wan has no End-frame port at all (see the module docstring) and no
+        audio, so this is the FL2VA template with those two removed and a
+        negative prompt added -- Wan is not guidance-distilled, so without
+        one `generate-video`'s guidance_scale config does nothing (see
+        WAN_NEGATIVE_PROMPT).
+        """
+        stages: list[dict] = [
+            _model_select("local/Wan2.2-I2V-A14B-8bit"),
+            _text_prompt(prompt),
+            {
+                "id": "text-prompt-negative",
+                "type": "text-prompt",
+                "iports": [],
+                "config": {"text": WAN_NEGATIVE_PROMPT},
+            },
+            {
+                "id": "diffusion-conditioner",
+                "type": "diffusion-conditioner",
+                "iports": [
+                    {"src": "text-prompt", "oport": 0},
+                    {"src": "text-prompt-negative", "oport": 0},
+                    {"src": "model-select", "oport": 0},
+                ],
+                "config": {"unload_when_idle": "always"},
+            },
+            _wan_config(),
+        ]
+
+        iports = _empty_ports(10)
+        iports[0] = {"src": "diffusion-conditioner", "oport": 0}
+        iports[1] = {"src": "diffusion-conditioner", "oport": 1}
+        iports[2] = {"src": "model-select", "oport": 0}
+
+        # Same load -> resample -> vae-encode shape FL2VA uses for its start
+        # anchor, except `frames` has to be told to vae-encode too: Wan's
+        # conditioning latent is the encoding of the image followed by
+        # (frames - 1) blank frames, not of the image alone (see
+        # vae-encode-stage's `frames` config doc) -- so it must match
+        # generate-video's `frames` exactly, the same "must match" rule
+        # Ref2VA's reference encoder follows.
+        src = _ref_source(shot.get("startRef"), paths)
+        if src:
+            if sketch:
+                src = _sketchify_ref(src, paths.abs_dir / "sketch-refs")
+            stages += [
+                {
+                    "id": "load-start",
+                    "type": "load-image",
+                    "iports": [],
+                    "config": {"url": [src]},
+                },
+                {
+                    "id": "resample-start",
+                    "type": "image-resample",
+                    "iports": [{"src": "load-start", "oport": 0}],
+                    "config": {
+                        "width": w,
+                        "height": h,
+                        "fit": "crop",
+                        "algorithm": "lanczos",
+                    },
+                },
+                {
+                    "id": "vae-encode-start",
+                    "type": "vae-encode",
+                    "iports": [
+                        {"src": "resample-start", "oport": 0},
+                        {"src": "model-select", "oport": 0},
+                    ],
+                    "config": {"frames": frames},
+                },
+            ]
+            iports[5] = {"src": "vae-encode-start", "oport": 0}
+
+        iports[9] = {"src": "wan2-model-config", "oport": 0}
+
+        stages.append(_generate_video(iports, w, h, frames, steps, seed))
+        stages += _decode_and_save(paths, audio=False, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
@@ -991,6 +1161,19 @@ def _h3_config(with_audio_timestep: bool = False) -> dict:
     }
 
 
+def _wan_config() -> dict:
+    # boundary_ratio deliberately omitted -- unset, generate-video reads it
+    # from the checkpoint's own model_index.json (0.9) rather than this
+    # stage overriding it; see wan2-model-config-stage's own doc on why an
+    # absent key must not be emitted as if it were a choice.
+    return {
+        "id": "wan2-model-config",
+        "type": "wan2-model-config",
+        "iports": [],
+        "config": {"guidance_scale": 3.5, "guidance_scale_2": 3.5},
+    }
+
+
 def _empty_ports(n: int) -> list[dict]:
     return [{"src": "", "oport": 0} for _ in range(n)]
 
@@ -1338,14 +1521,23 @@ def _resolved_prompt(
 
 
 def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
-    """Choose H3's video mode from the shot's frame-anchor inputs.
+    """Choose H3's video mode from the shot's frame-anchor inputs, unless a
+    different model was explicitly requested.
 
-    FL2VA is the only mode that can wire a supplied image to the first/last
-    frame ports, so either Start frame or End frame activates it. With no
-    anchors, Ref2VA is the useful default because it can consume character,
-    style, object and other reference material. The persisted ``model`` field
-    remains a compatibility/default field; this decision is intentionally
-    derived from the actual inputs so old boards route correctly too.
+    FL2VA is the only H3 mode that can wire a supplied image to the
+    first/last frame ports, so either Start frame or End frame activates it
+    for the H3 pair below. With no anchors, Ref2VA is the useful default
+    because it can consume character, style, object and other reference
+    material. The persisted ``model`` field remains a compatibility/default
+    field; this decision is intentionally derived from the actual inputs so
+    old boards route correctly too.
+
+    ``krea2-still`` and ``wan-i2v`` are not part of that automatic H3
+    routing — both are only ever used when explicitly requested, since
+    neither is a drop-in default for the other two: Wan has no reference-list
+    mode to fall back to the way Ref2VA is H3's fallback, and forcing a
+    board that has always rendered H3 onto a different engine because it
+    happens to have a Start frame set would be a surprising, silent switch.
     """
     if shot.get("continuityRef") and (shot.get("startRef") or shot.get("endRef")):
         raise ValueError("Choose reference continuity or Start/End frame anchors, not both")
@@ -1354,7 +1546,7 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
         or (project.get("defaults") or {}).get("model")
         or "ref2va"
     )
-    if requested == "krea2-still":
+    if requested in ("krea2-still", "wan-i2v"):
         return requested, ""
     if shot.get("startRef") or shot.get("endRef"):
         return "fl2va", "using FL2VA for Start/End frame anchors"
@@ -1645,6 +1837,17 @@ def _estimate_seconds(w: int, h: int, frames: int, steps: int,
     # finished implausibly fast.
     if model == "ref2va":
         return (fixed + denoise) * 1.3
+    if model == "wan-i2v":
+        # UNMEASURED — no Wan clip has actually been timed on this machine
+        # yet. Rough reasoning, not a fit: Wan is not guidance-distilled (2
+        # forward passes/step, H3 has 1) and its shipped examples run ~40
+        # steps against H3's 8, so total DiT compute per clip is plausibly
+        # an order of magnitude higher per frame even though each of its
+        # two resident 14B experts is smaller than H3's 33B stack. Replace
+        # this multiplier with a fitted curve once a clip has been timed —
+        # until then it only has to be roughly right, per this function's
+        # own docstring.
+        return (fixed + denoise) * 3.0
     return fixed + denoise
 
 
