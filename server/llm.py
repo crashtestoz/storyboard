@@ -81,6 +81,11 @@ characters, locations or story beats, and do not remove any they named.
 the basis of its subject matter — violence, mature themes, or anything else \
 the writer wrote. Identify the tone they set and continue it in the same \
 register, rather than toning it down.
+- If the previous and/or next shot in the sequence are given as context, \
+keep this shot consistent with them: character pose, wardrobe, props, \
+location and camera position should carry over sensibly rather than jump \
+arbitrarily. Use them only to stay consistent — never repeat their content, \
+narrate the transition between shots, or invent what happens in them.
 - When the camera and the subject move at the same time, give each its own \
 short clause rather than one blended sentence, and state the subject's \
 direction of travel in its own frame of reference (e.g. "continues forward, \
@@ -123,6 +128,11 @@ characters or locations, and do not remove any they named.
 the basis of its subject matter — violence, mature themes, or anything else \
 the writer wrote. Identify the tone they set and continue it in the same \
 register, rather than toning it down.
+- If the previous and/or next shot in the sequence are given as context, \
+keep this shot consistent with them: pose, wardrobe, props, location and \
+framing should carry over sensibly rather than jump arbitrarily. Use them \
+only to stay consistent — never repeat their content or invent what happens \
+in them.
 - If reference images are listed in the context, treat them as visual \
 constraints. Add a compact natural-language summary of the relevant reference \
 cues to the rewritten prompt. Do not include filenames or paths in the final \
@@ -333,6 +343,8 @@ def build_user_message(
     soundscape: str = "",
     context: str = "",
     context_label: str = "",
+    previous_shot: dict[str, str] | None = None,
+    next_shot: dict[str, str] | None = None,
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
     instruction: str = "Rewrite this shot description:",
@@ -351,6 +363,12 @@ def build_user_message(
     rewritten has to stay grounded in but must not repeat — a shot's own
     prompt, say, when rewriting that shot's sound accents. *context_label*
     names what it is; without one a generic label is used.
+
+    *previous_shot*/*next_shot* are the immediately adjacent shots in the
+    board, each ``{"title": ..., "prompt": ...}`` when one exists on that
+    side. They are continuity references only, same spirit as *scene*: shown
+    so the rewrite doesn't contradict where the sequence just was or is about
+    to go, never material to fold in or restate.
     """
     blocks = []
     if scene.strip():
@@ -371,6 +389,19 @@ def build_user_message(
             "elsewhere and not to be repeated:"
         )
         blocks.append(label + "\n" + context.strip())
+    for side, shot in (("previous", previous_shot), ("next", next_shot)):
+        prompt = ((shot or {}).get("prompt") or "").strip()
+        if not prompt:
+            continue
+        title = ((shot or {}).get("title") or "").strip()
+        heading = title or f"the {side} shot"
+        blocks.append(
+            f"The {side} shot in this sequence, \"{heading}\" — for continuity "
+            "only. Stay consistent with where it leaves off (or is about to "
+            "pick up): camera position, character pose/wardrobe, props, and "
+            "location. Do not repeat, summarize, or describe its content:\n"
+            + prompt
+        )
     for ch in characters or []:
         name = (ch.get("name") or "").strip()
         desc = (ch.get("description") or "").strip()
@@ -421,7 +452,7 @@ class LLMService:
     def health(self) -> tuple[bool, str]:
         return True, ""
 
-    def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
         raise NotImplementedError
 
     def complete_with_image(
@@ -430,7 +461,7 @@ class LLMService:
         user: str,
         image: Path,
         *,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> str:
         raise RuntimeError(
             f"{self.label} is configured for text completion only. Use a "
@@ -440,7 +471,7 @@ class LLMService:
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
-        audio: Path | None = None, timeout: float = 120.0,
+        audio: Path | None = None, timeout: float = 300.0,
     ) -> str:
         """Complete with reference media attached to the user message."""
         if audio is not None:
@@ -470,7 +501,7 @@ class NullLLM(LLMService):
     def health(self) -> tuple[bool, str]:
         return False, "No language model is configured for prompt rewriting."
 
-    def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
         raise RuntimeError(self.health()[1])
 
 
@@ -481,7 +512,7 @@ class BrokenLLM(LLMService):
     def health(self) -> tuple[bool, str]:
         return False, self._why
 
-    def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
         raise RuntimeError(self._why)
 
 
@@ -522,7 +553,7 @@ class OllamaLLM(LLMService):
             f"Pull it with: ollama pull {self.model}"
         )
 
-    def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
         body = json.dumps(
             {
                 "model": self.model,
@@ -553,7 +584,7 @@ class OllamaLLM(LLMService):
         user: str,
         image: Path,
         *,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> str:
         body = json.dumps(
             {
@@ -584,7 +615,7 @@ class OllamaLLM(LLMService):
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
-        audio: Path | None = None, timeout: float = 120.0,
+        audio: Path | None = None, timeout: float = 300.0,
     ) -> str:
         if audio is not None:
             raise RuntimeError(
@@ -648,7 +679,7 @@ class OpenAICompatLLM(LLMService):
             return False, f"{self.url} does not serve {self.model!r}"
         return True, ""
 
-    def complete(self, system: str, user: str, *, timeout: float = 120.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
         body = json.dumps(
             {
                 "model": self.model,
@@ -673,7 +704,7 @@ class OpenAICompatLLM(LLMService):
         user: str,
         image: Path,
         *,
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> str:
         mime = mimetypes.guess_type(str(image))[0] or "application/octet-stream"
         encoded = base64.b64encode(image.read_bytes()).decode("ascii")
@@ -708,7 +739,7 @@ class OpenAICompatLLM(LLMService):
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
-        audio: Path | None = None, timeout: float = 120.0,
+        audio: Path | None = None, timeout: float = 300.0,
     ) -> str:
         content: list[dict[str, Any]] = [{"type": "text", "text": user}]
         for image in images or []:
@@ -843,6 +874,8 @@ def rewrite_prompt(
     soundscape: str = "",
     context: str = "",
     context_label: str = "",
+    previous_shot: dict[str, str] | None = None,
+    next_shot: dict[str, str] | None = None,
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
     reference_files: list[Path] | None = None,
@@ -854,6 +887,9 @@ def rewrite_prompt(
     model and in error messages — "shot" or "still" for a per-shot prompt,
     "scene" for the project's scene description, "soundscape" for its
     background sound bed, "soundNote" for one shot's own sound accents.
+
+    *previous_shot*/*next_shot* are only meaningful for "shot"/"still" — see
+    build_user_message.
     """
     spec = _REWRITE_KINDS.get(kind, _REWRITE_KINDS["shot"])
     text = (text or "").strip()
@@ -872,6 +908,8 @@ def rewrite_prompt(
             soundscape=soundscape,
             context=context,
             context_label=context_label,
+            previous_shot=previous_shot,
+            next_shot=next_shot,
             characters=characters,
             reference_images=reference_images,
             instruction=spec["instruction"],

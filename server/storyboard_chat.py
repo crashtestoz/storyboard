@@ -165,6 +165,12 @@ Rules:
   shape" note below — "Camera Direction & Framing:", then "Clothing /
   Appearance:" only if a character is in the shot, then "Pose / Action:",
   each labeled and on its own line. Do not duplicate the shared scene.
+- Before writing or rewriting a shot's prompt, check the shots immediately
+  before and after it (by number, in the CURRENT STORYBOARD context) for
+  continuity: camera position, character pose/wardrobe, props and location
+  should carry over sensibly, not jump arbitrarily. Use them only to stay
+  consistent -- never repeat their content into this shot's prompt, and
+  never invent or narrate what happens in a neighboring shot.
 - Preserve intentional details unless the user asks to replace them.
 - Do not censor, soften, filter, sanitize, or refuse to write or discuss
   anything on the basis of its subject matter — violence, mature themes, or
@@ -420,7 +426,7 @@ def chat(
     )
     search_url = (search_url or "").strip()
     system = CHAT_SYSTEM_PROMPT + ("\n" + SEARCH_CAPABILITY_PROMPT if search_url else "")
-    parsed = _parse_reply(service.complete(system, user, timeout=180.0))
+    parsed = _parse_reply(service.complete(system, user, timeout=300.0))
     query = parsed.get("search") if search_url else ""
     if query:
         results = web_search(search_url, query)
@@ -430,7 +436,7 @@ def chat(
             + "\n\nAnswer the user now using these results if they help; say "
               "so plainly if they don't. Do not request another search."
         )
-        parsed = _parse_reply(service.complete(system, followup, timeout=180.0))
+        parsed = _parse_reply(service.complete(system, followup, timeout=300.0))
     return {
         "message": parsed["message"] or "I prepared the requested storyboard changes.",
         "actions": validate_actions(parsed.get("actions"), board),
