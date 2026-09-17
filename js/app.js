@@ -1353,7 +1353,16 @@ function wireChrome() {
   });
 
   $("#videoEngine").addEventListener("change", (e) => {
-    state.board.defaults.model = e.target.value || undefined;
+    const modelId = e.target.value || undefined;
+    state.board.defaults.model = modelId;
+    // Steps is a single project-wide field, not per-engine, and each
+    // engine's useful range is wildly different (H3 is guidance-distilled,
+    // 8 steps; Wan is not, wants ~40) -- so switching engines has to move
+    // it, or it silently stays at whatever the PREVIOUS engine wanted,
+    // which for H3 -> Wan means an unusably-low step count and for
+    // Wan -> H3 means a pointlessly slow one.
+    const cap = modelCap(modelId || STORYBOARD_MODEL);
+    if (cap) state.board.defaults.steps = cap.defaultSteps;
     markDirty();
     render();
   });
@@ -3914,16 +3923,17 @@ function renderEditor() {
         modelNow === "fl2va"
           ? `${withMedia.length} character reference set(s) are selected, but FL2VA does not send separate Cast media. Bake the character into the Start/End frame or remove the anchors for Ref2VA.`
           : modelNow === "wan-i2v"
-          ? `${withMedia.length} character reference set(s) are selected, but Wan 2.2 does not send separate Cast media either — only the shot prompt and an optional Start frame reach the model. Describe appearance in the Cast description instead.`
+          ? `${withMedia.length} character reference set(s) are selected, but Wan 2.2 does not send separate Cast media either — only the shot prompt and its required Start frame reach the model. Describe appearance in the Cast description instead.`
           : `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`;
       castPanel.appendChild(el("div", "inline-warn", mediaMsg));
     }
     host.appendChild(castPanel);
   }
 
-  // Start/End anchors activate FL2VA (or Wan's Start-only anchor). Without
-  // them, the same panel's other reference material is sent through Ref2VA
-  // -- and never through Wan, which has no reference-list mode at all.
+  // Start/End anchors activate FL2VA (or, for Wan, its required Start-only
+  // anchor -- Wan has no text-only mode, unlike FL2VA/Ref2VA). Without
+  // anchors, the same panel's other reference material is sent through
+  // Ref2VA -- and never through Wan, which has no reference-list mode at all.
   const isVideoShot = cap && cap.kind !== "image";
   if (isVideoShot) {
     const refPanel = el("div", "panel");
@@ -3937,7 +3947,7 @@ function renderEditor() {
       modelNow === "fl2va"
         ? "— FL2VA hard anchors for the opening and closing composition"
         : modelNow === "wan-i2v"
-        ? "— Wan 2.2 hard-anchors the Start frame only; End frame is not sent"
+        ? "— Wan 2.2 requires a Start frame; End frame is not sent"
         : "— Ref2VA cues for the opening and closing composition"
     ));
     refPanel.appendChild(lbl);
@@ -3993,7 +4003,7 @@ function renderEditor() {
         modelNow === "fl2va"
           ? "FL2VA wires Start frame and End frame directly to the model's first/last-frame inputs. Separate Cast, style and shot-reference images are not sent on this path."
           : modelNow === "wan-i2v"
-          ? "Wan 2.2 wires Start frame directly to the model's image-to-video input. End frame is not sent — Wan has no port for one. Separate Cast, style and shot-reference images are not sent either; with no Start frame this is a text-only clip."
+          ? "Wan 2.2 wires Start frame directly to the model's image-to-video input, and requires one — this checkpoint has no text-only mode, and rendering without a Start frame set will fail. End frame is not sent — Wan has no port for one. Separate Cast, style and shot-reference images are not sent either."
           : "With no frame anchors, Ref2VA receives character, style and other reference images as an ordered reference set."
       )
     );
@@ -4025,7 +4035,7 @@ function renderEditor() {
     const note = noteModel === "fl2va"
       ? "FL2VA is active because this shot has a Start/End frame anchor. These separate images are retained on the board but are not sent; remove the anchors to use them through Ref2VA."
       : noteModel === "wan-i2v"
-      ? "Wan 2.2 is the selected video engine. These separate images are retained on the board but are not sent — Wan only reads the shot prompt and its optional Start frame."
+      ? "Wan 2.2 is the selected video engine. These separate images are retained on the board but are not sent — Wan only reads the shot prompt and its required Start frame."
       : `${cap.label.split("—")[0].trim()} uses these alongside the ` +
         `cast portraits and project style references. Tag an image as @name to ` +
         `address it directly in the shot prompt.`;

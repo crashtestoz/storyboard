@@ -45,27 +45,42 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
 # What the model is told
 # --------------------------------------------------------------------------- #
 
-# The house style, taken from MiniMax H3's own shipped examples and from what
-# actually changed the output on this workspace's runs: the camera move named
-# up front rather than buried, concrete material detail over adjectives, and
-# the sound as one trailing clause because H3 denoises audio and picture
-# together and its examples put it there.
+# The house style: a fixed three-label breakdown (camera, then appearance
+# when a character is on screen, then action) rather than a single flowing
+# paragraph. Chosen over the old free-paragraph style because it's what
+# reliably came out right on this workspace's runs, and it keeps clothing
+# text explicit even when a character portrait is attached -- the portrait
+# carries identity, not outfit, and H3 has no other way to learn the outfit.
 SYSTEM_PROMPT = """\
 You rewrite shot descriptions into prompts for MiniMax H3, a text-to-video \
-model that generates picture and sound together in one pass.
+model that generates picture and sound together in one pass, using this \
+exact three-section format. Each section starts on its own line with its \
+label, is one sentence, and ends with a period:
 
-Follow this order, as one flowing paragraph, not a list:
-1. The camera move, named explicitly and first (e.g. "a low, fast tracking \
-shot", "a slow push in", "a locked-off wide").
-2. The subject and what it does, in the present tense.
-3. The environment and the light, with concrete physical detail — materials, \
-wear, texture, the time of day. Prefer "battered, weathered metal plating" \
-over "cool-looking ship".
-4. A final clause for the sound: what is heard, layered, separated by commas.
+Camera Direction & Framing: the camera's angle and movement (e.g. "static \
+high angle", "slow push in", "locked-off wide"), what's in frame and how \
+it's composed (e.g. "focusing on her face, body in the lower part of the \
+frame"), and lens detail when it matters (focal length, aperture, depth of \
+field, e.g. "50mm f/2.0 lens, shallow depth").
+Clothing / Appearance: what the subject is wearing and any other visible \
+appearance detail. Include this section only when a character or person is \
+in the shot; omit it entirely (not as an empty line) for shots with no \
+character.
+Pose / Action: what the subject does, in the present tense, in the order it \
+happens (e.g. "she waves to the audience, then holds up a sign reading \
+...").
 
 Rules:
+- Camera Direction & Framing and Pose / Action are always present. Clothing \
+/ Appearance is present only when a character is in the shot.
+- Use exactly these three labels, in this order, each starting a new line: \
+"Camera Direction & Framing:", "Clothing / Appearance:", "Pose / Action:".
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters, locations or story beats, and do not remove any they named.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter — violence, mature themes, or anything else \
+the writer wrote. Identify the tone they set and continue it in the same \
+register, rather than toning it down.
 - When the camera and the subject move at the same time, give each its own \
 short clause rather than one blended sentence, and state the subject's \
 direction of travel in its own frame of reference (e.g. "continues forward, \
@@ -75,20 +90,20 @@ the subject "moving away", is the kind of sentence this model tends to \
 resolve by reversing the subject instead — say what the camera does, then \
 say what the subject does, in that order.
 - If reference images are listed in the context, treat them as visual \
-constraints. Add a compact natural-language summary of the relevant reference \
-cues to the rewritten prompt, especially location, framing, lighting, material \
-and composition. Character portraits are already attached to the shot when \
-needed: use them for identity consistency, but do not spend words describing \
-their appearance, clothing, or build. Do not include filenames or paths in the \
-final prompt.
+constraints: fold relevant framing, lighting, material and composition cues \
+into Camera Direction & Framing, and relevant clothing cues into Clothing / \
+Appearance — even when a character portrait is attached, still name their \
+visible clothing in that section; the portrait carries identity, not outfit. \
+Do not include filenames or paths in the final prompt.
 - Refer to named characters by exactly the name the writer used.
-- One paragraph. No headings, no bullet points, no preamble, no explanation, \
-no quotation marks around the whole thing.
-- Aim for 60 to 110 words. Longer prompts dilute the conditioning.
+- No preamble, no explanation, no quotation marks, no bullet points or \
+dashes within a section.
 - Do not mention aspect ratio, resolution, frame count, steps, seeds or file \
 formats. Those are set elsewhere.
-- Write only the prompt itself. Your entire reply is used verbatim as the \
-prompt.
+- Keep each section to one or two sentences; aim for 70 to 130 words total. \
+Longer prompts dilute the conditioning.
+- Write only the three-section prompt itself. Your entire reply is used \
+verbatim as the prompt.
 """
 
 STILL_SYSTEM_PROMPT = """\
@@ -104,6 +119,10 @@ wear, texture, the time of day.
 Rules:
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters or locations, and do not remove any they named.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter — violence, mature themes, or anything else \
+the writer wrote. Identify the tone they set and continue it in the same \
+register, rather than toning it down.
 - If reference images are listed in the context, treat them as visual \
 constraints. Add a compact natural-language summary of the relevant reference \
 cues to the rewritten prompt. Do not include filenames or paths in the final \
@@ -135,6 +154,10 @@ places.
 sound — those belong to each shot's own prompt and are added separately.
 - Keep every concrete thing the writer specified about the surroundings. \
 Do not invent new locations or settings, and do not remove any they named.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter — violence, mature themes, or anything else \
+the writer wrote. Identify the tone they set and continue it in the same \
+register, rather than toning it down.
 - If reference images are listed in the context, treat them as visual \
 constraints on the environment. Add a compact natural-language summary of \
 their relevant visual cues. Do not include filenames or paths in the \
@@ -169,6 +192,9 @@ ambient bed, not a voice.
 - Keep every concrete thing the writer specified. Do not invent sound \
 sources that contradict the scene, and do not remove any the writer \
 named.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter. Identify the tone the scene sets and \
+continue it in the same register, rather than toning it down.
 - One paragraph, or a short comma-separated phrase. No headings, no \
 bullet points, no preamble, no explanation, no quotation marks around the \
 whole thing.
@@ -204,6 +230,9 @@ suggestion.
 - Keep every concrete background or environmental sound the writer specified. \
 Do not invent sounds that contradict the shot, but omit foreground action Foley, \
 dialogue, music, and any sound already covered by the general Background Sound.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter. Identify the tone the shot sets and continue \
+it in the same register, rather than toning it down.
 - One paragraph, or a short comma-separated phrase. No headings, no bullet \
 points, no preamble, no explanation, no quotation marks around the whole \
 thing.
@@ -222,6 +251,9 @@ Rules:
 - Use only what the shot description itself establishes — distance, \
 position, pose, camera framing, lighting, motion direction. Never invent \
 detail it does not support.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter. Identify the tone the shot description sets \
+and continue it in the same register, rather than toning it down.
 - The three moments must be visibly different from each other whenever the \
 description supports that: e.g. distant vs. close, high vs. low, diving vs. \
 level, upright vs. banked, approaching vs. departing. Do not describe the \
@@ -251,6 +283,8 @@ distinctive marks.
 scene, setting, action, or camera, and do not transcribe or quote the clip.
 - If a name is provided, start with that name followed by a colon.
 - Preserve any concrete user-provided details that do not contradict the image.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything \
+visible on the basis of its subject matter. Describe what is actually there.
 - Do not identify real people or copyrighted characters from the image. If the \
 user supplied a name, use that name as a label without claiming identity.
 - One paragraph. No headings, no bullets, no preamble, no explanation.
@@ -283,6 +317,7 @@ ENVIRONMENT rules:
 Additional rules:
 - The voice clip is evidence for this character only. Do not transcribe or describe it.
 - Preserve concrete user-provided character details when they do not contradict the image.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything visible on the basis of its subject matter. Describe what is actually there.
 - If a name is provided, use it only as a label at the start of CHARACTER.
 - Do not identify real people or copyrighted characters from the image. A name supplied by the user is only a label.
 - Keep each section factual, visually grounded, and suitable for prompting.
