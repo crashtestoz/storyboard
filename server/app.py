@@ -552,9 +552,13 @@ class Handler(BaseHTTPRequestHandler):
                     kind="soundNote",
                 )
             elif shot_id:
-                shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
-                if shot is None:
+                shots = board["shots"]
+                shot_idx = next(
+                    (i for i, s in enumerate(shots) if s["id"] == shot_id), None
+                )
+                if shot_idx is None:
                     raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+                shot = shots[shot_idx]
 
                 # The text is taken from the request, not from the stored shot:
                 # the user may not have saved the words they just typed.
@@ -569,10 +573,21 @@ class Handler(BaseHTTPRequestHandler):
                 wanted = set(shot.get("characterIds") or [])
                 cast = [c for c in (board.get("characters") or []) if c.get("id") in wanted]
 
+                # Adjacent shots, for continuity only -- see build_user_message.
+                # Board order is story order, so the shot immediately before
+                # and after this one in the list are its neighbours.
+                def _neighbor(s: dict | None) -> dict[str, str] | None:
+                    return {"title": s.get("title") or "", "prompt": s.get("prompt") or ""} if s else None
+
+                previous_shot = _neighbor(shots[shot_idx - 1] if shot_idx > 0 else None)
+                next_shot = _neighbor(shots[shot_idx + 1] if shot_idx + 1 < len(shots) else None)
+
                 proposal = rewrite_prompt(
                     service,
                     text,
                     scene=board.get("sceneDescription") or "",
+                    previous_shot=previous_shot,
+                    next_shot=next_shot,
                     characters=cast,
                     reference_images=_rewrite_reference_images(
                         shot, cast, board.get("styleRefs")
