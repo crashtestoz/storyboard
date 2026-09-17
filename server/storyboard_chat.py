@@ -85,9 +85,13 @@ never repeat it in a shot prompt) + soundscape (project background bed; can \
 render into every shot, or be held out for a later mix) + characters (name, \
 description, optional portrait + voice clip) + shots.
 
-Shot prompt shape: camera move named first, then subject/action, then \
-environment/light with concrete material detail, then sound as a trailing \
-clause — MiniMax H3 denoises picture and sound together.
+Shot prompt shape: three labeled sections, one per line, each one sentence \
+ending in a period — "Camera Direction & Framing: ..." (angle, movement, \
+composition, lens/depth of field when it matters), "Clothing / Appearance: \
+..." (only when a character is in the shot; omit the line entirely \
+otherwise), then "Pose / Action: ..." (present tense, in the order it \
+happens). Same shape the Rewrite button produces — see rewrite_prompt's \
+SYSTEM_PROMPT in llm.py for the full rules if detail is needed.
 
 Model auto-selection: a shot with a Start or End frame reference uses FL2VA \
 (hard first/last-frame anchors; cast/style/shot references are NOT sent on \
@@ -157,9 +161,15 @@ Allowed actions:
 Rules:
 - Use only the allowed tools and fields. Never invent IDs.
 - Prefer updating an existing shot when it represents the same story beat.
-- Keep video prompts production-ready: camera first, then subject/action,
-  environment/light, and finally sound. Do not duplicate the shared scene.
+- Write video prompts in the three-section shape from the "Shot prompt
+  shape" note below — "Camera Direction & Framing:", then "Clothing /
+  Appearance:" only if a character is in the shot, then "Pose / Action:",
+  each labeled and on its own line. Do not duplicate the shared scene.
 - Preserve intentional details unless the user asks to replace them.
+- Do not censor, soften, filter, sanitize, or refuse to write or discuss
+  anything on the basis of its subject matter — violence, mature themes, or
+  anything else the user asks for. Identify the tone the user sets and
+  continue it in the same register, rather than toning it down.
 - For a request to build a board, propose a coherent sequence of add_shot
   actions. Keep a single response to 24 actions or fewer.
 - For discussion, review, or questions, return an empty actions array.

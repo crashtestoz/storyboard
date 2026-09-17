@@ -13,14 +13,18 @@ run by hand against real models, not guesses from documentation:
 *   ``ref2va``         — ``video-ref-encoder`` with a reference image list,
                          carrying subject/style across the whole clip
 *   ``krea2-still``    — a single image, for cheap prompt previews
-*   ``wan-i2v``        — text (+ optional Start frame anchor) to silent
-                         video on Wan 2.2's A14B, port 5 fed the same shape
-                         of ``vae-encode`` FL2VA uses, minus End frame
-                         (Wan's DiT has no port for one) and minus audio
-                         (Wan has none)
+*   ``wan-i2v``        — Start frame + text to silent video on Wan 2.2's
+                         A14B, port 5 fed the same shape of ``vae-encode``
+                         FL2VA uses, minus End frame (Wan's DiT has no port
+                         for one) and minus audio (Wan has none)
 
 Hard-won details encoded rather than left to the user:
 
+*   Wan's checkpoint is in_channels=36 — image-to-video only, with no
+    text-only mode. Without a Start frame, ``generate-video`` has no
+    conditioning latent for ref_latent0 and silently skips at runtime: 0
+    frames, no denoise, no error. ``prepare()`` rejects this eagerly (see
+    its wan-i2v check) rather than letting a render burn ~40s doing nothing.
 *   MiniMax H3 frame counts must be ``17n + 5`` **and** produce at least 8
     latent frames. ``frames: 5`` is accepted by the generate stage and then
     silently fails at VAE decode, writing nothing — hence a minimum of 39.
@@ -304,11 +308,15 @@ class VpipeBackend(Backend):
             ),
             ModelCapability(
                 id="wan-i2v",
-                label="Wan 2.2 · I2V-A14B — text / start frame → video (silent)",
+                label="Wan 2.2 · I2V-A14B — start frame → video (silent)",
                 kind="video",
                 # Wan's I2V conditioning is one clip-shaped tensor; iport6
                 # (End frame) is documented as IGNORED by wan outright, not
                 # just unwired-by-default, so this template never sends one.
+                # supports_start_anchor is true in the same sense FL2VA's is
+                # (a per-shot input this engine consumes), but unlike FL2VA
+                # it is not optional for Wan -- see prepare()'s wan-i2v
+                # check, which rejects a shot with no Start frame outright.
                 supports_start_anchor=True,
                 supports_end_anchor=False,
                 supports_style_refs=False,
@@ -357,6 +365,18 @@ class VpipeBackend(Backend):
             raise ValueError(f"unknown model: {model}")
         if not cap.available:
             raise ValueError(cap.unavailable_reason or f"{model} is not available")
+        # Wan's checkpoint is in_channels=36 -- architecturally image-to-video
+        # only, with no text-only mode the way FL2VA/Ref2VA have. Skip this
+        # eagerly: without a Start frame, generate-video has no conditioning
+        # latent for ref_latent0 and silently no-ops at runtime (0 frames, no
+        # denoise, no error) rather than failing, so this has to be caught
+        # here or a render just burns ~40s doing nothing and looks "stuck".
+        if model == "wan-i2v" and not _ref_source(shot.get("startRef"), paths):
+            raise ValueError(
+                "Wan 2.2 has no text-only mode -- it requires a Start frame. "
+                "Set a Start frame for this shot, or switch its video engine "
+                "to Automatic (MiniMax H3) in Settings."
+            )
         # Create Stills uses a synthetic Krea-2 image job, but it copies the
         # shot so it can reuse the scene/cast/reference layers. Dialogue is
         # irrelevant to that image preview and must not require a prepared
@@ -630,13 +650,19 @@ class VpipeBackend(Backend):
 
     def _wan_i2v_spec(self, shot, paths, prompt, w, h, frames, steps, seed,
                       save_frames=True, sketch=False):
-        """Text-to-video, plus an optional Start-frame anchor on port 5.
+        """Start frame + text to video, via the Start-frame anchor on port 5.
+
+        Wan's checkpoint is image-to-video only (in_channels=36): port 5
+        must be fed or generate-video silently skips (0 frames, no error).
+        prepare() rejects a shot with no Start frame before this is ever
+        called, so `src` below is guaranteed, not optional -- the `if src`
+        guard stays as defense in depth, not the real gate.
 
         Wan has no End-frame port at all (see the module docstring) and no
-        audio, so this is the FL2VA template with those two removed and a
-        negative prompt added -- Wan is not guidance-distilled, so without
-        one `generate-video`'s guidance_scale config does nothing (see
-        WAN_NEGATIVE_PROMPT).
+        audio, so this is otherwise the FL2VA template with those two
+        removed and a negative prompt added -- Wan is not guidance-distilled,
+        so without one `generate-video`'s guidance_scale config does nothing
+        (see WAN_NEGATIVE_PROMPT).
         """
         stages: list[dict] = [
             _model_select("local/Wan2.2-I2V-A14B-8bit"),
