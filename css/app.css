@@ -1166,7 +1166,7 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
 }
 
 .blade-head {
@@ -1194,6 +1194,24 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   font-size: var(--fs-xs);
   border-bottom: 1px solid var(--border);
   background: var(--bg-sunken);
+}
+
+.blade-speech {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-size: var(--fs-xs);
+}
+
+.blade-speech-toggle { flex: none; white-space: nowrap; }
+
+.blade-speech select {
+  margin-left: auto;
+  max-width: 55%;
+  font-size: var(--fs-xs);
 }
 
 .blade-messages {
@@ -1675,10 +1693,18 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 #castEditor { z-index: 100; }
 #picker     { z-index: 120; }
 
-.cast-ai-row {
+.field-action-head {
   display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   justify-content: flex-end;
-  margin: var(--sp-2) 0;
+  min-height: 26px;
+  margin-bottom: var(--sp-2);
+}
+
+.field-action-head > label {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
 }
 
 /* The toast is how failures are reported, so it has to sit above anything
@@ -2019,9 +2045,47 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   min-height: 26px;
 }
 
+.pane-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
 .pane-hint {
   font-size: var(--fs-xs);
   color: var(--text-faint);
+}
+
+/* Heading + description below it, mirroring .section-label-with-note +
+   .field-note in the rail. Kept in their own column (.pane-head-text) so
+   an action button appended after sits beside that column instead of
+   wedging between the heading and its description. */
+.pane-head-with-note { margin-top: var(--sp-2); margin-bottom: 0; min-height: 0; }
+
+/* The rail already spaces its sections with a flex gap, and a .panel
+   already has its own top padding, so the heading's own top margin would
+   double up when it opens either container. */
+.rail section > .pane-head-with-note:first-child,
+.panel > .pane-head-with-note:first-child,
+.panel > .field:first-child > .pane-head-with-note:first-child,
+.final-box > .pane-head-with-note:first-child { margin-top: 0; }
+
+/* .final-box already gaps its flex children, so the note's own bottom
+   margin would stack a second gap in front of the content below it. */
+.final-box > .pane-head-with-note .pane-note { margin-bottom: 0; }
+
+.pane-head-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pane-note {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  margin: 0 0 var(--sp-2);
 }
 
 /* The point of the tabs: one field at a time, tall enough to write in. */

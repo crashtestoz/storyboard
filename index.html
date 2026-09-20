@@ -60,24 +60,28 @@
     <aside class="rail">
 
       <section>
-        <div class="section-label section-label-with-note">
-          Scene description
+        <div class="pane-head pane-head-with-note">
+          <div class="pane-head-text">
+            <div class="pane-label">Scene description</div>
+            <div class="pane-note">— reused every shot</div>
+          </div>
           <div class="header-spacer"></div>
           <span id="sceneWandSlot"></span>
         </div>
-        <div class="field-note">— reused every shot</div>
         <textarea id="sceneDescription" rows="7"
           placeholder="Subject appearance and overall style — what should stay true across every shot."></textarea>
         <div class="proposal-slot" id="sceneProposalSlot"></div>
       </section>
 
       <section>
-        <div class="section-label section-label-with-note">
-          Background sound
+        <div class="pane-head pane-head-with-note">
+          <div class="pane-head-text">
+            <div class="pane-label">Background sound</div>
+            <div class="pane-note">— reused every shot</div>
+          </div>
           <div class="header-spacer"></div>
           <span id="soundscapeWandSlot"></span>
         </div>
-        <div class="field-note">— reused every shot</div>
         <textarea id="soundscape" rows="4"
           placeholder="The ambient bed under every clip — e.g. “Deep engine roar, rushing wind, the hiss of spray off the water.” Appended after each shot's own description, which is where H3 expects sound cues."></textarea>
         <div class="proposal-slot" id="soundscapeProposalSlot"></div>
@@ -100,9 +104,11 @@
       </section>
 
       <section>
-        <div class="section-label">
-          Style references
-          <span class="hint">— project-wide</span>
+        <div class="pane-head pane-head-with-note">
+          <div class="pane-head-text">
+            <div class="pane-label">Style references</div>
+            <div class="pane-note">— a library; add one to a shot's Reference images to include it in that render</div>
+          </div>
         </div>
         <div class="style-refs" id="styleRefs"></div>
       </section>
@@ -110,7 +116,7 @@
       <section>
         <details class="queue-box" id="queueBox">
           <summary>
-            <span class="section-label">Queue</span>
+            <span class="pane-label">Queue</span>
             <span class="queue-summary" id="queueSummary"></span>
           </summary>
           <div class="queue-list" id="queueList"></div>
@@ -156,6 +162,17 @@
             aria-label="Close Storyboard AD">×</button>
         </header>
         <div class="blade-context" id="bladeContext"></div>
+        <div class="blade-speech" id="bladeSpeech">
+          <label class="toggle blade-speech-toggle" id="bladeSpeechToggleWrap">
+            <input type="checkbox" id="bladeSpeechToggle">
+            <span class="toggle-track"></span>
+            <span>Read replies aloud</span>
+          </label>
+          <select id="bladeSpeechVoice" title="Voice the Storyboard AD speaks replies in">
+            <option value="">Engine default voice</option>
+          </select>
+          <audio id="bladeSpeechAudio" hidden></audio>
+        </div>
         <div class="blade-messages" id="bladeMessages" aria-live="polite"></div>
         <form class="blade-composer" id="bladeComposer">
           <textarea id="bladeInput" rows="3"
@@ -398,8 +415,9 @@
           <input type="text" id="castName" placeholder="e.g. Kira">
         </div>
         <div class="field">
-          <label>Description <span class="hint-inline">required — this is what conditions the model</span></label>
-          <div class="cast-ai-row">
+          <div class="field-action-head">
+            <label>Description <span class="hint-inline">required — this is what conditions the model</span></label>
+            <div class="header-spacer"></div>
             <button class="btn btn-sm wand" id="castDescribe" title="Describe the character and separate the environment">
               <svg class="rewrite-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <use href="#stage-icon-rewrite"></use>
@@ -408,7 +426,7 @@
           </div>
           <textarea id="castDesc" rows="4"
             placeholder="Appearance, clothing, build, age — whatever should stay consistent whenever they appear."></textarea>
-          <div class="field-note">AI separates character traits from the surrounding environment.</div>
+          <div class="field-note">Separates character traits from the surrounding environment.</div>
           <div class="proposal-slot" id="castDescProposal"></div>
         </div>
         <div class="field-row">

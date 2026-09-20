@@ -1002,6 +1002,7 @@ class VpipeBackend(Backend):
         )
         self._proc = proc
         phase_pct: dict[str, float] = {}
+        denoise_started_at: float | None = None
 
         try:
             assert proc.stdout is not None
@@ -1019,6 +1020,13 @@ class VpipeBackend(Backend):
                 if pm:
                     phase = pm.group("phase")
                     phase_pct[phase] = float(pm.group("pct"))
+                    eta = None
+                    if phase == "denoise":
+                        if denoise_started_at is None:
+                            denoise_started_at = time.time()
+                        eta = _denoise_eta_seconds(
+                            denoise_started_at, phase_pct[phase], time.time()
+                        )
                     on_event(
                         ProgressEvent(
                             phase=phase,
@@ -1026,6 +1034,7 @@ class VpipeBackend(Backend):
                             detail=text,
                             log_line=text,
                             log_level=level,
+                            eta_seconds=eta,
                         )
                     )
                 else:
@@ -1588,9 +1597,10 @@ def _ref2va_references(
 ) -> list[str]:
     """Reference order for Ref2VA, strongest shot-local signals first.
 
-    Start/end and other shot-local images come first. Character portraits and
-    project style refs follow in the same request so the model can use every
-    available reference until its image limit is reached.
+    Start/end and other shot-local images come first, then character
+    portraits for the shot's cast. Project style refs are not included
+    automatically — a shot only sends one if it's also in that shot's own
+    reference images.
     """
     images: list[str] = []
     sounds: list[str] = []
@@ -1645,10 +1655,9 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
         candidates.extend((r, "Shot reference", "environment and composition") for r in (shot.get("referenceImages") or []))
         candidates.extend((c["image"], c.get("name") or "Character", "character identity")
                           for c in _shot_characters(shot, project) if c.get("image"))
-        # Keep project-wide references in the same Ref2VA request even when a
-        # shot also has local references. The model's nine-image limit is
-        # enforced below, with shot-local inputs taking priority by order.
-        candidates.extend((r, "Project style", "style") for r in project.get("styleRefs") or [])
+        # Project style refs are a library, not an automatic input: a shot
+        # only sends one if it's been added to that shot's own reference
+        # images, same as any other picked image.
     # FL2VA anchors are wired directly to the model's keyframe ports. They
     # are not members of a prompt-addressable reference list.
     result, seen, tags = [], {}, set()
@@ -1942,3 +1951,30 @@ def _overall(phase_pct: dict[str, float]) -> float:
         elif i == furthest:
             total += weight * phase_pct[phase] / 100.0        # in progress
     return round(min(99.0, total / denom * 100.0), 1)
+
+
+def _denoise_eta_seconds(
+    denoise_started_at: float, denoise_pct: float, now: float
+) -> float | None:
+    """Project remaining wall-clock seconds from the pace of denoise itself.
+
+    Denoise is ~75% of a render (see PHASE_WEIGHTS) and ticks its percent at
+    a steady cadence, so its own average seconds-per-percent so far predicts
+    the rest of the render far better than the blended overall percentage —
+    that blend is skewed by the other phases' very different per-percent
+    cost (encoding references, before denoise even starts, and vae decode,
+    after). None until denoise has reported enough progress to extrapolate
+    from.
+    """
+    if denoise_pct <= 0:
+        return None
+    seconds_per_pct = (now - denoise_started_at) / denoise_pct
+    remaining_denoise = seconds_per_pct * (100.0 - denoise_pct)
+    # Phases after denoise scale with the same frame/resolution geometry, so
+    # assume they keep the same ratio to denoise that PHASE_WEIGHTS gives them.
+    after_denoise_weight = sum(
+        w for p, w in PHASE_WEIGHTS.items()
+        if p in PHASE_ORDER and PHASE_ORDER.index(p) > PHASE_ORDER.index("denoise")
+    )
+    remaining_after = remaining_denoise * (after_denoise_weight / PHASE_WEIGHTS["denoise"])
+    return max(0.0, remaining_denoise + remaining_after)

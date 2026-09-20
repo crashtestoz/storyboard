@@ -178,6 +178,10 @@ class ProgressEvent:
     detail: str = ""
     log_line: str | None = None
     log_level: str = "INFO"
+    # Seconds of wall clock estimated to remain, from the pace of denoise
+    # progress seen so far. None until there is enough of that phase's own
+    # progress to extrapolate from.
+    eta_seconds: float | None = None
 
 
 @dataclass

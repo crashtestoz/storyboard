@@ -78,7 +78,7 @@ class SceneLayers(unittest.TestCase):
         self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
         self.assertEqual(_reference_bindings(shot, self.board, 'fl2va'), [])
 
-    def test_project_and_shot_references_are_combined(self):
+    def test_project_style_refs_are_a_library_not_auto_combined(self):
         self.board['styleRefs'] = [{'path': 'style.png'}]
         shot = {**self.shot, 'startRef': {'path': 'opening.png'},
                 'endRef': {'path': 'closing.png'}}
@@ -88,7 +88,7 @@ class SceneLayers(unittest.TestCase):
         )
         self.assertEqual([Path(r).name for r in refs],
                          ['opening.png', 'closing.png', 'room.png', 'gold.png',
-                          'style.png', 'voice.wav'])
+                          'voice.wav'])
 
     def test_h3_base_frame_sizes(self):
         self.assertEqual(list(ASPECT_TABLE), ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'])

@@ -286,7 +286,7 @@ def test_dialogue_prompting() -> None:
 
 
 def test_ref2va_reference_priority() -> None:
-    section("Ref2VA shot references outrank global style")
+    section("Ref2VA uses shot-local references; global style is a library only")
     board = a_board(1)
     board["characters"] = [
         {
@@ -326,8 +326,8 @@ def test_ref2va_reference_priority() -> None:
     check("Ref2VA receives both labeled frame references",
           "shot.jpg" in names and "shot-end.jpg" in names,
           str(names))
-    check("project style refs join shot-local references",
-          "global-1.jpg" in names and "global-2.jpg" in names,
+    check("project style refs are a library, not sent unless added to the shot",
+          "global-1.jpg" not in names and "global-2.jpg" not in names,
           str(names))
     check("shot-local images follow the frame references",
           names[2:4] == ["cockpit-left.jpg", "cockpit-right.jpg"],

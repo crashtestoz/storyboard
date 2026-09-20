@@ -65,7 +65,7 @@ The current implementation is in `storyboard/`:
 
 | Configuration | Actual behavior |
 | --- | --- |
-| No Start/End frame | Uses Ref2VA with scene references, cast portraits, and project style references. |
+| No Start/End frame | Uses Ref2VA with scene references and cast portraits. Project style references are a library — one is only sent if it's also added as one of the shot's own scene references. |
 | Start/End frame, including a chain | Automatically selects FL2VA. The supplied frame becomes an anchor; separate Ref2VA portraits and voice references are not supplied on this path. |
 | Ref2VA with native speech | Sends the speaking character's voice reference and asks H3 to generate the dialogue. |
 | Dialogue-window recording | Uses a separately prepared dialogue take, applied after the video render. |

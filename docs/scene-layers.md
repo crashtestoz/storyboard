@@ -44,9 +44,9 @@ Tags use letters, numbers, hyphens, and underscores. Shared descriptions may use
 tags when those images are supplied in every affected shot.
 
 Selected Cast portraits are attached and named automatically; mentioning the
-character by name is sufficient. Project style images are included with the
-shot's local references and selected Cast portraits when the shot uses Ref2VA.
-A Start frame or End frame automatically selects FL2VA and wires those images
+character by name is sufficient. Project style images are a library, not an
+automatic input: a style image is only sent for a shot once it's also added to
+that shot's own reference images. A Start frame or End frame automatically selects FL2VA and wires those images
 as hard first/last-frame anchors; separate Ref2VA images are not sent on that
 path. With no anchors, Ref2VA receives the combined ordered reference set and
 its nine-image limit applies. A chained Start frame resolves to the previous
@@ -55,8 +55,9 @@ shot's last saved frame before the FL2VA request is generated.
 ### Reference continuity
 
 Use **Continue from shot N using Ref2VA references** to supply the previous
-scene's final frame alongside the original cast portraits, style references,
-and native speaker voice. This is guidance, not a pinned first frame. It cannot
+scene's final frame alongside the original cast portraits and native speaker
+voice (plus any style reference explicitly added to this shot). This is
+guidance, not a pinned first frame. It cannot
 be combined with Start/End anchors. **Continue all scenes with Ref2VA** applies
 this relationship across the board. Dependencies resolve before each render,
 retain frames in draft mode, detect changed frame content, and block on failed

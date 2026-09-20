@@ -57,6 +57,10 @@ const state = {
   chats: {},
   chatBusy: false,
   bladeOpen: false,
+  // Whether the AD reads its own replies aloud. A device preference, not
+  // board content — kept in localStorage rather than defaults, the same
+  // reasoning as CHAT_STORAGE_PREFIX above.
+  speechEnabled: false,
 };
 
 /* Mirrors RERUNNABLE in server/orchestrator.py: the statuses a whole-board
@@ -460,6 +464,12 @@ function dur(seconds) {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
+/** Appended next to a running shot's percent once there's enough denoise
+ * progress to extrapolate from (see _denoise_eta_seconds on the backend). */
+function etaSuffix(shot) {
+  return shot.etaSeconds != null ? ` · ~${dur(shot.etaSeconds)} left` : "";
+}
+
 function toast(msg, kind = "info") {
   state.toast = { msg, kind, at: Date.now() };
   const box = $("#toast");
@@ -537,6 +547,7 @@ function view(shot) {
     ...shot,
     status: run.status || shot.status,
     progress: run.progress != null ? run.progress : shot.progress,
+    etaSeconds: run.etaSeconds != null ? run.etaSeconds : null,
     runtimeSeconds:
       run.runtimeSeconds != null ? run.runtimeSeconds : shot.runtimeSeconds,
     validation: run.validation || shot.validation,
@@ -609,6 +620,7 @@ function projectBatchOutcome(status) {
 // in-progress conversation away.
 const CHAT_STORAGE_PREFIX = "storyboardToVideo.chat.";
 const CHAT_HISTORY_LIMIT = 60;
+const AD_SPEECH_STORAGE_KEY = "storyboardToVideo.adSpeech.enabled";
 
 function chatStorageKey(slug) {
   return CHAT_STORAGE_PREFIX + slug;
@@ -680,6 +692,24 @@ function paintBladeContext() {
   $("#bladeModel").textContent = svc
     ? `${svc.label}${svc.model ? ` · ${svc.model}` : ""}`
     : "No prompt rewriting model configured";
+  paintBladeSpeechControls();
+}
+
+/* The voice list is cast members with a recorded voice clip — the same
+   reference a cloning engine would use for their own dialogue. Picking one
+   here just tells speak_ad_reply (server/speech.py) to reuse it for the AD's
+   replies too, rather than the engine's own default voice. */
+function paintBladeSpeechControls() {
+  const select = $("#bladeSpeechVoice");
+  if (!select || !state.board) return;
+  const wanted = state.board.defaults.adSpeakerId || "";
+  const voiced = (state.board.characters || []).filter((c) => (c.voice || {}).path);
+  select.innerHTML = "";
+  select.appendChild(new Option("Engine default voice", ""));
+  voiced.forEach((c) => select.appendChild(new Option(c.name || "Unnamed cast member", c.id)));
+  // The saved choice may name a character since removed or since stripped of
+  // its voice — fall back to the default rather than silently pick another.
+  select.value = voiced.some((c) => c.id === wanted) ? wanted : "";
 }
 
 function proposalSummary(action) {
@@ -894,6 +924,21 @@ function randomADThinkingLine() {
   return AD_THINKING_LINES[Math.floor(Math.random() * AD_THINKING_LINES.length)];
 }
 
+/* Fire-and-forget: a reply that fails to speak is not worth blocking the
+   chat over, so failures are a quiet toast rather than a broken turn. */
+async function speakAssistantReply(text) {
+  const audio = $("#bladeSpeechAudio");
+  if (!audio || !state.slug || !(text || "").trim()) return;
+  try {
+    const result = await API.speak(state.slug, text);
+    audio.src = result.audioUrl;
+    await audio.play();
+    if (result.note) toast(result.note);
+  } catch (err) {
+    toast(`Storyboard AD could not speak that reply: ${err.message}`, "error");
+  }
+}
+
 async function sendAssistantMessage() {
   if (state.chatBusy || !state.board) return;
   const input = $("#bladeInput");
@@ -919,6 +964,7 @@ async function sendAssistantMessage() {
     await saveNow();
     const result = await API.chat(state.slug, content, history, state.selectedId, svc.id);
     Object.assign(pending, {content: result.message, actions: result.actions || [], pending: false});
+    if (state.speechEnabled) speakAssistantReply(result.message);
   } catch (err) {
     Object.assign(pending, {content: `Chat failed: ${err.message}`, pending: false, error: true});
   } finally {
@@ -990,6 +1036,22 @@ function wireAssistantBlade() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.bladeOpen) setBladeOpen(false);
   });
+  const speechToggle = $("#bladeSpeechToggle");
+  try { state.speechEnabled = localStorage.getItem(AD_SPEECH_STORAGE_KEY) === "1"; }
+  catch { /* private browsing, storage disabled */ }
+  speechToggle.checked = state.speechEnabled;
+  speechToggle.addEventListener("change", (e) => {
+    state.speechEnabled = e.target.checked;
+    try { localStorage.setItem(AD_SPEECH_STORAGE_KEY, state.speechEnabled ? "1" : "0"); }
+    catch { /* optional storage */ }
+    if (!state.speechEnabled) $("#bladeSpeechAudio").pause();
+  });
+  $("#bladeSpeechVoice").addEventListener("change", (e) => {
+    if (!state.board) return;
+    state.board.defaults.adSpeakerId = e.target.value;
+    markDirty();
+  });
+
   positionAssistantBlade();
   renderAssistantChat();
 }
@@ -2052,7 +2114,8 @@ function paintLive() {
 
   shots().forEach((raw) => {
     const shot = view(raw);
-    const pct = `${Math.round(shot.progress || 0)}%`;
+    const pctOnly = `${Math.round(shot.progress || 0)}%`;
+    const pct = `${pctOnly}${etaSuffix(shot)}`;
 
     const row = document.querySelector(`.queue-row[data-id="${raw.id}"]`);
     if (row) {
@@ -2074,7 +2137,7 @@ function paintLive() {
       const pe = document.querySelector(".preview-empty span:not(.big)");
       if (pe && shot.status === "running") {
         pe.textContent =
-          `Rendering — ${pct}${shot.phase ? ` (${shot.phase})` : ""}`;
+          `Rendering — ${pctOnly}${shot.phase ? ` (${shot.phase})` : ""}${etaSuffix(shot)}`;
       }
       const rt = document.querySelector('#preview .stat-grid dt + dd');
       if (rt) rt.textContent = STATUS_LABELS[shot.status] || shot.status;
@@ -2544,7 +2607,7 @@ function renderRail() {
       row.appendChild(m);
     }
     if (shot.status === "running") {
-      row.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%`));
+      row.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%${etaSuffix(shot)}`));
     }
     row.addEventListener("click", () => {
       state.selectedId = raw.id;
@@ -2806,8 +2869,7 @@ function renderFinal(host = $("#preview .final-video-content")) {
 
 function renderFinalPane() {
   const pane = el("div", "final-box final-video-pane");
-  const label = el("div", "section-label");
-  label.append(el("span", null, "Final video"), el("span", "hint", "— every shot, in order"));
+  const label = paneHint("Final video", "every shot, in order");
   const content = el("div", "final-video-content");
   pane.append(label, content);
   renderFinal(content);
@@ -3024,10 +3086,7 @@ async function editCharacter(existing) {
     const llm = currentLLM();
     const field = $("#castDesc");
     descProposal.innerHTML = "";
-    descBtn.disabled = true;
-    descBtn.classList.add("busy");
-    const label = descBtn.lastChild;
-    label.textContent = "AI…";
+    setRewriteButtonBusy(descBtn, true);
     try {
       const r = await API.describeCharacter(
         image,
@@ -3050,8 +3109,7 @@ async function editCharacter(existing) {
     } catch (err) {
       castError(`Could not describe the image: ${err.message}`);
     } finally {
-      descBtn.classList.remove("busy");
-      label.textContent = "AI";
+      setRewriteButtonBusy(descBtn, false);
       paint();
     }
   }
@@ -3266,7 +3324,7 @@ function renderStrip() {
     const foot = el("div", "shot-foot");
     foot.appendChild(chip(shot.status));
     if (shot.status === "running") {
-      foot.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%`));
+      foot.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%${etaSuffix(shot)}`));
     } else if (shot.runtimeSeconds != null) {
       foot.appendChild(el("span", "shot-sub", dur(shot.runtimeSeconds)));
     }
@@ -3591,7 +3649,11 @@ function renderEditor() {
     }
 
     // the spoken line, playable right here
-    if (raw.dialogueAudioUrl) {
+    // dialogueAudioUrl is a cached, separate TTS take. Native H3 speech is
+    // regenerated inside clip.mp4 on every render, so an older recording can
+    // legitimately remain on disk but must not be presented as the native
+    // render's voice preview.
+    if (raw.dialogueAudioUrl && raw.dialogueSource !== "native") {
       const au = el("audio", "speak-player");
       au.src = raw.dialogueAudioUrl;
       au.controls = true;
@@ -3603,7 +3665,7 @@ function renderEditor() {
       dl.title = "Download this generated dialogue take";
       dubRow.appendChild(dl);
     }
-    if (raw.dubUrl) {
+    if (raw.dubUrl && raw.renderedDialogueSource !== "native") {
       dubRow.appendChild(
         el("span", "field-note",
            raw.dubMode === "replace"
@@ -3668,14 +3730,16 @@ function renderEditor() {
 
   // prompt panel
   const panel = el("div", "panel");
-  panel.appendChild(
-    field("Shot name", input("text", raw.title, (v) => {
-      live().title = v;
-      markDirty();
-      renderStrip();
-      renderRail();
-    }))
-  );
+  const shotNameInput = input("text", raw.title, (v) => {
+    live().title = v;
+    markDirty();
+    renderStrip();
+    renderRail();
+  });
+  shotNameInput.dataset.fkey = "shot-name";
+  const shotNameField = el("div", "field");
+  shotNameField.append(paneHint("Shot name", null), shotNameInput);
+  panel.appendChild(shotNameField);
 
   /* The four long-form fields share one tall pane instead of stacking four
      short boxes down the page. Each was 2-5 rows before, which is not enough
@@ -3736,10 +3800,7 @@ function renderEditor() {
   });
 
   const promptPane = el("div");
-  const promptHead = el("div", "pane-head");
-  promptHead.appendChild(
-    el("span", "pane-hint", "action / camera / mood only — not the subject or the style")
-  );
+  const promptHead = paneHint("Action / camera / mood only", "not the subject or the style");
   promptHead.appendChild(el("div", "header-spacer"));
   promptHead.appendChild(
     wandButton({
@@ -3783,6 +3844,12 @@ function renderEditor() {
       if (!hadDialogue && dlg.value.trim()) renderEditor();
     });
     dlg.dataset.fkey = "dialogue";
+    const dialogueSpeaker = (() => {
+      const cast = state.board.characters || [];
+      const inShot = cast.filter((c) => (raw.characterIds || []).includes(c.id));
+      return cast.find((c) => c.id === raw.speakerId) ||
+        inShot.find((c) => c.voice && c.voice.path) || inShot[0] || null;
+    })();
     const style = el("textarea", "ta-compact");
     style.value = raw.dialogueStyle || "";
     style.placeholder =
@@ -3804,11 +3871,48 @@ function renderEditor() {
     source.value = raw.dialogueSource || "auto";
     source.onchange = () => { live().dialogueSource = source.value; markDirty(); renderEditor(); };
     dialogueGuide(guide, raw);
-    dp.append(paneHint("Dialogue source — recording uses a generated take; H3 native speech uses the cast member's reference voice"), source, guide);
+    const dialogueHead = paneHint(
+      "Spoken words", "rewritten in the selected speaker’s researched tone"
+    );
+    dialogueHead.appendChild(el("div", "header-spacer"));
+    dialogueHead.appendChild(
+      wandButton({
+        title: (svc) =>
+          `Research ${dialogueSpeaker ? dialogueSpeaker.name : "the selected speaker"} ` +
+          `and rewrite this line in character using ${svc.label} (${svc.model}). ` +
+          `The result is shown for approval before changing anything.`,
+        disabledReason: !dialogueSpeaker
+          ? "Choose a cast character for this shot before rewriting dialogue."
+          : !(state.info && state.info.search && state.info.search.url)
+            ? "Configure Web search in Settings before rewriting dialogue."
+            : "",
+        slot: () => dp.querySelector(".proposal-slot"),
+        rewrite: () => API.rewrite(state.slug, {
+          shotId: raw.id,
+          field: "dialogue",
+          text: dlg.value,
+          speakerId: dialogueSpeaker && dialogueSpeaker.id,
+        }),
+        onUse: (text) => {
+          dlg.value = text;
+          live().dialogue = text;
+          markDirty();
+          updateResolvedPreview();
+          syncTabDots();
+          dialogueGuide(guide, live());
+          toast(
+            `Dialogue rewritten${dialogueSpeaker ? ` for ${dialogueSpeaker.name}` : ""}. ` +
+            "Undo by editing it back — the old line is above."
+          );
+        },
+      })
+    );
+    dp.append(paneHint("Dialogue source", "recording uses a generated take; H3 native speech uses the cast member's reference voice"), source, guide);
     dp.append(
-      paneHint("spoken words — rendered using the dialogue source selected above"),
+      dialogueHead,
       dlg,
-      paneHint("voice direction — sent to compatible speech engines, not spoken aloud"),
+      el("div", "proposal-slot"),
+      paneHint("Voice direction", "sent to compatible speech engines, not spoken aloud"),
       style
     );
     // Speaking the line belongs with the line. It used to hang off the panel
@@ -3835,7 +3939,7 @@ function renderEditor() {
     sa.dataset.fkey = "sound-accents";
 
     const sp2 = el("div");
-    const saHead = paneHint("additional local background sound only — do not repeat the general Background Sound");
+    const saHead = paneHint("Additional local background sound only", "do not repeat the general Background Sound");
     saHead.appendChild(el("div", "header-spacer"));
     saHead.appendChild(
       wandButton({
@@ -3887,9 +3991,7 @@ function renderEditor() {
   if (cast.length) {
     const castPanel = el("div", "panel");
     castPanel.style.marginTop = "var(--sp-3)";
-    const cl = el("div", "section-label", "Characters in this shot");
-    cl.appendChild(el("span", "hint", "— refer to them by name in the prompt"));
-    castPanel.appendChild(cl);
+    castPanel.appendChild(paneHint("Characters in this shot", "refer to them by name in the prompt"));
 
     const picks = el("div", "cast-picks");
     cast.forEach((ch) => {
@@ -3938,19 +4040,16 @@ function renderEditor() {
   if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
-    const lbl = el("div", "section-label", "Start & end references");
     const modelNow = effectiveShotModel(raw);
     const anchorMode = modelNow === "fl2va" || modelNow === "wan-i2v";
-    lbl.appendChild(el(
-      "span",
-      "hint",
+    refPanel.appendChild(paneHint(
+      "Start & end references",
       modelNow === "fl2va"
-        ? "— FL2VA hard anchors for the opening and closing composition"
+        ? "FL2VA hard anchors for the opening and closing composition"
         : modelNow === "wan-i2v"
-        ? "— Wan 2.2 requires a Start frame; End frame is not sent"
-        : "— Ref2VA cues for the opening and closing composition"
+        ? "Wan 2.2 requires a Start frame; End frame is not sent"
+        : "Ref2VA cues for the opening and closing composition"
     ));
-    refPanel.appendChild(lbl);
 
     const slots = el("div", "ref-slots");
     slots.appendChild(refSlot("Start frame", raw, "startRef"));
@@ -4028,7 +4127,7 @@ function renderEditor() {
   if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
-    refPanel.appendChild(el("div", "section-label", "Reference images"));
+    refPanel.appendChild(paneHint("Reference images", null));
     refPanel.appendChild(shotReferenceImages(raw));
 
     const noteModel = effectiveShotModel(raw);
@@ -4037,7 +4136,8 @@ function renderEditor() {
       : noteModel === "wan-i2v"
       ? "Wan 2.2 is the selected video engine. These separate images are retained on the board but are not sent — Wan only reads the shot prompt and its required Start frame."
       : `${cap.label.split("—")[0].trim()} uses these alongside the ` +
-        `cast portraits and project style references. Tag an image as @name to ` +
+        `cast portraits selected for this shot. Style references are a library — ` +
+        `add one here to include it in this shot's render. Tag an image as @name to ` +
         `address it directly in the shot prompt.`;
     refPanel.appendChild(el("div", "hint-body", note));
     host.appendChild(refPanel);
@@ -4640,7 +4740,12 @@ function renderPreview() {
     host.appendChild(renderFinalPane());
   } else {
     const stage = el("div", "preview-stage");
-    const video = raw.dubUrl || (shot.outputs || []).find((u) => hasExt(u, "mp4"));
+    // A native H3 render already contains the cloned character voice.  A
+    // clip-dubbed URL can survive from an older recording-mode take (for
+    // example when the server is restarted just as a render finishes), and
+    // must not replace that native soundtrack in the preview.
+    const video = (raw.renderedDialogueSource !== "native" && raw.dubUrl) ||
+      (shot.outputs || []).find((u) => hasExt(u, "mp4"));
     const image = (shot.outputs || []).find((u) => hasExt(u, "jpe?g|png|webp"));
     if (video) {
       stage.appendChild(
@@ -4681,7 +4786,7 @@ function renderPreview() {
           "span",
           null,
           shot.status === "running"
-            ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}`
+            ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}${etaSuffix(shot)}`
             : "Not rendered yet"
         )
       );
@@ -5080,9 +5185,22 @@ function diagnostic(raw, shot) {
 
 /* --- prompt rewriting ---------------------------------------------------- */
 
-function paneHint(text) {
-  const h = el("div", "pane-head");
-  h.appendChild(el("span", "pane-hint", text));
+function paneHint(text, description) {
+  if (description === undefined) {
+    // Legacy single-line hint: plain small text, no heading styling.
+    const h = el("div", "pane-head");
+    h.appendChild(el("span", "pane-hint", text));
+    return h;
+  }
+  // The heading and its description stay together in one column so an
+  // action button appended after (see dialogueHead) sits beside that
+  // column instead of wedging between the two lines. Pass `null` for
+  // description to get a bare, capitalised heading with no note line.
+  const h = el("div", "pane-head pane-head-with-note");
+  const col = el("div", "pane-head-text");
+  col.appendChild(el("div", "pane-label", text));
+  if (description) col.appendChild(el("div", "pane-note", "— " + description));
+  h.appendChild(col);
   return h;
 }
 
@@ -5112,12 +5230,24 @@ function syncTabDots() {
    description, the background sound): the caller supplies the tooltip, where
    the proposal slot lives, how to ask for the rewrite, and what to do with
    the result. */
-function wandButton({ title, slot, rewrite, onUse }) {
+function setRewriteButtonBusy(btn, busy) {
+  btn.disabled = busy;
+  btn.classList.toggle("busy", busy);
+  btn.lastChild.textContent = busy ? "rewriting…" : "Rewrite";
+}
+
+function wandButton({ title, slot, rewrite, onUse, disabledReason = "" }) {
   const svc = currentLLM();
   const btn = el("button", "btn btn-sm wand");
   const icon = stageIconSvg("rewrite");
   icon.classList.add("rewrite-icon");
   btn.append(icon, el("span", null, "Rewrite"));
+
+  if (disabledReason) {
+    btn.disabled = true;
+    btn.title = disabledReason;
+    return btn;
+  }
 
   if (!svc || svc.id === "none") {
     btn.disabled = true;
@@ -5136,19 +5266,14 @@ function wandButton({ title, slot, rewrite, onUse }) {
   btn.addEventListener("click", async () => {
     const slotEl = slot();
     slotEl.innerHTML = "";
-    btn.disabled = true;
-    btn.classList.add("busy");
-    const label = btn.lastChild;
-    label.textContent = "rewriting…";
+    setRewriteButtonBusy(btn, true);
     try {
       const r = await rewrite();
       slotEl.appendChild(proposalBox(r, onUse, slotEl));
     } catch (err) {
       slotEl.appendChild(el("div", "inline-warn", `⚠ Rewrite failed: ${err.message}`));
     } finally {
-      btn.disabled = false;
-      btn.classList.remove("busy");
-      label.textContent = "Rewrite";
+      setRewriteButtonBusy(btn, false);
     }
   });
   return btn;
@@ -5158,7 +5283,10 @@ function proposalBox(r, onUse, slot) {
   const box = el("div", "proposal");
   const head = el("div", "proposal-head");
   head.appendChild(el("strong", null, "Proposed rewrite"));
-  head.appendChild(el("span", "hint", `— ${r.service}${r.model ? ` · ${r.model}` : ""}`));
+  const research = r.research && r.research.attempted
+    ? ` · researched ${r.research.sources} source${r.research.sources === 1 ? "" : "s"}`
+    : "";
+  head.appendChild(el("span", "hint", `— ${r.service}${r.model ? ` · ${r.model}` : ""}${research}`));
   box.appendChild(head);
 
   const body = el("div", "proposal-body mono", r.text);
@@ -5581,8 +5709,16 @@ async function chooseMedia(title, kind) {
   $("#pickerTitle").textContent = title;
   grid.classList.toggle("picker-list", isAudio);
   $("#pickerFoot").textContent = isAudio
-    ? "Audio already in your projects. Uploading adds it to this project's refs/."
-    : "Images already in your projects. Per-frame folders are excluded — use “chain from previous shot” for that.";
+    ? "Audio already in your projects. Uploading adds it to this project's refs/. " +
+      "Use a clip with no embedded cover art — a file that carries one gets read " +
+      "as an image instead of a voice, and the clone is silently skipped."
+    : "Images already in your projects. Per-frame folders are excluded — use “chain from previous shot” for that." +
+      (title === "Choose a style reference"
+        ? " Aim for around 1024px on the short edge, any aspect ratio — " +
+          "references are downscaled to that before rendering (512px in " +
+          "draft mode), so more resolution won't add quality and a much " +
+          "smaller image will look soft after being scaled up to fit."
+        : "");
   grid.innerHTML = "";
   grid.appendChild(el("div", "empty-state", "loading…"));
   modal.hidden = false;
