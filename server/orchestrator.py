@@ -52,6 +52,7 @@ class ShotRun:
     status: str = "queued"
     progress: float = 0.0
     phase: str = ""
+    eta_seconds: float | None = None
     log: list[dict[str, str]] = field(default_factory=list)
     started_at: float | None = None
     ended_at: float | None = None
@@ -66,6 +67,9 @@ class ShotRun:
             "status": self.status,
             "progress": round(self.progress, 1),
             "phase": self.phase,
+            "etaSeconds": (
+                round(self.eta_seconds) if self.eta_seconds is not None else None
+            ),
             "log": self.log[-MAX_LOG_LINES:],
             "startedAt": self.started_at,
             "endedAt": self.ended_at,
@@ -622,7 +626,22 @@ class Orchestrator:
                     try:
                         self.prepare_dialogue(slug, sid)
                     except Exception as exc:
-                        raise ValueError(f"Dialogue preparation for {sid}: {exc}") from exc
+                        # A shot whose dialogue setup is wrong (e.g. native
+                        # speech with no cast voice reference) is that one
+                        # shot's problem, not the whole batch's — block just
+                        # this shot and keep preparing/rendering the rest,
+                        # the same way a failed render or an unmet
+                        # dependency only stops the shot it happened to.
+                        reason = f"Dialogue preparation failed: {exc}"
+                        if run:
+                            run.status, run.reason = "blocked", reason
+                            run.log.append({"level": "ERROR", "text": reason})
+                        fresh_board, fresh_shot = self._reload_shot(slug, sid)
+                        if fresh_shot is not None:
+                            fresh_shot.update(status="blocked", reason=reason, progress=0)
+                            self.store.save(slug, fresh_board)
+                        if sid in self._order:
+                            self._order.remove(sid)
             for shot_id in list(self._order):
                 if self._cancel.is_set():
                     self._mark_remaining_cancelled()
@@ -745,6 +764,8 @@ class Orchestrator:
                 run.progress = max(run.progress, ev.percent)
             if ev.phase:
                 run.phase = ev.phase
+            if ev.eta_seconds is not None:
+                run.eta_seconds = ev.eta_seconds
             if ev.log_line:
                 run.log.append({"level": ev.log_level, "text": ev.log_line})
                 if len(run.log) > MAX_LOG_LINES * 2:

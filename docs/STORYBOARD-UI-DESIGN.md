@@ -75,10 +75,10 @@ UI fields imposed on one mechanism:
 
 At generation time the Generator concatenates
 `[project scene description] + [shot prompt]` into the text fed to
-`text-prompt`, and merges project-level `style_refs` with any shot-level
-start/end anchors — so consistency is opt-in-by-default rather than
-something the user has to remember to retype into every shot, without
-losing Higgsfield's per-shot control where it matters.
+`text-prompt`. Project-level `style_refs` are a library rather than an
+automatic input — a shot only gets one once it's added to that shot's own
+reference images — while shot-level start/end anchors are always wired for
+that shot, without losing Higgsfield's per-shot control where it matters.
 
 ## Data model
 
@@ -107,8 +107,10 @@ shot's first-frame anchor loader at `shots/N/frames/frame-<max>.png`.
 **1. Generator** — turns one Shot into a `.vpipeline` file. Video shots with
 Start/End anchors use the `fl2va` template and its direct first/last-frame
 ports. Shots without anchors use the `ref2va` template, with an ordered
-`references` list built from other shot references, Cast portraits, project
-`style_refs`, and voice clips within Ref2VA's image/audio limits. The separate
+`references` list built from other shot references, Cast portraits, and
+voice clips within Ref2VA's image/audio limits — project `style_refs` join
+that list only for shots that also add the image as one of their own shot
+references. The separate
 `krea2-still` template remains available only to Create Stills previews.
 
 Every shot gets its own project folder (`shots/<n>/`), same convention
