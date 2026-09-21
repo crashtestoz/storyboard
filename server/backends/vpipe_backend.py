@@ -1866,6 +1866,16 @@ def _sketchify_ref(src: str, sketch_dir: Path) -> str:
     pencil strokes rather than a speckle of every JPEG artefact — verified
     by hand against these boards' own reference photos.
 
+    edgedetect's raw output is thin, antialiased hairlines — barely visible
+    once handed to the model as a reference, and easy for it to read as
+    faint scratches rather than heavy contour lines. One dilation pass
+    thickens them; a hard luma threshold afterwards then pushes every
+    partially-antialiased edge pixel to fully black or fully white, instead
+    of leaving a soft gray line the model can just as easily ignore.
+    Verified by hand against these boards' own reference photos: bolder and
+    solid-black without turning into a blobby mess (two dilation passes was
+    tried and rejected — it starts fusing separate nearby lines together).
+
     Best-effort: falls back to the original photo if ffmpeg is missing or
     the pass fails, since a photoreal reference still beats no reference.
     """
@@ -1876,7 +1886,8 @@ def _sketchify_ref(src: str, sketch_dir: Path) -> str:
     out = sketch_dir / f"{Path(src).stem}.png"
     cmd = [
         ffmpeg, "-y", "-i", src,
-        "-vf", "gblur=sigma=1.8,format=gray,edgedetect=mode=wires:high=0.35:low=0.12,negate",
+        "-vf", "gblur=sigma=1.8,format=gray,edgedetect=mode=wires:high=0.35:low=0.12,"
+               "dilation,lutyuv=y='if(gt(val,20),255,0)',negate",
         "-frames:v", "1", str(out),
     ]
     try:
