@@ -56,11 +56,11 @@ const API = {
   deleteBoard: (slug, confirmName) =>
     req("DELETE", `/api/boards/${encodeURIComponent(slug)}`, { confirmName }),
 
-  // A rewrite proposal, for a shot prompt (`shotId`) or a project-level
-  // field (`field`: "sceneDescription" | "soundscape"). `text` is sent
+  // A rewrite proposal, for a shot field (`shotId` plus optional `field`) or
+  // a project-level field (`field`: "sceneDescription" | "soundscape"). `text` is sent
   // explicitly because the user may not have saved the words they just typed.
-  rewrite: (slug, { shotId, field, text, service } = {}) =>
-    req("POST", "/api/rewrite", { slug, shotId, field, text, service }),
+  rewrite: (slug, { shotId, field, text, service, speakerId } = {}) =>
+    req("POST", "/api/rewrite", { slug, shotId, field, text, service, speakerId }),
 
   chat: (slug, message, history, selectedShotId, service) =>
     req("POST", "/api/chat", { slug, message, history, selectedShotId, service }),
@@ -122,6 +122,11 @@ const API = {
         text === undefined ? {} : { text, style: style || "", dubMode: dubMode || "mix" }),
 
   prepareDialogue: (slug) => req("POST", "/api/prepare-dialogue", { slug }),
+
+  // Speaks one Storyboard AD reply aloud, in whatever voice the board's
+  // defaults name (see `adSpeakerId`). Returns {audioUrl, seconds, ...}.
+  speak: (slug, text) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/speak`, { text }),
 
   render: (slug, shotIds, board) =>
     req("POST", "/api/render", { slug, shotIds, board }),

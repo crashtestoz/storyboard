@@ -341,7 +341,7 @@ def test_ref2va_reference_priority() -> None:
 
 
 def test_effective_video_model_routing(tmp: Path) -> None:
-    section("frame anchors select FL2VA; reference shots select Ref2VA")
+    section("Start/End frames and chaining all route through Ref2VA")
     workspace = tmp / "routing"
     for model in ("FL2VA", "Ref2VA"):
         (workspace / "models" / "local" / f"MiniMax-H3-{model}-8bit").mkdir(parents=True)
@@ -357,7 +357,7 @@ def test_effective_video_model_routing(tmp: Path) -> None:
     check("no anchors use the Ref2VA pipeline",
           job.payload["model"] == "ref2va"
           and ref_encoder["config"]["references"] == [])
-    for source, ref_port in (("startRef", 5), ("endRef", 6), ("chain", 5)):
+    for source in ("startRef", "endRef", "chain"):
         candidate = json.loads(json.dumps(board))
         target = candidate["shots"][0]
         ref = {"kind": "upload", "path": "refs/image.png"}
@@ -369,21 +369,22 @@ def test_effective_video_model_routing(tmp: Path) -> None:
         before = json.dumps(candidate, sort_keys=True)
         job = backend.prepare(target, candidate, paths)
         pipeline = json.loads(Path(job.payload["spec_path"]).read_text())
-        generate = next(s for s in pipeline["stages"] if s["type"] == "generate-video")
-        check(f"{source} selects FL2VA",
-              job.payload["model"] == "fl2va"
-              and not any(s["type"] == "video-ref-encoder" for s in pipeline["stages"])
-              and generate["iports"][ref_port]["src"] == f"vae-encode-{'start' if ref_port == 5 else 'end'}")
+        ref_encoder = next((s for s in pipeline["stages"] if s["type"] == "video-ref-encoder"), None)
+        expected_name = "last.png" if source == "chain" else "image.png"
+        check(f"{source} selects Ref2VA, sent as an ordered reference",
+              job.payload["model"] == "ref2va"
+              and ref_encoder is not None
+              and any(Path(r).name == expected_name for r in ref_encoder["config"]["references"]))
         check(f"{source} does not mutate the board",
-              "FL2VA" in job.summary and json.dumps(candidate, sort_keys=True) == before)
+              json.dumps(candidate, sort_keys=True) == before)
+    # A workspace without the FL2VA checkpoint at all is unaffected: nothing
+    # auto-routed ever asks for it any more, anchored or not.
     (workspace / "models/local/MiniMax-H3-FL2VA-8bit").rmdir()
-    try:
-        candidate = json.loads(json.dumps(board))
-        candidate["shots"][0]["startRef"] = {"path": "refs/image.png"}
-        backend.prepare(candidate["shots"][0], candidate, paths)
-        check("anchored shots require the FL2VA model", False)
-    except ValueError:
-        check("anchored shots require the FL2VA model", True)
+    candidate = json.loads(json.dumps(board))
+    candidate["shots"][0]["startRef"] = {"path": "refs/image.png"}
+    job = backend.prepare(candidate["shots"][0], candidate, paths)
+    check("anchored shots no longer require the FL2VA checkpoint",
+          job.payload["model"] == "ref2va")
 
 
 def test_rewrite_reference_context() -> None:

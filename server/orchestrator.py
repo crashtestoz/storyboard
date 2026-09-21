@@ -266,7 +266,7 @@ class Orchestrator:
         # No list means the whole board, which also means assembling the cut.
         index = {s["id"]: i for i, s in enumerate(shots)}
         for i, scene in enumerate(shots):
-            for key in ("startRef", "endRef", "continuityRef"):
+            for key in ("startRef", "endRef"):
                 ref = scene.get(key)
                 if isinstance(ref, dict) and ref.get("kind") == "chain":
                     if ref.get("from") not in index or index[ref["from"]] >= i:
@@ -283,7 +283,7 @@ class Orchestrator:
         for scene in reversed(shots):
             if scene["id"] not in wanted:
                 continue
-            for key in ("startRef", "endRef", "continuityRef"):
+            for key in ("startRef", "endRef"):
                 ref = scene.get(key)
                 if not isinstance(ref, dict) or ref.get("kind") != "chain":
                     continue
@@ -418,7 +418,7 @@ class Orchestrator:
             for shot in shots:
                 if shot["id"] in because:
                     continue
-                for key in ("startRef", "endRef", "continuityRef"):
+                for key in ("startRef", "endRef"):
                     ref = shot.get(key)
                     if (
                         isinstance(ref, dict)
@@ -812,15 +812,16 @@ class Orchestrator:
         # to catch.
         fingerprint = render_fingerprint(shot, board)
 
-        # True when this render asked H3 to speak the dialogue itself, in the
-        # cloned voice, instead of staying silent for TTS to dub in
-        # afterwards (see vpipe_backend.py's _clones_voice). Relaying a
-        # leftover TTS take onto a clip that already speaks the line is
-        # exactly the "second voice" bug that feature exists to remove —
-        # so here it must not run, no matter how old a dialogue.wav is
-        # sitting in the shot's folder from before that shot ever cloned its
-        # own voice.
-        voice_cloned_natively = bool(spec.payload.get("voiceClonedNatively"))
+        # True when this render asked H3 to speak the dialogue itself --
+        # cloned from a reference clip, or in a voice H3 judged fits the
+        # scene when no clip was available (see vpipe_backend.py's
+        # _speaks_line_aloud) -- instead of staying silent for TTS to dub in
+        # afterwards. Relaying a leftover TTS take onto a clip that already
+        # speaks the line is exactly the "second voice" bug that feature
+        # exists to remove — so here it must not run, no matter how old a
+        # dialogue.wav is sitting in the shot's folder from before that shot
+        # ever spoke its own line natively.
+        native_dialogue_spoken = bool(spec.payload.get("nativeDialogueSpoken"))
 
         fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
         if fresh_shot is not None:
@@ -836,15 +837,15 @@ class Orchestrator:
                 # so a draft is never mistaken for a finished shot later
                 renderedAs="draft" if spec.payload.get("draft") else "final",
                 renderFingerprint=fingerprint,
-                renderedDialogueSource="native" if voice_cloned_natively else "recording",
+                renderedDialogueSource="native" if native_dialogue_spoken else "recording",
             )
-            if voice_cloned_natively:
-                # A dub from before this shot cloned its own voice would
-                # otherwise keep winning in the preview (it is preferred over
-                # the shot's own outputs) and look like the fresh render is
-                # still doubled, when the clip itself is clean. The old
-                # dialogue.wav / clip-dubbed.mp4 files are left on disk —
-                # harmless, just no longer referenced.
+            if native_dialogue_spoken:
+                # A dub from before this shot spoke its own line natively
+                # would otherwise keep winning in the preview (it is
+                # preferred over the shot's own outputs) and look like the
+                # fresh render is still doubled, when the clip itself is
+                # clean. The old dialogue.wav / clip-dubbed.mp4 files are
+                # left on disk — harmless, just no longer referenced.
                 fresh_shot["dubUrl"] = None
             elif validation.ok:
                 self._relay_speech(fresh_shot, paths.abs_dir, run)
@@ -1008,7 +1009,7 @@ class Orchestrator:
 
         Returns None when the shot is good to run.
         """
-        for key, label in (("startRef", "start"), ("endRef", "end"), ("continuityRef", "continuity")):
+        for key, label in (("startRef", "start"), ("endRef", "end")):
             ref = shot.get(key)
             if not isinstance(ref, dict) or ref.get("kind") != "chain":
                 continue

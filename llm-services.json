@@ -1,6 +1,13 @@
 {
   "services": [
     {
+      "id": "lmstudio-qwen38-27b",
+      "label": "Qwen 3.8 27B (LM Studio)",
+      "kind": "openai",
+      "url": "http://localhost:11434",
+      "model": "qwen/qwen3.8-27b"
+    },
+    {
       "id": "ollama-local",
       "label": "Qwen 3.8 27B MLX",
       "kind": "ollama",

@@ -110,8 +110,9 @@ actual clip.
 clip. H3 generates that shot's speech itself, lip-synced, during rendering, \
 from the voice already sent in as an audio reference. There is no separate \
 take: Generate is disabled in the UI and dub_shot refuses on this shot for \
-you too. The only way to get this shot's audio is to render it — propose \
-start_render.
+you too. The only way to get this shot's audio is to render it. Explain that \
+when relevant, but do not propose start_render while proposing edits; rendering \
+must be a separate request after the user finishes and applies their changes.
 dialogueStyle is delivery direction ("tired", "quiet", "breathy") sent to \
 the engine — never spoken aloud itself.
 
@@ -179,14 +180,22 @@ Rules:
 - For a request to build a board, propose a coherent sequence of add_shot
   actions. Keep a single response to 24 actions or fewer.
 - For discussion, review, or questions, return an empty actions array.
+- Editing and rendering are separate stages. When proposing any board, cast,
+  script, dialogue, or shot edit, NEVER include start_render in that response,
+  even if the user also mentions rendering. Let the user collect and apply all
+  desired changes first. Only propose start_render in response to a separate
+  current user message that explicitly asks to start rendering. Do not suggest
+  rendering merely because edits will make shots stale or because a rewrite is
+  ready; the user decides when editing is finished.
 - start_render, dub_shot, stop_render and assemble are real actions you can
   take, not descriptions of what someone else could do. Asked to render,
   generate/dub audio, stop a render, or assemble the cut, propose the
   matching action directly — omit start_render's shotIds to mean every shot
   that still needs it (see needsRender in context).
 - Before proposing dub_shot, check that shot's dialogueSource: it only works
-  when "recording" (or unset). For "native" dialogue, propose start_render
-  instead and say why — that shot's audio only comes from rendering it.
+  when "recording" (or unset). For "native" dialogue, explain that its audio
+  only comes from rendering. Propose start_render only when the user's separate
+  current message explicitly asks to render.
 - Skip proposing start_render for a shot whose needsRender is already false,
   unless the user explicitly wants a re-render — say it is already rendered
   and current instead.
@@ -362,6 +371,23 @@ def validate_actions(actions: Any, board: dict[str, Any]) -> list[dict[str, Any]
     return clean
 
 
+def _separate_render_from_edits(actions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """Never let one Apply both mutate the board and start an expensive render.
+
+    The model is instructed to keep those stages separate, but this boundary
+    also enforces the rule if a local model ignores it. The user can review and
+    apply as many edit proposals as needed, then ask to render in a later turn.
+    """
+    edit_tools = {
+        "set_board_fields", "add_character", "update_character",
+        "add_shot", "update_shot",
+    }
+    if not any(action.get("tool") in edit_tools for action in actions):
+        return actions, False
+    filtered = [action for action in actions if action.get("tool") != "start_render"]
+    return filtered, len(filtered) != len(actions)
+
+
 def _first_json_object(text: str) -> Any:
     """Parse just the first JSON value in *text*, ignoring anything after it.
 
@@ -437,8 +463,16 @@ def chat(
               "so plainly if they don't. Do not request another search."
         )
         parsed = _parse_reply(service.complete(system, followup, timeout=300.0))
+    actions = validate_actions(parsed.get("actions"), board)
+    actions, render_removed = _separate_render_from_edits(actions)
+    response_message = parsed["message"] or "I prepared the requested storyboard changes."
+    if render_removed:
+        response_message += (
+            " Rendering is not included with edit proposals; ask to render "
+            "separately after all changes are applied."
+        )
     return {
-        "message": parsed["message"] or "I prepared the requested storyboard changes.",
-        "actions": validate_actions(parsed.get("actions"), board),
+        "message": response_message,
+        "actions": actions,
         "service": service.label, "model": service.model,
     }

@@ -21,6 +21,7 @@ Routes
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
+``POST /api/boards/<slug>/speak``   speak one Storyboard AD reply ``{text}``
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/render-batch``      render several projects in sequence ``{slugs}``
 ``POST /api/stills``            start/mid/end Krea-2 previews ``{slug, shotId}``
@@ -53,12 +54,18 @@ from typing import Any
 from . import assemble as assembly
 from .backends.base import Backend
 from .orchestrator import Orchestrator
-from .llm import LLMService, describe_character, describe_still_phases, rewrite_prompt
+from .llm import (
+    LLMService, describe_character, describe_still_phases, rewrite_dialogue,
+    rewrite_prompt,
+)
 from .llm import load_services as load_llm_services
+from .dubbing import speaker_for
 from .storyboard_chat import chat as storyboard_chat
 from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts import load_engines as load_tts_engines
 from .tts.base import TTSEngine
+from .web_search import format_results as format_search_results
+from .web_search import research_character
 
 MAX_UPLOAD = 32 * 1024 * 1024
 
@@ -478,6 +485,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._dub(m.group(1), m.group(2))
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/speak", path)
+        if m:
+            return self._speak_ad(m.group(1))
+
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/accept", path)
         if m:
             return self._accept_take(m.group(1), m.group(2))
@@ -485,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/render-preview":
             from .backends.vpipe_backend import (
                 SKETCH_STYLE_PREFIX, _clones_voice, _effective_video_model,
-                _reference_bindings, _resolved_prompt,
+                _reference_bindings, _resolved_prompt, _speaks_line_aloud,
             )
             payload = self._read_json() or {}
             board, shot = payload["board"], payload["shot"]
@@ -496,12 +507,18 @@ class Handler(BaseHTTPRequestHandler):
             warnings = []
             if automatic_reason:
                 warnings.append(automatic_reason[0].upper() + automatic_reason[1:] + ".")
-            native = audio and _clones_voice(shot, board, model)
-            if shot.get("dialogueSource") == "native" and not native:
-                warnings.append("Native dialogue requires Ref2VA and a speaker reference voice.")
-            source = "H3 native speech" if native else "Dialogue-window recording"
-            if not audio:
+            clones = audio and _clones_voice(shot, board, model)
+            speaks = audio and _speaks_line_aloud(shot, board, model)
+            if shot.get("dialogueSource") == "native" and not audio:
+                warnings.append("This video engine generates silent video; native dialogue will not be spoken.")
+            if clones:
+                source = "H3 native speech (cloned voice)"
+            elif speaks:
+                source = "H3 native speech (improvised voice)"
+            elif not audio:
                 source = "No generated audio"
+            else:
+                source = "Dialogue-window recording"
             prompt = _resolved_prompt(shot, board, with_audio=audio, model=model)
             if (board.get("defaults") or {}).get("draft") and (board.get("defaults") or {}).get("sketch"):
                 prompt = f"{SKETCH_STYLE_PREFIX} {prompt}"
@@ -525,7 +542,54 @@ class Handler(BaseHTTPRequestHandler):
             board = ctx.store.load(slug)
             service = ctx.llm(payload.get("service") or board.get("defaults", {}).get("llm"))
 
-            if shot_id and field == "soundNote":
+            research_meta = None
+            if shot_id and field == "dialogue":
+                shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+                if shot is None:
+                    raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+                # The picker may have changed moments before the autosave. Its
+                # explicit value wins for this proposal without mutating disk.
+                rewrite_shot = dict(shot)
+                if isinstance(payload.get("speakerId"), str):
+                    rewrite_shot["speakerId"] = payload["speakerId"]
+                speaker = speaker_for(rewrite_shot, board)
+                if speaker is None:
+                    raise ValueError(
+                        "Choose which cast character speaks before rewriting dialogue."
+                    )
+                text = payload.get("text")
+                if text is None:
+                    text = shot.get("dialogue") or ""
+
+                name = str(speaker.get("name") or "").strip()
+                search_url = ctx.search_url()
+                if not search_url:
+                    raise RuntimeError(
+                        "Dialogue rewriting requires Web search. Configure its "
+                        "URL in Settings so the character can be researched first."
+                    )
+                query = (
+                    f'"{name}" character speech patterns dialogue vocabulary '
+                    "personality mannerisms"
+                ) if name else ""
+                results = research_character(search_url, name, limit=5) if query else []
+                proposal = rewrite_dialogue(
+                    service,
+                    text,
+                    speaker=speaker,
+                    shot_prompt=shot.get("prompt") or "",
+                    scene=board.get("sceneDescription") or "",
+                    dialogue_style=shot.get("dialogueStyle") or "",
+                    duration_seconds=(shot.get("frames") or 0) / 24,
+                    research=format_search_results(results) if query else "",
+                )
+                research_meta = {
+                    "attempted": True,
+                    "query": query,
+                    "sources": len(results),
+                    "speaker": name,
+                }
+            elif shot_id and field == "soundNote":
                 shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
                 if shot is None:
                     raise FileNotFoundError(f"no shot {shot_id} in {slug}")
@@ -635,9 +699,12 @@ class Handler(BaseHTTPRequestHandler):
                     kind="soundscape",
                 )
 
-            return self._send_json(
-                {"text": proposal, "service": service.label, "model": service.model}
-            )
+            response = {
+                "text": proposal, "service": service.label, "model": service.model
+            }
+            if research_meta is not None:
+                response["research"] = research_meta
+            return self._send_json(response)
 
         if path == "/api/chat":
             payload = self._read_json() or {}
@@ -971,6 +1038,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(409, "Wait for the render to finish before generating a separate take")
         from .speech import generate_take
         result = generate_take(self.ctx, slug, shot_id, self._read_json() or {})
+        return self._send_json(result, 409 if result.get("error") else 200)
+
+    def _speak_ad(self, slug: str) -> None:
+        # Local speech engines share GPU/process resources with rendering
+        # and shot dubbing, so the AD's "read this reply aloud" competes with
+        # them the same way a manual dub take does.
+        if self.ctx.orch.busy or self.ctx.orch.stills_busy:
+            return self._err(409, "Wait for the render to finish before the Storyboard AD can speak")
+        from .speech import speak_ad_reply
+        payload = self._read_json() or {}
+        result = speak_ad_reply(self.ctx, slug, payload.get("text") or "")
         return self._send_json(result, 409 if result.get("error") else 200)
 
     def _upload_ref(self, slug: str) -> None:

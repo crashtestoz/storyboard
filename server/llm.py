@@ -251,6 +251,28 @@ thing.
 verbatim.
 """
 
+DIALOGUE_SYSTEM_PROMPT = """\
+You rewrite one spoken line for a storyboard character. Preserve the line's \
+story purpose, facts, intention, and approximate spoken length, but make the \
+word choice, rhythm, syntax, humour, formality, and verbal mannerisms sound \
+authentic to the selected speaker.
+
+Rules:
+- Research notes may be supplied from a web search. Use them only when they \
+clearly describe the same named character. Treat unrelated or ambiguous \
+results as irrelevant.
+- Extract general speech traits from research; never copy, closely paraphrase, \
+or quote an existing line. The result must be original dialogue for this scene.
+- Use the character card and shot context as constraints. Do not invent new \
+plot facts, actions, relationships, names, or backstory.
+- Preserve the meaning of the writer's line unless changing its wording is \
+necessary to express the same intent in character.
+- Keep it short enough for the supplied shot duration. Natural dialogue is \
+roughly two to three words per second.
+- Return only the words to be spoken: no speaker name, quotation marks, stage \
+directions, delivery notes, explanation, headings, or alternatives.
+"""
+
 STILL_PHASES_SYSTEM_PROMPT = """\
 You read a single shot's camera/action description and identify what is \
 actually visible at three distinct instants within it, for someone who will \
@@ -765,8 +787,38 @@ class OpenAICompatLLM(LLMService):
         }).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            doc = json.loads(r.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                doc = json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            # LM Studio and several otherwise OpenAI-compatible servers accept
+            # image_url blocks but not OpenAI's input_audio block. Character
+            # cards commonly have both a portrait and a voice attached, so an
+            # unsupported voice must not prevent the portrait description.
+            # Retry only for the server's explicit media-type rejection; other
+            # 400s still surface instead of being disguised by a second call.
+            detail = exc.read().decode("utf-8", "replace")
+            unsupported_audio = (
+                audio is not None
+                and exc.code == 400
+                and (
+                    "input_audio" in detail
+                    or (
+                        "content" in detail
+                        and "text" in detail
+                        and "image_url" in detail
+                        and "type" in detail
+                    )
+                )
+            )
+            if unsupported_audio:
+                return self.complete_with_media(
+                    system, user, images=images, audio=None, timeout=timeout
+                )
+            raise RuntimeError(
+                f"{self.label} rejected the multimodal request "
+                f"(HTTP {exc.code}): {detail or exc.reason}"
+            ) from exc
         choices = doc.get("choices") or [{}]
         return ((choices[0].get("message") or {}).get("content") or "").strip()
 
@@ -922,6 +974,63 @@ def rewrite_prompt(
             f"{service.label} returned an empty rewrite. It may have run out "
             "of context, or be a model that only emits reasoning."
         )
+    return out
+
+
+def rewrite_dialogue(
+    service: LLMService,
+    text: str,
+    *,
+    speaker: dict[str, Any],
+    shot_prompt: str = "",
+    scene: str = "",
+    dialogue_style: str = "",
+    duration_seconds: float | None = None,
+    research: str = "",
+) -> str:
+    """Rewrite one line in its selected speaker's voice, as a proposal."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("There is nothing in the dialogue to rewrite yet.")
+    name = str(speaker.get("name") or "").strip()
+    if not name:
+        raise ValueError("Choose a speaking character before rewriting dialogue.")
+    ok, msg = service.health()
+    if not ok:
+        raise RuntimeError(msg)
+
+    blocks = [
+        f"SELECTED SPEAKER: {name}",
+        "CHARACTER CARD:\n" + (
+            str(speaker.get("description") or "").strip()
+            or "No character description is available."
+        ),
+    ]
+    if scene.strip():
+        blocks.append("PROJECT SCENE:\n" + scene.strip())
+    if shot_prompt.strip():
+        blocks.append("THIS SHOT:\n" + shot_prompt.strip())
+    if dialogue_style.strip():
+        blocks.append("DELIVERY DIRECTION:\n" + dialogue_style.strip())
+    if duration_seconds:
+        blocks.append(f"SHOT DURATION: {duration_seconds:.2f} seconds")
+    blocks.append(
+        "WEB RESEARCH RESULTS:\n" + (
+            research.strip()
+            or "No reliable external result was found; rely on the character card."
+        )
+    )
+    blocks.append("DIALOGUE TO REWRITE:\n" + text)
+
+    out = _strip_wrapping(service.complete(
+        DIALOGUE_SYSTEM_PROMPT, "\n\n".join(blocks), timeout=300.0
+    ))
+    # Models occasionally retain the requested quotation marks despite the
+    # output rule. Only strip a single pair enclosing the whole response.
+    if len(out) >= 2 and out[0] == out[-1] and out[0] in {'"', "'"}:
+        out = out[1:-1].strip()
+    if not out:
+        raise RuntimeError(f"{service.label} returned an empty dialogue rewrite.")
     return out
 
 

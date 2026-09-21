@@ -7,8 +7,8 @@
    actually watching the process.
 
    Frame-count rules and available model capabilities come from /api/info.
-   Video shots route to FL2VA when they have frame anchors and Ref2VA
-   otherwise.
+   Video shots always route to Ref2VA (unless an explicit engine is
+   requested); Start/End frame anchors are sent to it as ordered references.
    ========================================================================== */
 
 "use strict";
@@ -98,22 +98,25 @@ const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
-// Video shots route automatically: frame anchors use FL2VA, while shots with
-// no Start/End anchors use Ref2VA so character/style/reference media can be
-// sent. Krea-2 is still used by the separate Create Stills preview job via its
-// synthetic shot copy, but is not a user-selectable shot model.
+// Video shots always render through Ref2VA now: Start/End frame images
+// (manually chosen or chained from the previous shot's last rendered frame)
+// are sent as ordered references, never a hard-pinned keyframe, so
+// character/style/reference media and native voice cloning are always
+// available regardless of whether a shot has one set. Krea-2 is still used
+// by the separate Create Stills preview job via its synthetic shot copy, but
+// is not a user-selectable shot model.
 const STORYBOARD_MODEL = "ref2va";
 // Mirrors server/backends/vpipe_backend.py's _effective_video_model: an
 // explicitly chosen engine (per-shot, else the project's "Video engine"
-// setting) short-circuits the anchor-based H3 routing below it. Only
-// krea2-still and wan-i2v are such engines — Wan has no reference-list mode
-// to fall back to the way Ref2VA is H3's fallback, so it is never inferred
-// from anchors alone, only requested.
+// setting) short-circuits automatic H3 routing. Only krea2-still and
+// wan-i2v are such engines — Wan has no reference-list mode to fall back to
+// the way Ref2VA is H3's fallback, so it is never inferred automatically,
+// only requested.
 function effectiveShotModel(raw) {
   const defaults = state.board && state.board.defaults;
   const requested = (raw && raw.model) || (defaults && defaults.model) || STORYBOARD_MODEL;
   if (requested === "krea2-still" || requested === "wan-i2v") return requested;
-  return raw && (raw.startRef || raw.endRef) ? "fl2va" : STORYBOARD_MODEL;
+  return STORYBOARD_MODEL;
 }
 
 /* True when this shot's dialogue is spoken directly in the render, in the
@@ -179,22 +182,30 @@ function dialogueReadiness(raw) {
 
   if (source === "native") {
     if (effectiveShotModel(raw) !== "ref2va") {
-      return {code: "native-dialogue-anchors", title: "Native cloned speech needs Ref2VA", body: "Only MiniMax H3 Ref2VA can clone a voice from a reference clip; this shot's effective video engine is something else (a Start/End frame anchor uses FL2VA, or a different engine is selected).", action: "Remove Start/End frame anchors and use the automatic video engine, or switch Dialogue source to a separate recording."};
+      return {
+        code: "native-dialogue-no-audio-engine",
+        title: "This video engine cannot speak dialogue",
+        body: "The project's video engine generates silent video only — MiniMax H3 Ref2VA is required for native H3 speech.",
+        action: "Switch Dialogue source to a separate recording, or change the project's video engine to Automatic (MiniMax H3) in Settings.",
+        blocking: true,
+      };
     }
     if (!speaker) {
       return {
         code: "native-dialogue-no-speaker",
-        title: "H3 native speech needs a cast speaker",
-        body: "H3 native speech is selected, but this shot is not assigned to a character.",
-        action: "Add a character in Cast and assign that character to this shot.",
+        title: "No cast speaker assigned",
+        body: "This line has no assigned character, so MiniMax H3 will choose a voice that fits the scene rather than cloning a specific one.",
+        action: "Add a character in Cast and assign them to this shot if you want a specific cloned voice.",
+        blocking: false,
       };
     }
     if (!hasVoice) {
       return {
         code: "native-dialogue-no-voice",
-        title: "H3 native speech needs a reference voice",
-        body: `H3 native speech is selected, but ${speaker.name || "the shot's speaker"} has no reference voice clip.`,
-        action: "Attach a reference voice to the cast member, or switch Dialogue source to Dialogue-window recording.",
+        title: `${speaker.name || "The assigned character"} has no reference voice`,
+        body: "MiniMax H3 will still speak the line aloud, in a voice that fits the character and scene, rather than cloning one.",
+        action: "Attach a reference voice to the cast member if you want a specific cloned voice.",
+        blocking: false,
       };
     }
     return null;
@@ -223,22 +234,24 @@ function dialogueGuide(host, raw) {
       const source = raw.dialogueSource || "auto";
       host.className = "dialogue-guide field-note";
       host.textContent = source === "native"
-        ? "✓ H3 native speech is ready; the cast reference voice will be sent to Ref2VA."
+        ? (shotClonesVoice(raw)
+          ? "✓ H3 native speech is ready; the cast reference voice will be sent to Ref2VA."
+          : "✓ H3 native speech is ready; H3 will choose a voice that fits the character and scene.")
         : raw.dialogueAudioUrl
         ? "✓ Dialogue take is ready; the generated voice will be mixed after video generation."
         : "";
     }
     return;
   }
-  host.className = "dialogue-guide inline-warn";
-  host.appendChild(el("strong", null, `${issue.title}. `));
+  host.className = issue.blocking === false ? "dialogue-guide field-note" : "dialogue-guide inline-warn";
+  host.appendChild(el("strong", null, `${issue.blocking === false ? "ℹ " : ""}${issue.title}. `));
   host.appendChild(el("span", null, `${issue.body} ${issue.action}`));
 }
 
 function renderDialogueBlockers() {
   return shots()
     .map((raw) => ({ raw, issue: dialogueReadiness(raw) }))
-    .filter((entry) => entry.issue);
+    .filter((entry) => entry.issue && entry.issue.blocking !== false);
 }
 
 function canAutoPrepareDialogue(raw) {
@@ -813,7 +826,7 @@ function assistantShot(fields) {
     id: assistantId("s"), title: "New shot", prompt: "", soundNote: "",
     characterIds: [], dialogue: "", dialogueSource: "recording", dialogueStyle: "",
     dialogueVoice: "", speakerId: "", dialogueAudioUrl: null, dubUrl: null,
-    dubMode: "mix", continuityRef: null, startRef: null, endRef: null,
+    dubMode: "mix", startRef: null, endRef: null,
     referenceImages: [], model: STORYBOARD_MODEL,
     resolution: d.resolution || "960x544", frames: d.frames || 124,
     steps: d.steps || 8, seed: 0, status: "draft", reason: "", progress: 0,
@@ -1106,12 +1119,14 @@ function renderBackendBadge() {
   box.title = b.healthy ? state.info.workspace : b.message;
   if (!b.healthy) toast(b.message, "error");
 
-  // Both H3 video modes are used automatically, so their absence always
-  // matters. Krea is optional and reports its own problem when Create Stills
-  // is used. Wan only matters when it is the selected video engine — a board
-  // that has never opted into it should not be warned about a model it will
-  // never render with.
-  const requiredModels = ["fl2va", STORYBOARD_MODEL];
+  // Ref2VA is used automatically, so its absence always matters. FL2VA is
+  // dormant (never auto-selected) so a workspace without that checkpoint
+  // should not be warned about a model nothing will ever request. Krea is
+  // optional and reports its own problem when Create Stills is used. Wan
+  // only matters when it is the selected video engine — a board that has
+  // never opted into it should not be warned about a model it will never
+  // render with.
+  const requiredModels = [STORYBOARD_MODEL];
   if (state.board && state.board.defaults && state.board.defaults.model === "wan-i2v") {
     requiredModels.push("wan-i2v");
   }
@@ -1186,7 +1201,7 @@ async function runStartRender(shotIds) {
     : shots();
   const blockers = targets
     .map((raw) => ({ raw, issue: dialogueReadiness(raw) }))
-    .filter((entry) => entry.issue);
+    .filter((entry) => entry.issue && entry.issue.blocking !== false);
   const manualBlockers = blockers.filter((entry) => !canAutoPrepareDialogue(entry.raw));
   if (manualBlockers.length) {
     showRenderDialogueBlocker(manualBlockers);
@@ -2454,13 +2469,12 @@ function renderRail() {
       `frames, so composition and camera move are cheap to check before a ` +
       `full draft.`;
 
-  // video engine — a project-wide override of the automatic FL2VA/Ref2VA
-  // anchor routing (see effectiveShotModel). Only alternate ENGINES belong
-  // here, not H3's two own modes — those stay implicit, chosen by whether a
-  // shot has a Start/End anchor, exactly as before this option existed.
+  // video engine — a project-wide override of automatic Ref2VA routing (see
+  // effectiveShotModel). Only alternate ENGINES belong here; H3's own mode
+  // stays implicit and is always Ref2VA.
   const engineSel = $("#videoEngine");
   if (engineSel.dataset.built !== "1") {
-    const auto = el("option", null, "Automatic (MiniMax H3 — FL2VA / Ref2VA by anchor)");
+    const auto = el("option", null, "Automatic (MiniMax H3 — Ref2VA)");
     auto.value = "";
     engineSel.appendChild(auto);
     state.models
@@ -2484,7 +2498,7 @@ function renderRail() {
   const engineCap = chosenEngine ? modelCap(chosenEngine) : null;
   if (!chosenEngine) {
     engineNote.textContent =
-      "Every shot routes automatically: Start/End frame anchor uses FL2VA, otherwise Ref2VA.";
+      "Every shot renders on Ref2VA automatically. Start/End frame anchors are sent as ordered references, never hard-pinned frames.";
     engineNote.className = "field-note";
   } else if (!engineCap || !engineCap.available) {
     engineNote.textContent =
@@ -2493,7 +2507,7 @@ function renderRail() {
   } else {
     engineNote.textContent =
       `Every shot renders on ${engineCap.label.split("—")[0].trim()} instead, overriding the ` +
-      "automatic FL2VA/Ref2VA routing above — including shots with a Start/End anchor." +
+      "automatic Ref2VA routing above — including shots with a Start/End anchor." +
       (engineCap.supportsAudio ? "" : " Silent: no dialogue or sound effects are generated; " +
         "use a separate dialogue recording for any shot that speaks.");
     engineNote.className = "field-note";
@@ -2729,14 +2743,15 @@ function renderCutSettings(host, busy) {
     remove.onclick = () => { delete opts().backgroundAudio; markDirty(); renderFinal(); };
     details.append(el("div", "field-note", opts().backgroundAudio.label || "Background audio attached"), remove);
   }
-  const chain = el("button", "btn btn-sm", "Continue all scenes with Ref2VA");
+  const chain = el("button", "btn btn-sm", "Chain all scenes from their previous shot");
   chain.disabled = busy || shots().length < 2;
   chain.onclick = () => {
-    if (shots().some(s => s.startRef || s.endRef)) {
-      toast("Remove Start/End frame anchors before enabling Ref2VA continuity.", "warn"); return;
-    }
+    const manual = shots().filter((s, i) => i > 0 && s.startRef && s.startRef.kind !== "chain");
+    if (manual.length && !confirm(
+      `${manual.length} shot(s) already have a manually chosen Start frame. Replace them with a chain from the previous shot?`
+    )) return;
     shots().forEach((s, i, all) => {
-      s.continuityRef = i ? {kind: "chain", from: all[i-1].id, mode: "reference", label: `Continue from shot ${i}`} : null;
+      s.startRef = i ? { kind: "chain", from: all[i - 1].id, label: `last frame of shot ${i}` } : null;
     });
     markDirty(); render();
   };
@@ -3285,7 +3300,7 @@ function renderStrip() {
       b.title = staleReason;
       thumb.appendChild(b);
     }
-    if ((raw.startRef && raw.startRef.kind === "chain") || raw.continuityRef) {
+    if (raw.startRef && raw.startRef.kind === "chain") {
       const b = el("span", "chain-badge");
       b.append(el("span", null, "⛓"), el("span", null, "chained"));
       thumb.appendChild(b);
@@ -4022,33 +4037,30 @@ function renderEditor() {
     const modelNow = effectiveShotModel(raw);
     if (chosen.length && withMedia.length) {
       const mediaMsg =
-        modelNow === "fl2va"
-          ? `${withMedia.length} character reference set(s) are selected, but FL2VA does not send separate Cast media. Bake the character into the Start/End frame or remove the anchors for Ref2VA.`
-          : modelNow === "wan-i2v"
-          ? `${withMedia.length} character reference set(s) are selected, but Wan 2.2 does not send separate Cast media either — only the shot prompt and its required Start frame reach the model. Describe appearance in the Cast description instead.`
+        modelNow === "wan-i2v"
+          ? `${withMedia.length} character reference set(s) are selected, but Wan 2.2 does not send separate Cast media — only the shot prompt and its required Start frame reach the model. Describe appearance in the Cast description instead.`
           : `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`;
       castPanel.appendChild(el("div", "inline-warn", mediaMsg));
     }
     host.appendChild(castPanel);
   }
 
-  // Start/End anchors activate FL2VA (or, for Wan, its required Start-only
-  // anchor -- Wan has no text-only mode, unlike FL2VA/Ref2VA). Without
-  // anchors, the same panel's other reference material is sent through
-  // Ref2VA -- and never through Wan, which has no reference-list mode at all.
+  // Ref2VA receives Start/End frame images (manually chosen or chained from
+  // the previous shot's last frame) as ordered references, never a hard
+  // anchor. Wan is the one exception: it has no reference-list mode at all,
+  // and wires its required Start frame directly to its own image-to-video
+  // input instead.
   const isVideoShot = cap && cap.kind !== "image";
   if (isVideoShot) {
     const refPanel = el("div", "panel");
     refPanel.style.marginTop = "var(--sp-3)";
     const modelNow = effectiveShotModel(raw);
-    const anchorMode = modelNow === "fl2va" || modelNow === "wan-i2v";
+    const anchorMode = modelNow === "wan-i2v";
     refPanel.appendChild(paneHint(
       "Start & end references",
-      modelNow === "fl2va"
-        ? "FL2VA hard anchors for the opening and closing composition"
-        : modelNow === "wan-i2v"
+      modelNow === "wan-i2v"
         ? "Wan 2.2 requires a Start frame; End frame is not sent"
-        : "Ref2VA cues for the opening and closing composition"
+        : "Sent to Ref2VA as ordered references, never hard-pinned frames"
     ));
 
     const slots = el("div", "ref-slots");
@@ -4063,7 +4075,6 @@ function renderEditor() {
       const t = el("label", "toggle");
       const cb = el("input");
       cb.type = "checkbox";
-      cb.disabled = !!raw.continuityRef;
       cb.checked = !!(raw.startRef && raw.startRef.kind === "chain");
       cb.addEventListener("change", () => {
         const current = live();
@@ -4074,36 +4085,19 @@ function renderEditor() {
         render();
       });
       t.append(cb, el("span", "toggle-track"),
-               el("span", null, `Chain start frame from shot ${idx}`));
+               el("span", null, `Chain start frame from shot ${idx}'s last rendered frame`));
       wrap.appendChild(t);
-      const soft = el("label", "toggle");
-      const softBox = el("input");
-      softBox.type = "checkbox";
-      softBox.checked = !!raw.continuityRef;
-      softBox.disabled = !!(raw.startRef || raw.endRef);
-      softBox.addEventListener("change", () => {
-        live().continuityRef = softBox.checked
-          ? { kind: "chain", from: prev.id, mode: "reference", label: `Continue from shot ${idx}` }
-          : null;
-        markDirty();
-        render();
-      });
-      soft.append(softBox, el("span", "toggle-track"),
-        el("span", null, `Continue from shot ${idx} using Ref2VA references`));
-      wrap.append(soft, el("div", "field-note",
-        "Keeps cast portraits and native voice references. Guides the opening; does not pin an exact frame. Remove Start/End anchors to enable."));
-      if (raw.continuityRef) wrap.appendChild(refSlot("Previous scene reference", raw, "continuityRef"));
+      wrap.appendChild(el("div", "field-note",
+        "Sent to Ref2VA as an ordered reference — guides the opening (identity, environment, lighting, direction of motion) without pinning an exact frame. Upload a still above instead for a hand-picked opening image."));
       refPanel.appendChild(wrap);
     }
     refPanel.appendChild(
       el(
         "div",
         "hint-body",
-        modelNow === "fl2va"
-          ? "FL2VA wires Start frame and End frame directly to the model's first/last-frame inputs. Separate Cast, style and shot-reference images are not sent on this path."
-          : modelNow === "wan-i2v"
+        modelNow === "wan-i2v"
           ? "Wan 2.2 wires Start frame directly to the model's image-to-video input, and requires one — this checkpoint has no text-only mode, and rendering without a Start frame set will fail. End frame is not sent — Wan has no port for one. Separate Cast, style and shot-reference images are not sent either."
-          : "With no frame anchors, Ref2VA receives character, style and other reference images as an ordered reference set."
+          : "Ref2VA receives Start frame, End frame, and other reference images (cast, style, shot references) together as an ordered reference set — none of them pin an exact frame."
       )
     );
     host.appendChild(refPanel);
@@ -4131,9 +4125,7 @@ function renderEditor() {
     refPanel.appendChild(shotReferenceImages(raw));
 
     const noteModel = effectiveShotModel(raw);
-    const note = noteModel === "fl2va"
-      ? "FL2VA is active because this shot has a Start/End frame anchor. These separate images are retained on the board but are not sent; remove the anchors to use them through Ref2VA."
-      : noteModel === "wan-i2v"
+    const note = noteModel === "wan-i2v"
       ? "Wan 2.2 is the selected video engine. These separate images are retained on the board but are not sent — Wan only reads the shot prompt and its required Start frame."
       : `${cap.label.split("—")[0].trim()} uses these alongside the ` +
         `cast portraits selected for this shot. Style references are a library — ` +
@@ -5103,8 +5095,8 @@ function diagnosticGuidance(reason) {
   if (text.includes("recording is out of date")) {
     return "The dialogue text or voice direction changed after the last take. Press Generate in the Dialogue panel to replace it, then render again.";
   }
-  if (text.includes("h3 native speech requires") || text.includes("reference voice clip")) {
-    return "H3-native speech needs a cast character assigned to this shot with a reference voice clip. Otherwise choose the separate-recording path.";
+  if (text.includes("requires minimax h3 ref2va") || text.includes("generates silent video")) {
+    return "H3-native speech needs the project's video engine to be Automatic (MiniMax H3), not an explicit engine that generates silent video. Otherwise choose the separate-recording path.";
   }
   return "Check the details above, correct the shot settings, and re-run this shot.";
 }
@@ -5125,15 +5117,20 @@ function diagnostic(raw, shot) {
   head.append(chip(shot.status), el("span", null, titles[shot.status]));
   d.appendChild(head);
 
+  // A non-blocking issue (e.g. "no cast speaker assigned" — H3 will just
+  // improvise a voice) is informational, not why this shot actually failed
+  // or is blocked; only a genuine blocker should override the backend's own
+  // reason here.
   const setupIssue = dialogueReadiness(raw);
+  const blockingIssue = setupIssue && setupIssue.blocking !== false ? setupIssue : null;
   const reason =
     shot.reason || (shot.validation && shot.validation.reason) ||
-    (setupIssue ? `${setupIssue.title}. ${setupIssue.body}` : "");
+    (blockingIssue ? `${blockingIssue.title}. ${blockingIssue.body}` : "");
   if (reason) d.appendChild(el("div", "diag-body", reason));
   if (shot.status === "failed" || shot.status === "blocked") {
     const next = el("div", "diag-next");
     next.appendChild(el("strong", null, "Next step: "));
-    next.appendChild(el("span", null, setupIssue ? setupIssue.action : diagnosticGuidance(reason)));
+    next.appendChild(el("span", null, blockingIssue ? blockingIssue.action : diagnosticGuidance(reason)));
     d.appendChild(next);
   }
 
