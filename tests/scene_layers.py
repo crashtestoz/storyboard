@@ -46,6 +46,28 @@ class SceneLayers(unittest.TestCase):
         with self.assertRaises(ValueError): _resolved_prompt(self.shot,self.board,model='ref2va')
         self.shot['referenceImages'].append(dict(path='second.png',tag='corridor'))
         with self.assertRaises(ValueError): _reference_bindings(self.shot,self.board,'ref2va')
+
+    def test_start_ref_reused_as_tagged_shot_reference_merges_not_conflicts(self):
+        # A Start frame (untagged) can be the exact same file as a shot
+        # reference image the prompt addresses by @tag -- a real board hit
+        # this once Start/End frames joined the same Ref2VA candidate list
+        # as tagged shot references. The two roles should merge into one
+        # <Picture N>, addressable by the tag, not raise "one reference
+        # entry per tagged image".
+        shot = {**self.shot, 'startRef': {'path': 'room.png'},
+                'referenceImages': [dict(path='room.png', tag='corridor')],
+                'prompt': 'Walk through @corridor.'}
+        bindings = _reference_bindings(shot, self.board, 'ref2va')
+        self.assertEqual(len(bindings), 2)  # the merged room.png entry, plus the cast portrait
+        merged = next(b for b in bindings if 'room.png' in (b['ref'].get('path') or ''))
+        self.assertEqual(merged['tag'], 'corridor')
+        self.assertIn('Walk through <Picture 1>.', _resolved_prompt(shot, self.board, model='ref2va'))
+
+        # Two DIFFERENT tags on the same underlying file is a genuine
+        # conflict and must still raise.
+        conflicting = {**shot, 'endRef': {'path': 'room.png', 'tag': 'other'}}
+        with self.assertRaises(ValueError):
+            _reference_bindings(conflicting, self.board, 'ref2va')
     def test_reference_limit_is_explicit(self):
         self.shot['referenceImages']=[dict(path=f'{i}.png') for i in range(9)]
         with self.assertRaises(ValueError): _reference_bindings(self.shot,self.board,'ref2va')
@@ -62,20 +84,46 @@ class SceneLayers(unittest.TestCase):
         self.shot['characterIds']=[]
         self.assertNotIn('Gold plating.',_resolved_prompt(self.shot,self.board,model='ref2va'))
 
-    def test_frame_anchors_select_fl2va(self):
+    def test_frame_anchors_route_ref2va_as_ordered_references(self):
+        # Start/End frames -- manual or chained -- always route through
+        # Ref2VA now; FL2VA is no longer auto-selected (see
+        # _effective_video_model). They arrive as ordered references, not a
+        # hard-pinned keyframe.
         shot = {**self.shot, 'model': 'ref2va'}
         self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
         shot['startRef'] = {'path': 'opening.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
-        self.assertIn('Picture 1 is the Start frame at 0.00 seconds',
-                      _resolved_prompt(shot, self.board, model='fl2va'))
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
+        prompt = _resolved_prompt(shot, self.board, model='ref2va')
+        self.assertIn('ordered visual references rather than hard-pinned keyframes', prompt)
+        self.assertNotIn('Picture 1 is the Start frame at 0.00 seconds', prompt)
+        bindings = _reference_bindings(shot, self.board, 'ref2va')
+        self.assertTrue(any(b['name'] == 'Start frame' for b in bindings))
         shot.pop('startRef')
         shot['endRef'] = {'path': 'closing.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
-        self.assertIn('Picture 1 is the End frame',
-                      _resolved_prompt(shot, self.board, model='fl2va'))
-        shot['startRef'] = {'path': 'opening.png'}
-        self.assertEqual(_effective_video_model(shot, self.board)[0], 'fl2va')
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
+        bindings = _reference_bindings(shot, self.board, 'ref2va')
+        self.assertTrue(any(b['name'] == 'End frame' for b in bindings))
+        shot['startRef'] = {'kind': 'chain', 'from': 's0', 'resolved': 'previous.png'}
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
+        bindings = _reference_bindings(shot, self.board, 'ref2va')
+        self.assertTrue(any(b['name'] == 'Previous scene' for b in bindings))
+        prompt = _resolved_prompt(shot, self.board, model='ref2va')
+        self.assertIn('Continue naturally from the previous scene reference', prompt)
+
+    def test_fl2va_dormant_path_still_builds_its_own_prompt(self):
+        # FL2VA is left in place, unreachable through automatic routing, but
+        # still callable directly (its own isolated pipeline-shape tests
+        # live in tests/render_all.py). Confirm its own prompt shape --
+        # true hard-anchor alignment sentences, no Ref2VA reference framing
+        # -- is unaffected by the routing change.
+        shot = {**self.shot, 'startRef': {'path': 'opening.png'},
+                'endRef': {'path': 'closing.png'}}
+        prompt = _resolved_prompt(shot, self.board, model='fl2va')
+        self.assertIn('Picture 1 is the Start frame at 0.00 seconds', prompt)
+        self.assertIn('Picture 2 is the End frame', prompt)
+        self.assertNotIn('ordered visual references rather than hard-pinned keyframes', prompt)
+        # FL2VA anchors are wired to the model's keyframe ports directly,
+        # never members of a prompt-addressable reference list.
         self.assertEqual(_reference_bindings(shot, self.board, 'fl2va'), [])
 
     def test_project_style_refs_are_a_library_not_auto_combined(self):
@@ -109,7 +157,7 @@ class SceneLayers(unittest.TestCase):
                                _read_json=lambda: payload, _send_json=lambda data: data)
         result = Handler._api_post(fake, '/api/render-preview')
         self.assertEqual(result['prompt'], _resolved_prompt(self.shot,self.board,model='ref2va'))
-        self.assertEqual(result['dialogueSource'], 'H3 native speech')
+        self.assertEqual(result['dialogueSource'], 'H3 native speech (cloned voice)')
         self.shot['dialogueSource']='recording'
         self.assertEqual(Handler._api_post(fake, '/api/render-preview')['dialogueSource'], 'Dialogue-window recording')
 

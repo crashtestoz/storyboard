@@ -144,6 +144,34 @@ class StoryboardChatTests(unittest.TestCase):
         self.assertNotIn("you cannot render", CHAT_SYSTEM_PROMPT.lower())
         self.assertIn("never mention mcp", CHAT_SYSTEM_PROMPT.lower())
 
+    def test_rewrite_proposal_cannot_start_render_in_same_apply(self):
+        sid = self.board["shots"][0]["id"]
+        model = FakeLLM(json.dumps({
+            "message": "I rewrote the shot and will render it.",
+            "actions": [
+                {"tool": "update_shot", "shotId": sid,
+                 "fields": {"prompt": "A stronger shot."}},
+                {"tool": "start_render", "shotIds": [sid]},
+            ],
+        }))
+        result = chat(model, self.board, "Rewrite this shot")
+        self.assertEqual(result["actions"], [
+            {"tool": "update_shot", "shotId": sid,
+             "fields": {"prompt": "A stronger shot."}},
+        ])
+        self.assertIn("ask to render separately", result["message"])
+
+    def test_separate_render_request_can_still_start_render(self):
+        sid = self.board["shots"][0]["id"]
+        model = FakeLLM(json.dumps({
+            "message": "Ready to render.",
+            "actions": [{"tool": "start_render", "shotIds": [sid]}],
+        }))
+        result = chat(model, self.board, "Render shot one now")
+        self.assertEqual(result["actions"], [
+            {"tool": "start_render", "shotIds": [sid]},
+        ])
+
     def test_search_capability_is_not_offered_when_no_url_is_configured(self):
         model = FakeLLM("A plain answer, no search needed.")
         chat(model, self.board, "What's a dolly zoom?")

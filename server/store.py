@@ -166,7 +166,6 @@ def _collect_media_usages(board: dict[str, Any]) -> dict[str, list[str]]:
         _add_usage(usages, ref, f"Style reference {i}")
 
     for idx, shot in enumerate(shots, start=1):
-        _add_usage(usages, shot.get("continuityRef"), "Continuity", index=idx, shot=shot)
         _add_usage(usages, shot.get("startRef"), "Start", index=idx, shot=shot)
         _add_usage(usages, shot.get("endRef"), "End", index=idx, shot=shot)
         for ref_idx, ref in enumerate(shot.get("referenceImages") or [], start=1):
@@ -255,10 +254,11 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         if c.get("id") in wanted
     ]
     payload = {
-        # Routing now selects FL2VA for Start/End frame anchors and Ref2VA
-        # otherwise. Bump this whenever that routing changes so old clips are
-        # re-rendered instead of being treated as current.
-        "layeringVersion": 5,
+        # Routing always selects Ref2VA for H3 now (Start/End frames, chained
+        # or manual, are ordered references rather than a mode switch). Bump
+        # this whenever that routing changes so old clips are re-rendered
+        # instead of being treated as current.
+        "layeringVersion": 6,
         "speechInputs": speech_fingerprint(shot, board),
         "recording": shot.get("dialogueAudioUrl") if shot.get("dialogueSource") == "recording" else None,
         "dialogueSource": shot.get("dialogueSource", "auto"),
@@ -285,12 +285,11 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "model": (requested_model := shot.get("model") or defaults.get("model") or "ref2va"),
         # Mirrors vpipe_backend.py's _effective_video_model / app.js's
         # effectiveShotModel: krea2-still and wan-i2v are explicit engine
-        # choices that short-circuit before the anchor check; everything
-        # else routes on Start/End anchors. Keep the three in sync -- this
-        # is what decides whether switching engines marks a clip stale.
+        # choices that short-circuit before H3 routing; everything else is
+        # always Ref2VA now. Keep the three in sync -- this is what decides
+        # whether switching engines marks a clip stale.
         "effectiveModel": (
             requested_model if requested_model in ("krea2-still", "wan-i2v")
-            else "fl2va" if shot.get("startRef") or shot.get("endRef")
             else "ref2va"
         ),
         # Frame size is a project setting with a per-shot fallback, in the same
@@ -302,16 +301,12 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "draft": bool(defaults.get("draft")),
         "sketch": bool(defaults.get("draft")) and bool(defaults.get("sketch")),
     }
-    if shot.get("continuityRef"):
-        payload["continuityRef"] = _ref_key(shot["continuityRef"])
     if payload["draft"]:
         payload["draftProfile"] = "384-long-edge-4-step-with-audio"
     if payload["sketch"]:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
-    if payload["model"] == "ref2va":
-        payload["ref2vaProfile"] = "ordered-reference-set-v3"
-    if payload["effectiveModel"] == "fl2va":
-        payload["fl2vaProfile"] = "direct-frame-anchors-v1"
+    if payload["effectiveModel"] == "ref2va":
+        payload["ref2vaProfile"] = "ordered-reference-set-v4"
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -358,14 +353,14 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         # mumbled dialogue, which "mix" would otherwise leave audible under
         # the real line as a second, overlapping voice.
         "dubMode": "mix",
-        "continuityRef": None,
         "startRef": None,
         "endRef": None,
         "referenceImages": [],
         # No per-shot "model" field -- the video engine is a project-wide
-        # choice (board.defaults.model). Ref2VA is the no-anchor default;
-        # the backend selects FL2VA whenever Start frame or End frame is
-        # supplied. See migrate()'s note on why this key must stay absent.
+        # choice (board.defaults.model). H3 always renders through Ref2VA;
+        # Start/End frame (manually chosen or chained from a previous shot's
+        # last frame) are sent as ordered references, never a mode switch.
+        # See migrate()'s note on why this key must stay absent.
         "resolution": d.get("resolution", "960x544"),
         "frames": d.get("frames", 124),
         "steps": d.get("steps", 8),
@@ -429,6 +424,7 @@ def default_board(name: str) -> dict[str, Any]:
             "stillsSize": "small",
             "tts": "none",
             "llm": "",       # "" means: use the server's default service
+            "adSpeakerId": "",   # cast member whose voice the AD borrows to speak
         },
         "shots": [],
         "finalVideo": None,
@@ -655,7 +651,7 @@ class Store:
         for character in legacy.get("characters", []):
             (character.get("voice") or {}).pop("contentHash", None)
         for scene in legacy.get("shots", []):
-            for key in ("startRef", "endRef", "continuityRef"):
+            for key in ("startRef", "endRef"):
                 if isinstance(scene.get(key), dict):
                     scene[key].pop("contentHash", None)
         for scene, old in zip(board.get("shots", []), legacy.get("shots", [])):
@@ -828,7 +824,7 @@ class Store:
         shots = board.get("shots") or []
         index_by_id = {s.get("id"): i for i, s in enumerate(shots)}
         for shot in shots:
-            for key in ("startRef", "endRef", "continuityRef"):
+            for key in ("startRef", "endRef"):
                 ref = shot.get(key)
                 if not isinstance(ref, dict) or ref.get("kind") != "chain":
                     continue
@@ -888,7 +884,7 @@ class Store:
                 changed = changed or new is not ch["image"]
                 ch["image"] = new
         for shot in board.get("shots") or []:
-            for key in ("startRef", "endRef", "continuityRef"):
+            for key in ("startRef", "endRef"):
                 if shot.get(key):
                     new = self._rehome_ref(slug, shot[key])
                     changed = changed or new is not shot[key]
@@ -1000,6 +996,10 @@ class Store:
         defaults.setdefault("stillsSize", "small")
         defaults.setdefault("tts", "none")
         defaults.setdefault("llm", "")
+        # Which cast member's reference voice the Storyboard AD borrows when
+        # reading its replies aloud — "" means the TTS engine's own default
+        # voice, since the AD is not itself a character with a recorded clip.
+        defaults.setdefault("adSpeakerId", "")
 
         for ch in board.get("characters") or []:
             ch.setdefault("id", new_id("c"))
@@ -1027,17 +1027,30 @@ class Store:
             shot.setdefault("dialogueVoice", "")
             shot.setdefault("dubUrl", None)
             shot.setdefault("dubMode", "mix")
-            shot.setdefault("continuityRef", None)
+            # continuityRef is retired: it was always a chain-sourced "soft"
+            # reference to the previous shot's last frame, and startRef (chain
+            # or manual) now covers exactly that as an ordered Ref2VA
+            # reference -- there is no second mechanism left for it to feed.
+            # _effective_video_model has always hard-errored on a shot with
+            # both set, so no real board should reach here with both -- but
+            # read defensively anyway, since boards are hand-editable files
+            # that outlive the code that wrote them.
+            continuity = shot.pop("continuityRef", None)
+            if isinstance(continuity, dict):
+                continuity.pop("mode", None)
+            if continuity and not shot.get("startRef"):
+                shot["startRef"] = continuity
             shot.setdefault("startRef", None)
             shot.setdefault("endRef", None)
             shot.setdefault("referenceImages", [])
             # No per-shot override exists -- only the project-wide
-            # defaults.model above. H3's FL2VA/Ref2VA split is derived from
-            # Start/End anchors, never stored, so a shot-level "model" field
-            # serves no purpose; worse, since _effective_video_model checks
-            # shot.model BEFORE defaults.model, a value force-written here
-            # would permanently shadow the project default and silently
-            # defeat it for every shot. Drop it instead of writing one in.
+            # defaults.model above. H3 always renders through Ref2VA, and
+            # Start/End frame anchors are derived, never stored, so a
+            # shot-level "model" field serves no purpose; worse, since
+            # _effective_video_model checks shot.model BEFORE defaults.model,
+            # a value force-written here would permanently shadow the project
+            # default and silently defeat it for every shot. Drop it instead
+            # of writing one in.
             shot.pop("model", None)
             shot.setdefault("resolution", defaults["resolution"])
             shot.setdefault("frames", defaults["frames"])

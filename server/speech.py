@@ -1,9 +1,10 @@
 """Shared dialogue preparation for manual previews and render batches."""
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
-from .dubbing import dub_shot, speaker_for, mux_speech
+from .dubbing import dub_shot, speak_line, speaker_for, mux_speech
 from .store import speech_fingerprint
 
 
@@ -176,6 +177,257 @@ def generate_take(ctx, slug, shot_id, payload=None):
     }
 
 
+# A local, autoregressive engine has a real ceiling on how much it can
+# generate in one call — MOSS-TTS 8B is hard-capped at 1024 frames (~82s,
+# see vpipe_moss._token_budget) and does not fail cleanly when a line needs
+# more than that: it runs out of budget mid-utterance and the tail comes out
+# as repeated garbage rather than silence or a clean cutoff. A Storyboard AD
+# reply is ordinary chat prose and can run to several paragraphs, so it is
+# capped well under that ceiling before it ever reaches an engine — using a
+# rough 12 characters/second speaking rate (matching vpipe_moss's own
+# estimate), 700 characters is ~58s of speech, leaving comfortable headroom.
+MAX_SPEECH_CHARS = 700
+
+_MD_CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`([^`]*)`")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MD_EMPHASIS = re.compile(r"(\*\*\*|\*\*|\*|___|__|_)(.+?)\1")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
+_MD_BULLET = re.compile(r"^\s*[-*•]\s+", re.MULTILINE)
+
+
+def _for_speech(text):
+    """(speakable text, was it shortened) — plain prose an engine can read.
+
+    Markdown syntax (``**bold**``, bullet ``*`` / ``-`` markers, ``#``
+    headings) is meant to be read on a screen, not spoken; asked to speak it
+    literally, an engine either mispronounces the punctuation or — for a
+    heavily-formatted reply — piles on exactly the kind of unnatural,
+    high-symbol-density text that pushes generation off the rails (see
+    MAX_SPEECH_CHARS above). So this is plain-text prose, not the chat
+    transcript, that gets sent to synthesis.
+    """
+    plain = _MD_CODE_FENCE.sub(" ", text)
+    plain = _MD_INLINE_CODE.sub(r"\1", plain)
+    plain = _MD_LINK.sub(r"\1", plain)
+    # Line-anchored markers first: a bullet's leading "*" would otherwise
+    # pair up with the bold marker right after it (e.g. "*   **Shot 3:**"),
+    # leaving one asterisk unmatched and stranded in the spoken text.
+    plain = _MD_HEADING.sub("", plain)
+    plain = _MD_BULLET.sub("", plain)
+    # Nested emphasis (``**_word_**``) needs the substitution repeated until
+    # nothing more matches, since each pass only strips the outermost pair.
+    prev = None
+    while prev != plain:
+        prev = plain
+        plain = _MD_EMPHASIS.sub(r"\2", plain)
+    plain = re.sub(r"[ \t]+", " ", plain)
+    # Joining lines with ". " unconditionally doubles up when a line already
+    # ends in its own punctuation (a heading like "Analysis:" followed by a
+    # blank line reads as "Analysis:. Shots..." otherwise).
+    lines = [ln.strip() for ln in plain.split("\n") if ln.strip()]
+    joined = []
+    for ln in lines:
+        if joined and not joined[-1].endswith((".", "!", "?", ":", ";", ",")):
+            joined[-1] += "."
+        joined.append(ln)
+    plain = " ".join(joined)
+    plain = re.sub(r"\.{2,}", ".", plain)
+    plain = re.sub(r"\s+", " ", plain).strip()
+
+    if len(plain) <= MAX_SPEECH_CHARS:
+        return plain, False
+
+    cut = plain.rfind(". ", 0, MAX_SPEECH_CHARS)
+    if cut < MAX_SPEECH_CHARS * 0.4:
+        cut = plain.rfind(" ", 0, MAX_SPEECH_CHARS)
+    if cut <= 0:
+        cut = MAX_SPEECH_CHARS
+    return plain[:cut].rstrip(" ,;:.") + ".", True
+
+
+def _attempt_speech(engine, out_dir, text):
+    """(speech, error) — ``speech`` is None when this engine could not do it.
+
+    Checked as one step because the failure a caller cares about is the same
+    either way: this engine, right now, cannot produce audio. Skipping
+    ``speak_line`` on an unhealthy engine also avoids driving a cloning
+    engine's synth() into the reference-less error it would raise anyway.
+    """
+    ok, msg = engine.health()
+    if not ok:
+        return None, msg
+    speech = speak_line(engine, shot_dir=out_dir, text=text, reference=None, reference_text="")
+    if not speech.ok:
+        return None, speech.error or "speech synthesis failed"
+    return speech, ""
+
+
+def speak_ad_reply(ctx, slug, text):
+    """Synthesise one Storyboard AD chat reply, for the "spoken replies"
+    toggle in the assistant blade.
+
+    Unlike a shot's dialogue, this line belongs to no character, so there is
+    no recorded clip to clone by default — the board can optionally name a
+    cast member (``defaults.adSpeakerId``) whose reference voice the AD
+    borrows, which is how a consistent voice (e.g. a "narrator" character
+    created only for this purpose) gets attached to it.
+
+    "Engine default voice" (an empty ``adSpeakerId``) has to actually produce
+    a voice, though, and not every engine has one to fall back on: MOSS
+    speaks in its own voice when given no reference, but Qwen3-TTS refuses
+    outright since cloning is the only thing it does. So when there is no
+    reference clip to offer and the configured engine turns out to need one,
+    this tries every other configured engine that answers on its own — the
+    "spoken replies" toggle should produce *some* voice, not a silent no-op
+    just because the primary engine happens to require cloning.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"error": "nothing to say"}
+    speak_text, shortened = _for_speech(text)
+    if not speak_text:
+        return {"error": "nothing left to say once formatting was stripped"}
+
+    board = ctx.store.load(slug)
+    defaults = board.get("defaults") or {}
+    engines = ctx.tts_engines()
+    engine = engines.get(defaults.get("tts")) or engines.get("none")
+
+    reference = None
+    reference_text = ""
+    speaker_id = defaults.get("adSpeakerId") or ""
+    if speaker_id:
+        cast = {c["id"]: c for c in (board.get("characters") or []) if c.get("id")}
+        speaker = cast.get(speaker_id)
+        voice = (speaker or {}).get("voice") or {}
+        path = voice.get("path")
+        if path:
+            candidate = ctx.data_dir / path
+            if candidate.exists():
+                reference = candidate
+                reference_text = speaker.get("voiceText") or ""
+
+    out_dir = ctx.store.project_dir(slug) / "ad-voice"
+    notes = []
+    if shortened:
+        notes.append("Only the first part of this reply was read aloud — it was too long to speak in full.")
+    used = engine
+
+    if reference is not None:
+        # A specific voice was asked for; if it fails, say so rather than
+        # quietly substituting a different character's voice for it.
+        ok, msg = engine.health()
+        if not ok:
+            return {"error": msg}
+        speech = speak_line(engine, shot_dir=out_dir, text=speak_text,
+                            reference=reference, reference_text=reference_text)
+        if not speech.ok:
+            return {"error": speech.error or "speech synthesis failed", "log": speech.log}
+    else:
+        speech, err = _attempt_speech(engine, out_dir, speak_text)
+        if speech is None:
+            # vpipe-moss's own "no reference" voice is the LM improvising
+            # without any conditioning, which is exactly the mode most prone
+            # to the generation-budget breakdown _for_speech guards against
+            # above — a non-generative engine (plain-sherpa) is the safer
+            # bet when both are configured, so it goes first.
+            candidates = [e for e in engines.values() if e.id not in ("none", engine.id)]
+            candidates.sort(key=lambda e: e.id == "vpipe-moss")
+            for candidate in candidates:
+                speech, _ = _attempt_speech(candidate, out_dir, speak_text)
+                if speech is not None:
+                    notes.append(f"{engine.label} has no default voice ({err}), so {candidate.label} spoke this reply instead.")
+                    used = candidate
+                    break
+        if speech is None:
+            return {"error": err}
+
+    if used.id == "vpipe-moss" and reference is None:
+        notes.append(
+            "MOSS's own voice (no reference clip) can occasionally garble part of a "
+            "line — pick a cast member's voice in the AD's Voice setting for a more "
+            "reliable result."
+        )
+
+    rel = speech.path.relative_to(ctx.data_dir)
+    url = "/media/" + str(rel).replace("\\", "/") + f"?v={speech.path.stat().st_mtime_ns}"
+    return {
+        "audioUrl": url,
+        "seconds": round(speech.seconds, 2),
+        "engine": used.id,
+        "cloned": reference is not None,
+        "note": " ".join(notes),
+    }
+
+
+# Stand-in reference clips for a cast member with no voice of their own.
+# There is no curated preset bank in this project — these are generic,
+# non-named-character clips already banked in another project's refs/, the
+# same clips the library picker offers for reuse across projects.
+_FALLBACK_VOICES = [
+    {
+        "gender": "female",
+        "path": "millennium-falcon-ocean-flyby/refs/ElevenLabs-Kristen-Natural-Upbeat.mp3",
+        "label": "ElevenLabs-Kristen-Natural-Upbeat.mp3",
+        "voiceText": "Do you want me to apply these frame updates to Scene 5?",
+    },
+    {
+        "gender": "male",
+        "path": "millennium-falcon-ocean-flyby/refs/han-solo-voice.mp3",
+        "label": "han-solo-voice.mp3",
+        "voiceText": "Look, don't worry. Everything's gonna be fine. Trust me.",
+    },
+]
+
+_FEMALE_WORDS = re.compile(r"\b(she|her|hers|woman|women|girl|female|lady)\b", re.IGNORECASE)
+_MALE_WORDS = re.compile(r"\b(he|him|his|man|men|boy|male|guy)\b", re.IGNORECASE)
+
+
+def _guess_gender(description):
+    """Rough gender guess from a character's free-text description.
+
+    The schema has no dedicated gender/age field, so this is the only signal
+    available — good enough to pick between the handful of fallback voices
+    below, not a general classifier.
+    """
+    text = description or ""
+    female = len(_FEMALE_WORDS.findall(text))
+    male = len(_MALE_WORDS.findall(text))
+    if female > male:
+        return "female"
+    if male > female:
+        return "male"
+    return None
+
+
+def _assign_fallback_voice(ctx, speaker):
+    """Attach a stand-in reference clip to ``speaker`` if none is set.
+
+    Returns True once a voice was attached (or already there), so the caller
+    can re-check whether native speech is now possible.
+    """
+    if (speaker.get("voice") or {}).get("path"):
+        return True
+    gender = _guess_gender(speaker.get("description"))
+    if gender is None:
+        return False
+    for preset in _FALLBACK_VOICES:
+        if preset["gender"] != gender:
+            continue
+        if not (ctx.data_dir / preset["path"]).exists():
+            continue
+        speaker["voice"] = {
+            "path": preset["path"],
+            "url": "/media/" + preset["path"],
+            "label": preset["label"],
+        }
+        if not (speaker.get("voiceText") or "").strip():
+            speaker["voiceText"] = preset["voiceText"]
+        return True
+    return False
+
+
 def prepare_recording(ctx, slug, shot_id, generate_missing=True):
     """Reuse current recordings, generate stale takes, and apply audio-only edits."""
     from .backends.vpipe_backend import _effective_video_model, _clones_voice
@@ -185,8 +437,25 @@ def prepare_recording(ctx, slug, shot_id, generate_missing=True):
         return
     model, _ = _effective_video_model(shot, board)
     if shot.get("dialogueSource") == "native":
+        if model != "ref2va":
+            # The project's video engine is explicitly something other than
+            # MiniMax H3 (krea2-still/wan-i2v) -- genuinely audio-incapable,
+            # not a case a fallback voice or an unassigned speaker can fix.
+            raise ValueError(
+                f"Native speech requires MiniMax H3 Ref2VA, but this "
+                f"project's video engine is {model}, which generates silent "
+                "video. Switch Dialogue source to a separate recording, or "
+                "change the project's video engine to Automatic (MiniMax "
+                "H3) in Settings."
+            )
         if not _clones_voice(shot, board, model):
-            raise ValueError("Native speech requires Ref2VA and a cast speaker with a voice reference")
+            speaker = speaker_for(shot, board)
+            if speaker and _assign_fallback_voice(ctx, speaker):
+                ctx.store.save(slug, board)
+            # else: no clone available. That is a supported outcome, not an
+            # error -- H3 is still asked (see _resolved_prompt's dialogue cue
+            # in vpipe_backend.py) to voice the line in a voice that fits the
+            # character and scene, instead of cloning one.
         return
     if _clones_voice(shot, board, model):
         return

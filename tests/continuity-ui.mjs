@@ -24,14 +24,14 @@ const result = await evaluate(`(async () => {
     state.slug = slug; state.board = loaded.board; state.selectedId = state.board.shots[1].id;
     state.status = {busy:false,stills:{busy:false}}; state.stale = {shots:{}};
     render();
-    const label = [...document.querySelectorAll('label')].find(e => e.textContent.includes('using Ref2VA references'));
-    assert(label, 'Reference continuity control is visible');
+    const label = [...document.querySelectorAll('label')].find(e => e.textContent.includes("Chain start frame from shot"));
+    assert(label, 'Chain-start control is visible');
     label.querySelector('input').click();
-    assert(state.board.shots[1].continuityRef.from === state.board.shots[0].id, 'Links previous scene');
+    assert(state.board.shots[1].startRef.from === state.board.shots[0].id, 'Links previous scene');
     assert(effectiveShotModel(state.board.shots[1]) === 'ref2va', 'Keeps Ref2VA active');
     await saveNow();
     const saved = await API.getBoard(slug);
-    assert(saved.board.shots[1].continuityRef.mode === 'reference', 'Continuity persists');
+    assert(saved.board.shots[1].startRef.kind === 'chain', 'Chain-start persists');
     const preview = await req('POST','/api/render-preview',{board:state.board,shot:state.board.shots[1]});
     assert(preview.model === 'ref2va' && preview.references[0].name === 'Previous scene', 'Resolved preview identifies reference');
     const host = document.createElement('div'); document.body.appendChild(host);

@@ -24,7 +24,7 @@ class Continuity(unittest.TestCase):
         self.orch = an_orchestrator(self.root)
         self.board = a_board()
         for i in (1, 2):
-            self.board['shots'][i]['continuityRef'] = {'kind':'chain', 'from':f's{i}', 'mode':'reference'}
+            self.board['shots'][i]['startRef'] = {'kind':'chain', 'from':f's{i}'}
         self.slug = 'test'
         self.orch.store.save(self.slug, self.board)
 
@@ -37,7 +37,7 @@ class Continuity(unittest.TestCase):
     def test_reference_manifest_retains_identity_and_voice(self):
         shot = self.board['shots'][1]
         shot.update(dialogueSource='native', dialogue='Hello', characterIds=['frog'])
-        shot['continuityRef']['resolved'] = 'previous.png'
+        shot['startRef']['resolved'] = 'previous.png'
         self.board['characters'] = [dict(id='frog', name='Kermit', image={'path':'portrait.png'}, voice={'path':'voice.wav'})]
         self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
         paths = ShotPaths(self.root, self.root/'shot', 'shot', self.root)
@@ -48,9 +48,11 @@ class Continuity(unittest.TestCase):
         self.assertIn('<Picture 2>: Kermit', prompt)
         self.assertIn('speaks aloud', prompt)
         self.assertTrue(_has_downstream_chain(self.board['shots'][0], self.board))
-        shot['startRef'] = {'path':'anchor.png'}
-        with self.assertRaisesRegex(ValueError, 'Choose reference continuity'):
-            _effective_video_model(shot, self.board)
+        # Overwriting a chain-sourced Start frame with a manually chosen one
+        # is just an ordinary edit now -- there is no second field left to
+        # conflict with, so this no longer raises.
+        shot['startRef'] = {'path': 'anchor.png'}
+        self.assertEqual(_effective_video_model(shot, self.board)[0], 'ref2va')
 
     def test_same_filename_changed_content_invalidates(self):
         p = self.frame()
@@ -79,7 +81,7 @@ class Continuity(unittest.TestCase):
 
     def test_cycles_and_missing_sources_rejected_before_queue(self):
         for source in ['s3','missing']:
-            self.board['shots'][0]['continuityRef']={'kind':'chain','from':source}
+            self.board['shots'][0]['startRef']={'kind':'chain','from':source}
             self.orch.store.save(self.slug,self.board)
             with self.assertRaisesRegex(ValueError,'earlier scene'):
                 self.orch._prime_batch(self.slug,None)
@@ -114,6 +116,107 @@ class Continuity(unittest.TestCase):
             shot.update(characterIds=['c'],dialogueSource='native')
             self.orch.store.save(self.slug,board)
             prepare_recording(ctx,self.slug,'s1');generate.assert_not_called()
+
+    def test_continuity_ref_migrates_into_start_ref(self):
+        # continuityRef is retired: Store.migrate() folds it into startRef so
+        # old boards keep their continuity settings under the single merged
+        # field.
+        board = a_board()
+        board['shots'][0]['continuityRef'] = {'kind': 'chain', 'from': 's0', 'mode': 'reference'}
+        migrated = self.orch.store.migrate(board)
+        shot = migrated['shots'][0]
+        self.assertNotIn('continuityRef', shot)
+        self.assertEqual(shot['startRef'], {'kind': 'chain', 'from': 's0'})
+
+        # A shot with both set (shouldn't occur today -- _effective_video_model
+        # has always rejected the combination -- but boards are hand-editable)
+        # keeps the more specific startRef and drops the orphaned continuity ref.
+        board = a_board()
+        board['shots'][0]['continuityRef'] = {'kind': 'chain', 'from': 's0'}
+        board['shots'][0]['startRef'] = {'path': 'manual.png'}
+        migrated = self.orch.store.migrate(board)
+        shot = migrated['shots'][0]
+        self.assertNotIn('continuityRef', shot)
+        self.assertEqual(shot['startRef'], {'path': 'manual.png'})
+
+    def test_native_dialogue_with_no_voice_is_not_blocking(self):
+        # Dialogue with no assigned character (or no voice clip) used to
+        # hard-fail. It's now a supported case: H3 is still asked to voice
+        # the line, in a voice it judges fits the character and scene,
+        # rather than staying silent for a separate recording.
+        board = self.board
+        shot = board['shots'][0]
+        shot.update(dialogue='Hello', characterIds=[], dialogueSource='native')
+        self.orch.store.save(self.slug, board)
+        ctx = SimpleNamespace(store=self.orch.store, data_dir=self.root, tts=lambda kind: None)
+        prepare_recording(ctx, self.slug, 's1')  # must not raise
+
+        prompt = _resolved_prompt(shot, board, model='ref2va')
+        self.assertIn('in a voice that fits the character and scene', prompt)
+        self.assertNotIn('natural jaw and lip movement', prompt)
+        self.assertNotIn('dubbed separately', prompt)
+        self.assertIn('Dialogue priority:', prompt)
+
+    def test_native_dialogue_with_no_voice_does_not_relay_a_stale_dub(self):
+        # Regression guard for the voiceClonedNatively -> nativeDialogueSpoken
+        # rename: a shot switched to native dialogue with no voice clip must
+        # still be treated as "H3 already spoke this line," so a leftover
+        # dialogue.wav from a prior recording-based setting is never muxed on
+        # top of a clip that already speaks the line (the "second voice" bug).
+        from server.backends.base import JobSpec, RunResult, Validation
+        board = self.board
+        shot = board['shots'][0]
+        shot.update(dialogue='Hello', characterIds=[], dialogueSource='native')
+        self.orch.store.save(self.slug, board)
+        folder = self.root / 'test/shots/01'
+        folder.mkdir(parents=True)
+        (folder / 'dialogue.wav').write_bytes(b'a' * 2048)  # a stale prior recording
+
+        class FakeBackend:
+            def prepare(self, shot, project, paths):
+                return JobSpec(shot_id='s1', payload={'nativeDialogueSpoken': True})
+
+            def run(self, spec, on_event, should_cancel):
+                return RunResult(exit_code=0, started_at=0.0, ended_at=1.0)
+
+            def validate(self, spec, result):
+                return Validation(verdict='done')
+
+        self.orch.backend = FakeBackend()
+        self.orch._runs['s1'] = ShotRun(shot_id='s1', status='queued')
+        with patch.object(self.orch, '_relay_speech') as relay:
+            self.orch._run_one(self.slug, 's1')
+        relay.assert_not_called()
+        updated = self.orch.store.load(self.slug)
+        self.assertEqual(updated['shots'][0]['renderedDialogueSource'], 'native')
+        self.assertIsNone(updated['shots'][0]['dubUrl'])
+
+    def test_fingerprint_layering_version_bump_invalidates_old_renders(self):
+        # A forgotten layeringVersion/ref2vaProfile bump would ship this whole
+        # change without marking a single already-rendered clip stale. Prove
+        # the bump actually happened by running the OLD render_fingerprint
+        # (from the last commit, before this change) against the same inputs
+        # and checking it no longer matches.
+        import re
+        import subprocess
+        repo_root = Path(__file__).resolve().parent.parent
+        old_source = subprocess.run(
+            ['git', 'show', 'HEAD:server/store.py'],
+            cwd=str(repo_root), capture_output=True, text=True, check=True,
+        ).stdout
+        match = re.search(r'\ndef render_fingerprint\(.*?\n(?=\ndef )', old_source, re.S)
+        self.assertIsNotNone(match, "could not find render_fingerprint in HEAD's store.py")
+        from server.store import _ref_key, speech_fingerprint
+        import hashlib, json
+        ns = {'_ref_key': _ref_key, 'speech_fingerprint': speech_fingerprint,
+              'hashlib': hashlib, 'json': json, 'Any': object, 'dict': dict}
+        exec(compile(match.group(0), '<old render_fingerprint>', 'exec'), ns)
+        old_render_fingerprint = ns['render_fingerprint']
+
+        shot = {**self.board['shots'][0], 'startRef': {'path': 'anchor.png'}}
+        old_hash = old_render_fingerprint(shot, self.board)
+        new_hash = render_fingerprint(shot, self.board)
+        self.assertNotEqual(old_hash, new_hash)
 
     @unittest.skipUnless(shutil.which('ffmpeg'),'ffmpeg required')
     def test_trim_crossfade_silent_clip_and_continuous_bed(self):

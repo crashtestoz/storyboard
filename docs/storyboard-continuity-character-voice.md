@@ -1,27 +1,55 @@
 # Storyboard: scene continuity, character references, and cloned voice
 
-Status: implemented locally on 16 September 2026. Automated pipeline and
-FFmpeg checks pass; generated-model continuity quality still needs a short
-visual/audio trial. The design below records the intended behavior and remaining
-experimental work.
+Status: as of 21 September 2026, every video shot renders through Ref2VA
+automatically — FL2VA (a separate model checkpoint that only accepts a hard
+first/last-frame anchor, with no reference-list or audio-cloning mechanism at
+all) is no longer auto-selected and is left dormant. Start/End frame images
+— manually chosen or chained from the previous shot's last rendered frame —
+are always sent to Ref2VA as ordered, soft references, never a hard-pinned
+keyframe. The two previously-separate chaining controls ("Chain start frame
+from shot N" and "Continue from shot N using Ref2VA references") are merged
+into one: chaining is just a Start frame sourced from the previous shot.
+`continuityRef`, the field the second control used to write, is retired; old
+boards are migrated to the merged shape automatically on load
+(`Store.migrate()`).
+
+**Read this before relying on it for a real batch:** the combination this
+makes the *default* case for any shot with a Start frame — Start/End frame
+references + cast identity portraits + native voice cloning, all in one
+Ref2VA render — was, before this change, reachable only by deliberately
+opting into continuity references, and was flagged in this doc's own
+"Beyond the first milestone" section (below) as **not yet quality-validated**.
+It is now the common case, not a rare one. Do a visual/audio trial on a real
+shot before trusting an unattended overnight batch. Separately, Ref2VA
+measures roughly **1.3x slower** than FL2VA for the same geometry with no
+extra references attached (see `_estimate_seconds` in
+`vpipe_backend.py`) — every video shot now pays that cost, including ones
+that previously rendered on FL2VA with nothing extra attached.
+
+Native H3 dialogue no longer requires an assigned character or a voice clip
+to proceed: with dialogue text present and no clone available, H3 is still
+asked to speak the line aloud, in a voice it judges fits the character and
+scene, instead of hard-blocking the shot or staying silent for a separate
+dub.
 
 ## Using the implementation
 
 1. Restart Storyboard and refresh the browser after any running render stops.
-2. Open the final-video panel's **Continuity, dialogue & cut settings**.
-3. Choose **Continue all scenes with Ref2VA**, or enable **Continue from shot N
-   using Ref2VA references** in an individual scene. Remove Start/End anchors
-   first; existing hard chains are preserved until explicitly changed.
-4. Use **H3 native speech** to send the character voice into Ref2VA, or keep
-   **Dialogue-window recording** for a separate cloned take. Keep the original
-   character assigned to every relevant scene.
-5. **Prepare all dialogue** generates only missing/stale recordings and reuses
+2. Set a **Start frame** on a shot (upload a still), or enable **Chain start
+   frame from shot N's last rendered frame** to continue from the previous
+   shot instead. Either way it is sent to Ref2VA as an ordered reference —
+   there is no separate "hard anchor" mode to choose between any more.
+3. Use **H3 native speech** to have H3 speak the dialogue itself — cloning
+   the assigned character's voice clip when one is attached, or choosing its
+   own voice when one isn't — or keep **Dialogue-window recording** for a
+   separately prepared, cloned take.
+4. **Prepare all dialogue** generates only missing/stale recordings and reuses
    current takes. Render batches perform the same server-side preparation before
    generating video. Native speech is generated during the video render.
-6. Review adjacent scene endings/openings in the scene editor. Set start/end
+5. Review adjacent scene endings/openings in the scene editor. Set start/end
    trims there; set crossfade duration, edge audio fades, level matching, and an
    optional looping background audio file in the final-video panel.
-7. Render all, or re-assemble existing clips when only cut settings changed.
+6. Render all, or re-assemble existing clips when only cut settings changed.
 
 Selected-scene renders automatically include missing or stale prerequisites,
 with the reason shown in the queue. Sources must be earlier scenes: missing,
@@ -66,8 +94,9 @@ The current implementation is in `storyboard/`:
 | Configuration | Actual behavior |
 | --- | --- |
 | No Start/End frame | Uses Ref2VA with scene references and cast portraits. Project style references are a library — one is only sent if it's also added as one of the shot's own scene references. |
-| Start/End frame, including a chain | Automatically selects FL2VA. The supplied frame becomes an anchor; separate Ref2VA portraits and voice references are not supplied on this path. |
-| Ref2VA with native speech | Sends the speaking character's voice reference and asks H3 to generate the dialogue. |
+| Start/End frame, including a chain | Stays on Ref2VA. The supplied frame (manual or chained from the previous shot) is sent as an ordered reference alongside cast portraits and voice references — not a hard anchor. |
+| Native speech, cast speaker has a voice clip | Sends the speaking character's voice reference and asks H3 to clone it into the generated dialogue. |
+| Native speech, no assigned character or no voice clip | Still asks H3 to speak the line aloud, in a voice it judges fits the character and scene, with no reference clip to clone from. |
 | Dialogue-window recording | Uses a separately prepared dialogue take, applied after the video render. |
 | Replace clip audio with the dub | Replaces the generated soundtrack with the existing recording, including removing generated ambience and effects. It does not generate a recording. |
 | Render all | Renders stale scenes and dependent frame chains, then assembles the clips. It prepares missing/stale recorded dialogue before video generation. |
@@ -107,17 +136,26 @@ the open-source release. Local results therefore depend on how the application
 constructs the reference set and prompt. See
 [H3-Context-IR](https://huggingface.co/MiniMaxAI/MiniMax-H3#h3-context-ir).
 
-## 1. Separate continuity guidance from frame anchors
+## 1. Separate continuity guidance from frame anchors — superseded
 
-Add an explicit continuity control with three choices:
+**Status: implemented, then simplified.** This section originally proposed a
+separate `continuityRef` field, kept mutually exclusive with `startRef`/
+`endRef`, so a shot could either hard-anchor to a frame (FL2VA) or softly
+reference the previous scene (Ref2VA) but not both. Once every shot routes
+through Ref2VA (see the status note at the top of this doc), that distinction
+no longer exists — a Start frame, manual or chained, is always the same kind
+of soft reference. `continuityRef` has been folded into `startRef`; see the
+migration in `Store.migrate()` (`server/store.py`), which upgrades an old
+board's `continuityRef` into the equivalent chain-sourced `startRef` on load.
+The design record below is kept for history, not as current guidance.
+
+Original proposal, for reference:
 
 | Choice | Backend | Meaning |
 | --- | --- | --- |
 | Independent scene | Ref2VA | Use original cast/style/scene references. |
 | Continue using previous scene as reference | Ref2VA | Add the previous final frame as composition and continuity guidance while retaining original references. |
 | Anchor opening to previous final frame | FL2VA | Use the existing Start-frame chain behavior; use recorded dialogue for a cloned voice. |
-
-Proposed new field, independent of `startRef` and `endRef`:
 
 ```json
 {
@@ -128,12 +166,6 @@ Proposed new field, independent of `startRef` and `endRef`:
   }
 }
 ```
-
-Resolve this field immediately before preparing the scene, after its source
-has completed successfully. Keep the resolved frame and source take identity
-as derived metadata. Do not convert existing Start-frame chains silently.
-Reject ambiguous combinations of reference continuity and hard anchors, with
-an explanation of the available choices.
 
 ## 2. Build one consistent Ref2VA reference manifest
 
@@ -174,13 +206,21 @@ Reference continuity needs the same dependency guarantees as frame chaining:
 
 Relevant integration points:
 
-- `storyboard/server/orchestrator.py`: `_pending`, `_resolve_chain`, `_run_one`.
-- `storyboard/server/store.py`: reference identities, render fingerprints,
-  persisted defaults, and chain previews.
-- `storyboard/server/backends/vpipe_backend.py`: `_effective_video_model`,
-  `_has_downstream_chain`, reference assembly, and resolved prompts.
-- `storyboard/js/app.js`: continuity controls, effective model, dependency
-  preview, and dialogue compatibility messaging.
+- `storyboard/server/orchestrator.py`: `_pending`, `_resolve_chain`, `_run_one`
+  (the `nativeDialogueSpoken` payload flag, read here, gates whether a
+  leftover TTS take gets muxed onto a clip that already speaks its line —
+  see the "second voice" note in `_run_one`).
+- `storyboard/server/store.py`: reference identities, render fingerprints
+  (`render_fingerprint`'s `layeringVersion`/`ref2vaProfile`), persisted
+  defaults, chain previews, and the `continuityRef` → `startRef` migration
+  in `migrate()`.
+- `storyboard/server/backends/vpipe_backend.py`: `_effective_video_model`
+  (always Ref2VA for H3 now), `_has_downstream_chain`, `_reference_bindings`,
+  `_ref2va_references`, `_speaks_line_aloud` (native dialogue with no voice
+  to clone), and `_resolved_prompt`.
+- `storyboard/js/app.js`: `effectiveShotModel`, `dialogueReadiness` (its
+  `blocking` field distinguishes a real blocker from an informational note),
+  the merged Start-frame/chain control, and dependency preview.
 
 ## 4. Make voice handling consistent and automatic
 
@@ -188,9 +228,13 @@ Choose one dialogue approach across the sequence unless a deliberate exception
 is needed:
 
 **Native Ref2VA speech:** supply the same speaker voice reference in every
-scene. H3 generates picture and speech together. This is the first option to
-test for integrated speaking performance, but exact wording, timing, and voice
-consistency still need review. Do not apply a separate dub afterward.
+scene for a consistent cloned voice; a scene with no character assigned, or a
+character with no voice clip, still speaks the line — just in a voice H3
+chooses itself rather than a clone, which will not stay consistent across
+scenes without a reference. H3 generates picture and speech together. This is
+the first option to test for integrated speaking performance, but exact
+wording, timing, and voice consistency still need review. Do not apply a
+separate dub afterward.
 
 **Cloned recordings:** reuse approved takes, and add a batch action to generate
 missing or stale dialogue before rendering. The batch should fingerprint text,

@@ -430,18 +430,13 @@ class VpipeBackend(Backend):
             cap.kind == "video"
             and shot.get("dialogue")
             and shot.get("dialogueSource") == "native"
-            and not _clones_voice(shot, project, model)
+            and not cap.supports_audio
         ):
-            if model == "ref2va" or model == "fl2va":
-                raise ValueError(
-                    "H3 native speech requires Ref2VA and a cast speaker with a "
-                    "reference voice clip. Remove the Start/End frame anchors, add "
-                    "the voice clip, or switch Dialogue source to a separate recording."
-                )
             raise ValueError(
-                f"Native voice cloning is a MiniMax H3 Ref2VA feature; {model} "
-                "has no such capability. Switch Dialogue source to a separate "
-                "recording, or select Ref2VA."
+                f"H3 native speech requires an audio-capable video engine; {model} "
+                "generates silent video. Switch Dialogue source to a separate "
+                "recording, or change the project's video engine to Automatic "
+                "(MiniMax H3) in Settings."
             )
         prompt = _resolved_prompt(
             shot,
@@ -451,13 +446,15 @@ class VpipeBackend(Backend):
         )
         if sketch:
             prompt = f"{SKETCH_STYLE_PREFIX} {prompt}"
-        # Whether this render will speak its own dialogue in the cloned
-        # voice — the orchestrator needs to know this so it does not also
-        # relay a leftover TTS take onto the clip afterwards, which is
-        # exactly the "second voice" bug this replaced. False whenever audio
-        # is not being generated at all (draft mode), since there is then no
-        # voice for H3 to clone anything into.
-        voice_cloned_natively = with_audio and _clones_voice(shot, project, model)
+        # Whether this render asks H3 to speak its own dialogue aloud --
+        # cloned from a reference clip, or in a voice H3 judges fits the
+        # character and scene when there's no clip to clone (see
+        # _speaks_line_aloud) -- the orchestrator needs to know this so it
+        # does not also relay a leftover TTS take onto the clip afterwards,
+        # which is exactly the "second voice" bug this replaced. False
+        # whenever audio is not being generated at all (draft mode), since
+        # there is then nothing for H3 to speak into.
+        natively_spoken = with_audio and _speaks_line_aloud(shot, project, model)
         steps = int(shot.get("steps") or cap.default_steps)
         seed = int(shot.get("seed") or 0)
 
@@ -555,7 +552,7 @@ class VpipeBackend(Backend):
                 "frames": render_frames,
                 "draft": draft,
                 "save_frames": save_frames,
-                "voiceClonedNatively": voice_cloned_natively,
+                "nativeDialogueSpoken": natively_spoken,
                 "sketch": sketch,
                 "sketchStretchFactor": stretch_factor,
             },
@@ -749,8 +746,9 @@ class VpipeBackend(Backend):
         # right before spending full-quality render time on it. Sketch is
         # silent by design, so there is no voice to clone into and no point
         # sending the reference at all.
-        if shot.get("continuityRef") and not _ref_source(shot["continuityRef"], paths):
-            raise ValueError("Previous scene reference has not been resolved; render its source first")
+        start = shot.get("startRef")
+        if isinstance(start, dict) and start.get("kind") == "chain" and not _ref_source(start, paths):
+            raise ValueError("Start frame chains from a previous scene that has not been resolved; render its source first")
         refs = _ref2va_references(
             shot, project, paths, include_audio_refs=with_audio, sketch=sketch
         )
@@ -1388,7 +1386,7 @@ def _has_downstream_chain(shot: dict, project: dict) -> bool:
     if not shot_id:
         return False
     for other in project.get("shots") or []:
-        for key in ("startRef", "endRef", "continuityRef"):
+        for key in ("startRef", "endRef"):
             ref = other.get(key)
             if (
                 isinstance(ref, dict)
@@ -1411,9 +1409,11 @@ def _resolved_prompt(
     1b. the cast this shot uses — "Name: description", so the shot prompt can
         refer to them by name
     2. this shot's prompt — action, camera and mood, this shot only
-    3. the dialogue — spoken outright when H3 has the speaker's own voice
-       clip to clone from (Ref2VA only), otherwise a silent lip-movement cue
-       for TTS to dub in afterwards
+    3. the dialogue — spoken outright by H3 itself when Dialogue source is
+       "native" (Ref2VA only), cloning the speaker's own voice clip when one
+       is attached, or improvising a voice that fits the character and scene
+       when it isn't; otherwise a silent lip-movement cue for a separate
+       recording to be dubbed in afterwards
     4. the project soundscape — the constant ambient bed, every shot
     5. this shot's sound note — the accents specific to this clip
 
@@ -1425,12 +1425,12 @@ def _resolved_prompt(
     so the sound description is conditioning, not metadata.
 
     Ref2VA already sends the speaking character's voice clip in as a
-    soundtrack reference (see ``_ref2va_references``) — verified to be
-    enough on its own for H3 to reproduce a line accurately, so asking it to
-    speak is asking for something it can already do, not hoping for a happy
-    accident. FL2VA has no mechanism to tell H3 what anyone sounds like, so
-    there dialogue stays a silent cue and TTS is still the only source of a
-    voice.
+    soundtrack reference when one is attached (see ``_ref2va_references``) —
+    verified to be enough on its own for H3 to reproduce a line accurately.
+    Without one, H3 is still asked to speak the line, just without a clip to
+    clone from. FL2VA (dormant; see ``_effective_video_model``) has no
+    mechanism to tell H3 what anyone sounds like, so there dialogue stays a
+    silent cue and a separate recording is the only source of a voice.
 
     Sound parts are dropped for a model with no audio (a still), where they
     would only compete with the visual description.
@@ -1492,9 +1492,8 @@ def _resolved_prompt(
             )
 
     bindings = _reference_bindings(shot, project, model)
-    if model == "ref2va" and any(
-        entry["name"] in ("Start frame", "End frame") for entry in bindings
-    ):
+    start = shot.get("startRef")
+    if model == "ref2va" and (shot.get("startRef") or shot.get("endRef")):
         parts.append(
             "The Start frame and End frame references describe the intended "
             "opening and closing composition. Ref2VA uses them as ordered "
@@ -1502,7 +1501,7 @@ def _resolved_prompt(
             "their identity, layout and continuity while following the shot "
             "action."
         )
-    if shot.get("continuityRef") and model == "ref2va":
+    if model == "ref2va" and isinstance(start, dict) and start.get("kind") == "chain":
         parts.append("Continue naturally from the previous scene reference. Preserve its environment, "
                      "lighting, character position and direction of motion at the opening, while "
                      "using the original cast portraits for identity. This is continuity guidance, "
@@ -1527,8 +1526,9 @@ def _resolved_prompt(
     parts.append(shot_prompt)
     line = (shot.get("dialogue") or "").strip()
     clones_voice = bool(line) and _clones_voice(shot, project, model)
+    speaks_aloud = bool(line) and (clones_voice or _speaks_line_aloud(shot, project, model))
     if with_audio:
-        cue = _dialogue_visual_cue(shot, project, clones_voice=clones_voice)
+        cue = _dialogue_visual_cue(shot, project, clones_voice=clones_voice, speaks_aloud=speaks_aloud)
         if cue:
             parts.append(cue)
 
@@ -1536,46 +1536,48 @@ def _resolved_prompt(
         if project.get("soundscapeInShots", True):
             parts.append((project.get("soundscape") or "").strip())
         parts.append((shot.get("soundNote") or "").strip())
-        if line and not clones_voice:
+        if line and not speaks_aloud:
             parts.append(
                 "Generated audio contains ambient sound only: no spoken words, "
                 "no voice, and no intelligible dialogue; the voice line is "
                 "dubbed separately."
             )
-        elif line and clones_voice:
+        elif line and speaks_aloud:
             # The shared soundscape may quite reasonably say "no speech" for
             # an otherwise quiet scene. Once native H3 dialogue is selected,
             # that ambient constraint must not cancel the explicit spoken
             # line or its corresponding mouth movement.
             parts.append(
                 "Dialogue priority: the selected character must speak the "
-                "specified line aloud in the referenced voice; any 'no speech' "
-                "instruction applies only to background or unrelated voices."
+                "specified line aloud" +
+                (" in the referenced voice" if clones_voice
+                 else " in a voice that fits the character and scene") +
+                "; any 'no speech' instruction applies only to background or "
+                "unrelated voices."
             )
     return " ".join(_sentence(p) for p in parts if p)
 
 
 def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
-    """Choose H3's video mode from the shot's frame-anchor inputs, unless a
-    different model was explicitly requested.
+    """Choose H3's video mode -- always Ref2VA -- unless a different model
+    was explicitly requested.
 
-    FL2VA is the only H3 mode that can wire a supplied image to the
-    first/last frame ports, so either Start frame or End frame activates it
-    for the H3 pair below. With no anchors, Ref2VA is the useful default
-    because it can consume character, style, object and other reference
-    material. The persisted ``model`` field remains a compatibility/default
-    field; this decision is intentionally derived from the actual inputs so
-    old boards route correctly too.
+    FL2VA (a hard first/last-frame keyframe anchor, with no reference-list or
+    audio-cloning mechanism at all) remains registered in capabilities() and
+    _fl2va_spec is kept for isolated testing, but neither is reachable
+    through this automatic routing any more: every shot, with or without a
+    Start/End frame, renders through Ref2VA, which treats a Start/End frame
+    -- manually chosen or chained from a previous shot's last rendered frame
+    -- as an ordered soft reference, never a hard-pinned keyframe. This
+    carries two costs worth knowing: Ref2VA runs roughly 1.3x slower than
+    FL2VA for equivalent geometry (see _estimate_seconds), and "Start/End
+    frame + cast identity references + native voice cloning" together in one
+    render is not yet quality-validated -- see
+    docs/storyboard-continuity-character-voice.md.
 
     ``krea2-still`` and ``wan-i2v`` are not part of that automatic H3
-    routing — both are only ever used when explicitly requested, since
-    neither is a drop-in default for the other two: Wan has no reference-list
-    mode to fall back to the way Ref2VA is H3's fallback, and forcing a
-    board that has always rendered H3 onto a different engine because it
-    happens to have a Start frame set would be a surprising, silent switch.
+    routing — both are only ever used when explicitly requested.
     """
-    if shot.get("continuityRef") and (shot.get("startRef") or shot.get("endRef")):
-        raise ValueError("Choose reference continuity or Start/End frame anchors, not both")
     requested = (
         shot.get("model")
         or (project.get("defaults") or {}).get("model")
@@ -1583,9 +1585,7 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
     )
     if requested in ("krea2-still", "wan-i2v"):
         return requested, ""
-    if shot.get("startRef") or shot.get("endRef"):
-        return "fl2va", "using FL2VA for Start/End frame anchors"
-    return "ref2va", "" if requested == "ref2va" else "using Ref2VA without frame anchors"
+    return "ref2va", ""
 
 
 def _ref2va_references(
@@ -1617,9 +1617,10 @@ def _ref2va_references(
         if src and src not in sounds and len(sounds) < 3:
             sounds.append(src)
 
-    # This helper is only used by Ref2VA preparation. The effective model
-    # routes any shot with a Start/End anchor to FL2VA before this is called;
-    # when called directly, keep the historical ordered-reference behaviour.
+    # This helper is only used by Ref2VA preparation. Every shot renders
+    # through Ref2VA now (see _effective_video_model), so a Start/End frame
+    # -- manual or chained from a previous shot -- always reaches here as an
+    # ordered reference rather than a hard keyframe anchor.
     for entry in _reference_bindings(shot, project, "ref2va"):
         add_image(entry["ref"])
 
@@ -1642,14 +1643,25 @@ def _ref2va_references(
 
 
 def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
-    """One ordered manifest shared by prompt labels and image encoder inputs."""
+    """One ordered manifest shared by prompt labels and image encoder inputs.
+
+    Every auto-routed shot renders through Ref2VA now (see
+    _effective_video_model), so in practice this is always called with
+    ``model="ref2va"``. The gate below is kept for the dormant FL2VA path
+    (still reachable by calling this directly, e.g. in its own tests):
+    FL2VA anchors are wired straight to the model's keyframe ports and are
+    not members of a prompt-addressable reference list, so a non-Ref2VA
+    model must keep getting an empty manifest here, exactly as before.
+    """
     candidates = []
     if model == "ref2va":
-        if shot.get("continuityRef"):
-            candidates.append((shot["continuityRef"], "Previous scene",
-                               "opening composition, position, lighting and direction of travel; retain original cast identity"))
-        if shot.get("startRef"):
-            candidates.append((shot["startRef"], "Start frame", "opening frame and composition"))
+        start = shot.get("startRef")
+        if start:
+            if isinstance(start, dict) and start.get("kind") == "chain":
+                candidates.append((start, "Previous scene",
+                                   "opening composition, position, lighting and direction of travel; retain original cast identity"))
+            else:
+                candidates.append((start, "Start frame", "opening frame and composition"))
         if shot.get("endRef"):
             candidates.append((shot["endRef"], "End frame", "closing frame and composition"))
         candidates.extend((r, "Shot reference", "environment and composition") for r in (shot.get("referenceImages") or []))
@@ -1658,8 +1670,6 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
         # Project style refs are a library, not an automatic input: a shot
         # only sends one if it's been added to that shot's own reference
         # images, same as any other picked image.
-    # FL2VA anchors are wired directly to the model's keyframe ports. They
-    # are not members of a prompt-addressable reference list.
     result, seen, tags = [], {}, set()
     for ref, name, role in candidates:
         data = ref if isinstance(ref, dict) else {"path": ref}
@@ -1674,7 +1684,18 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
             existing["name"] += " / " + name
             existing["role"] += "; " + (data.get("role") or role)
             if tag:
-                raise ValueError("Use one reference entry per tagged image")
+                # The same file can legitimately arrive twice with different
+                # roles now that a Start/End frame joins the same candidate
+                # list as tagged shot references -- e.g. a Start frame that's
+                # also tagged @corridor for the prompt to address directly.
+                # One physical image still gets exactly one <Picture N> and
+                # exactly one tag; only a genuine conflict (two different
+                # tags claiming the same image) is an authoring error.
+                if existing["tag"] and existing["tag"] != tag:
+                    raise ValueError("Use one reference entry per tagged image")
+                if not existing["tag"]:
+                    existing["tag"] = tag
+                    tags.add(tag)
             continue
         if len(result) >= 9:
             raise ValueError("Ref2VA accepts at most 9 unique images; remove unused references")
@@ -1690,8 +1711,6 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
 def _shot_reference_images(shot: dict) -> list[Any]:
     """All image references for Ref2VA, including labeled frame references."""
     refs = []
-    if shot.get("continuityRef"):
-        refs.append(shot["continuityRef"])
     if shot.get("startRef"):
         refs.append(shot.get("startRef"))
     if shot.get("endRef"):
@@ -1729,19 +1748,44 @@ def _clones_voice(shot: dict, project: dict, model: str) -> bool:
     return bool(speaker and (speaker.get("voice") or {}).get("path"))
 
 
+def _speaks_line_aloud(shot: dict, project: dict, model: str) -> bool:
+    """True whenever this render asks H3 to actually voice the dialogue
+    aloud itself -- cloned from a reference clip when one is available (see
+    ``_clones_voice``), or in a voice H3 judges fits the character and scene
+    when it is not -- as opposed to staying silent for a separate recording
+    to be dubbed in afterwards.
+
+    Scoped to an explicit "native" choice, not the legacy "auto" value:
+    "auto" keeps its long-standing behaviour (a cast voice clone makes it
+    Ref2VA-native via ``_clones_voice``; otherwise it falls to a synthesised
+    recording), since "auto" was never a promise to speak aloud the way an
+    explicit choice is.
+    """
+    return (
+        model == "ref2va"
+        and shot.get("dialogueSource") == "native"
+        and bool((shot.get("dialogue") or "").strip())
+    )
+
+
 def _dialogue_visual_cue(
-    shot: dict, project: dict, clones_voice: bool = False
+    shot: dict, project: dict, clones_voice: bool = False, speaks_aloud: bool = False
 ) -> str:
     line = (shot.get("dialogue") or "").strip()
     if not line:
         return ""
     speaker = _speaker_name(shot, project)
+    style = (shot.get("dialogueStyle") or "").strip()
+    delivery = f" Delivery: {style}." if style else ""
     if clones_voice:
-        style = (shot.get("dialogueStyle") or "").strip()
-        delivery = f" Delivery: {style}." if style else ""
         return (
             f"{speaker} speaks aloud, in their own voice from the reference "
             f"clip, saying exactly: \"{line}\"{delivery}"
+        )
+    if speaks_aloud:
+        return (
+            f"{speaker} speaks the line aloud, in a voice that fits the "
+            f"character and scene, saying exactly: \"{line}\"{delivery}"
         )
     return (
         f"{speaker} speaks the line with natural jaw and lip movement: "

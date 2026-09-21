@@ -74,3 +74,60 @@ def format_results(results: list[dict[str, str]]) -> str:
             line += f"\n   {r['snippet']}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def research_character(
+    base_url: str, name: str, *, limit: int = 5, timeout: float = 8.0
+) -> list[dict[str, str]]:
+    """Find grounded background for a named character's speaking style.
+
+    The configured SearXNG service remains the first choice. Public search
+    engines sometimes suspend every SearXNG request at once, though, so an
+    exact-title Wikipedia lookup is a narrow fallback. Requiring an exact
+    title match prevents an original character with a short name from being
+    mistaken for an unrelated public figure.
+    """
+    base_url = (base_url or "").strip()
+    name = (name or "").strip()
+    if not base_url or not name:
+        return []
+    query = f'"{name}" character personality speech patterns dialogue'
+    results = search(base_url, query, limit=limit, timeout=timeout)
+    if results:
+        return results
+
+    params = urllib.parse.urlencode({
+        "action": "query",
+        "generator": "search",
+        "gsrsearch": f'"{name}"',
+        "gsrlimit": min(limit, 5),
+        "prop": "extracts|info",
+        "exintro": "1",
+        "explaintext": "1",
+        "exchars": "2500",
+        "inprop": "url",
+        "format": "json",
+    })
+    try:
+        req = urllib.request.Request(
+            f"https://en.wikipedia.org/w/api.php?{params}",
+            headers={"Accept": "application/json", "User-Agent": "Storyboard/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            doc: Any = json.loads(response.read().decode())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return []
+
+    pages = ((doc.get("query") or {}).get("pages") or {}).values()
+    exact = next(
+        (page for page in pages
+         if str(page.get("title") or "").strip().casefold() == name.casefold()),
+        None,
+    )
+    if not exact or not exact.get("fullurl"):
+        return []
+    return [{
+        "title": str(exact.get("title") or name),
+        "url": str(exact["fullurl"]),
+        "snippet": str(exact.get("extract") or "").strip(),
+    }]
