@@ -3336,15 +3336,12 @@ function renderStrip() {
       )
     );
 
-    const foot = el("div", "shot-foot");
-    foot.appendChild(chip(shot.status));
-    if (shot.status === "running") {
-      foot.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%${etaSuffix(shot)}`));
-    } else if (shot.runtimeSeconds != null) {
-      foot.appendChild(el("span", "shot-sub", dur(shot.runtimeSeconds)));
-    }
-    body.appendChild(foot);
-
+    // The progress bar and phase text go in before the foot row, not after,
+    // so the foot row — carrying the running ETA, then the final runtime
+    // once done — is always the last child and stays pinned to the same
+    // bottom-right spot via .shot-foot's margin-top:auto, in both states.
+    // Appending them after foot used to push the ETA up and out of that
+    // corner while a shot was still running.
     if (shot.status === "running") {
       const track = el("div", "progress-track");
       const fill = el("div", "progress-fill");
@@ -3353,6 +3350,15 @@ function renderStrip() {
       body.appendChild(track);
       if (shot.phase) body.appendChild(el("div", "shot-sub", shot.phase));
     }
+
+    const foot = el("div", "shot-foot");
+    foot.appendChild(chip(shot.status));
+    if (shot.status === "running") {
+      foot.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%${etaSuffix(shot)}`));
+    } else if (shot.runtimeSeconds != null) {
+      foot.appendChild(el("span", "shot-sub", dur(shot.runtimeSeconds)));
+    }
+    body.appendChild(foot);
     card.appendChild(body);
 
     card.addEventListener("click", () => {

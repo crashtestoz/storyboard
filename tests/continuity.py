@@ -193,29 +193,72 @@ class Continuity(unittest.TestCase):
 
     def test_fingerprint_layering_version_bump_invalidates_old_renders(self):
         # A forgotten layeringVersion/ref2vaProfile bump would ship this whole
-        # change without marking a single already-rendered clip stale. Prove
-        # the bump actually happened by running the OLD render_fingerprint
-        # (from the last commit, before this change) against the same inputs
-        # and checking it no longer matches.
-        import re
-        import subprocess
-        repo_root = Path(__file__).resolve().parent.parent
-        old_source = subprocess.run(
-            ['git', 'show', 'HEAD:server/store.py'],
-            cwd=str(repo_root), capture_output=True, text=True, check=True,
-        ).stdout
-        match = re.search(r'\ndef render_fingerprint\(.*?\n(?=\ndef )', old_source, re.S)
-        self.assertIsNotNone(match, "could not find render_fingerprint in HEAD's store.py")
-        from server.store import _ref_key, speech_fingerprint
+        # change without marking a single already-rendered clip stale. This
+        # doesn't diff against git history (fragile: it would start comparing
+        # the new code against itself the moment this change is committed) --
+        # instead it hashes a frozen snapshot of the pre-migration payload
+        # shape (layeringVersion 5, fl2va-routes-on-anchors, continuityRef as
+        # its own field, ref2vaProfile v3/fl2vaProfile v1) and checks today's
+        # render_fingerprint no longer matches it for the same inputs.
         import hashlib, json
-        ns = {'_ref_key': _ref_key, 'speech_fingerprint': speech_fingerprint,
-              'hashlib': hashlib, 'json': json, 'Any': object, 'dict': dict}
-        exec(compile(match.group(0), '<old render_fingerprint>', 'exec'), ns)
-        old_render_fingerprint = ns['render_fingerprint']
+        from server.store import _ref_key
 
         shot = {**self.board['shots'][0], 'startRef': {'path': 'anchor.png'}}
-        old_hash = old_render_fingerprint(shot, self.board)
-        new_hash = render_fingerprint(shot, self.board)
+        board = self.board
+        defaults = board.get('defaults') or {}
+        wanted = set(shot.get('characterIds') or [])
+        cast = [
+            {'name': (c.get('name') or '').strip(), 'description': (c.get('description') or '').strip(),
+             'image': _ref_key(c.get('image'))}
+            for c in (board.get('characters') or []) if c.get('id') in wanted
+        ]
+        old_payload = {
+            'layeringVersion': 5,
+            'speechInputs': speech_fingerprint(shot, board),
+            'recording': shot.get('dialogueAudioUrl') if shot.get('dialogueSource') == 'recording' else None,
+            'dialogueSource': shot.get('dialogueSource', 'auto'),
+            'dialogueStyle': shot.get('dialogueStyle', ''),
+            'speakerId': shot.get('speakerId', ''),
+            'dialogueVoice': shot.get('dialogueVoice', ''),
+            'dubMode': shot.get('dubMode', 'mix'),
+            'voices': [{'id': c.get('id'), 'voice': _ref_key(c.get('voice')), 'voiceText': c.get('voiceText', '')}
+                       for c in board.get('characters', []) if c.get('id') in wanted or c.get('id') == shot.get('speakerId')],
+            'referenceMetadata': [{'tag': r.get('tag', ''), 'role': r.get('role', '')}
+                                   for r in ([shot.get('startRef'), shot.get('endRef')] + (shot.get('referenceImages') or [])
+                                             + (board.get('styleRefs') or [])
+                                             + [c.get('image') for c in board.get('characters', []) if c.get('id') in wanted])
+                                   if isinstance(r, dict)],
+            'prompt': (shot.get('prompt') or '').strip(),
+            'dialogue': (shot.get('dialogue') or '').strip(),
+            'soundNote': (shot.get('soundNote') or '').strip(),
+            'scene': (board.get('sceneDescription') or '').strip(),
+            'soundscape': (board.get('soundscape') or '').strip() if board.get('soundscapeInShots', True) else '',
+            'soundscapeInShots': bool(board.get('soundscapeInShots', True)),
+            'cast': cast,
+            'styleRefs': [_ref_key(r) for r in (board.get('styleRefs') or [])],
+            'startRef': _ref_key(shot.get('startRef')),
+            'endRef': _ref_key(shot.get('endRef')),
+            'referenceImages': [_ref_key(r) for r in (shot.get('referenceImages') or [])],
+            'model': (requested_model := shot.get('model') or defaults.get('model') or 'ref2va'),
+            'effectiveModel': (
+                requested_model if requested_model in ('krea2-still', 'wan-i2v')
+                else 'fl2va' if shot.get('startRef') or shot.get('endRef')
+                else 'ref2va'
+            ),
+            'resolution': defaults.get('resolution') or shot.get('resolution') or '',
+            'frames': int(shot.get('frames') or 0),
+            'steps': int(shot.get('steps') or 0),
+            'seed': int(shot.get('seed') or 0),
+            'draft': bool(defaults.get('draft')),
+            'sketch': bool(defaults.get('draft')) and bool(defaults.get('sketch')),
+        }
+        old_payload['ref2vaProfile'] = 'ordered-reference-set-v3'
+        old_payload['fl2vaProfile'] = 'direct-frame-anchors-v1'
+        old_hash = hashlib.sha256(
+            json.dumps(old_payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()[:16]
+
+        new_hash = render_fingerprint(shot, board)
         self.assertNotEqual(old_hash, new_hash)
 
     @unittest.skipUnless(shutil.which('ffmpeg'),'ffmpeg required')
