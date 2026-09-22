@@ -83,7 +83,7 @@ Minimum versions:
 | Dependency | Required for | Notes |
 | --- | --- | --- |
 | Python 3.10+ | The storyboard web server | `start.sh` prefers Homebrew Python 3.14, 3.13, 3.12, 3.11, then 3.10. |
-| vpipe CLI | Rendering MiniMax H3 / Ref2VA / Krea-2 pipelines | Pass with `--vpipe PATH` or set `SBV_VPIPE`. |
+| vpipe CLI | Rendering MiniMax H3 / Ref2VA / Krea-2 pipelines | Pass with `--vpipe PATH` or set `SBV_VPIPE`. Must support prompt-only Ref2VA — see the note in [§2](#2-install-or-point-to-vpipe). |
 | vpipe workspace with `models/` | Model discovery and render runtime | Pass with `--workspace DIR` or set `SBV_WORKSPACE`. |
 | ffmpeg | Final video assembly and dialogue muxing | Without it, individual renders can still run, but final joining/dubbing is limited. |
 | lsof | `./start.sh --restart` | Used to find the process listening on the selected port. |
@@ -115,6 +115,44 @@ export SBV_VPIPE=/path/to/vpipe/build/apps/vpipe/vpipe
 The workspace is vpipe's runtime root. It is where vpipe resolves `models/`
 and its model registry from, so it must be the same workspace used when the
 models were prepared.
+
+**Required vpipe capability: prompt-only Ref2VA.** Every video shot now
+routes through Ref2VA automatically (there is no more automatic FL2VA
+routing — see `server/backends/vpipe_backend.py::_effective_video_model`),
+and native H3 dialogue with no assigned character or no reference voice clip
+is a supported, non-blocking case: H3 is asked to speak the line in a voice
+it judges fits the scene rather than being refused. Combined, a shot with no
+Start/End frame, no cast portraits, and no voice reference to clone now
+legitimately sends Ref2VA an **empty reference list** — something the
+mainline vpipe engine, as of this writing, refuses outright at several
+layers with errors like `a ref2va request needs at least one reference`.
+
+If your vpipe checkout refuses shots like that (dialogue-only, or a bare
+prompt with no cast/reference images at all) while shots with at least one
+reference render fine, your vpipe build predates this capability. The
+affected functions, if you need to patch or check for it yourself:
+
+- `generative-models/minimax-h3/minimax-h3-layout.cc`/`.h` —
+  `build_ref2va_packed_sequence` must accept an empty `references` list.
+- `generative-models/minimax-h3/minimax-h3-reference-encoder.cc`/`.h` —
+  `validate_reference_request` must not fail on an empty list (the
+  audio-alone rule should still apply only when the list is non-empty).
+- `generative-models/minimax-h3/minimax-h3-text-encoder.cc` —
+  `build_presentation` must not refuse an empty reference list.
+- `stages/video-ref-encoder-stage.cc` — `process()` must not skip on an
+  empty combined reference list, and must emit correctly-shaped video/audio
+  tensors (from the VAE configs) rather than a placeholder width when there
+  are zero video or zero audio rows.
+- `stages/generate-video-stage.cc`/`.h` — must not warn-and-refuse a Ref2VA
+  request with nothing wired to the reference ports; an explicitly empty
+  `references` array should still count as a Ref2VA request, not silently
+  fall back to `t2va`/`fl2va` framing.
+
+This capability is not yet in the public `tgo-app-dev/vpipe` repository —
+it exists only as local patches on the machine this app was developed on.
+If you're setting Storyboard up somewhere new, get this patch from whoever
+manages your vpipe checkout, or confirm your build already accepts
+prompt-only Ref2VA before relying on cast-less or reference-less shots.
 
 ### 3. Prepare vpipe models
 
