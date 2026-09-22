@@ -97,7 +97,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--llm",
-        default=os.environ.get("SBV_LLM", "lmstudio-qwen38-27b"),
+        default=os.environ.get("SBV_LLM", "ollama-local"),
         help=f"default prompt-rewriting model id (see {LLM_CONFIG_NAME})",
     )
     return p.parse_args(argv)

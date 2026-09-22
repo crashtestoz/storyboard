@@ -474,7 +474,8 @@ class LLMService:
     def health(self) -> tuple[bool, str]:
         return True, ""
 
-    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
         raise NotImplementedError
 
     def complete_with_image(
@@ -523,7 +524,8 @@ class NullLLM(LLMService):
     def health(self) -> tuple[bool, str]:
         return False, "No language model is configured for prompt rewriting."
 
-    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
         raise RuntimeError(self.health()[1])
 
 
@@ -534,7 +536,8 @@ class BrokenLLM(LLMService):
     def health(self) -> tuple[bool, str]:
         return False, self._why
 
-    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
         raise RuntimeError(self._why)
 
 
@@ -575,7 +578,11 @@ class OllamaLLM(LLMService):
             f"Pull it with: ollama pull {self.model}"
         )
 
-    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
+        options = {"temperature": 0.7, "top_p": 0.9, "num_ctx": self.num_ctx}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
         body = json.dumps(
             {
                 "model": self.model,
@@ -585,8 +592,7 @@ class OllamaLLM(LLMService):
                 ],
                 "stream": False,
                 # A rewrite should be a rewrite, not a reinvention.
-                "options": {"temperature": 0.7, "top_p": 0.9,
-                            "num_ctx": self.num_ctx},
+                "options": options,
                 # Qwen3 thinking models otherwise return their reasoning, and
                 # the reply here is used verbatim as the prompt.
                 "think": False,
@@ -701,18 +707,27 @@ class OpenAICompatLLM(LLMService):
             return False, f"{self.url} does not serve {self.model!r}"
         return True, ""
 
-    def complete(self, system: str, user: str, *, timeout: float = 300.0) -> str:
-        body = json.dumps(
-            {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.7,
-                "stream": False,
-            }
-        ).encode()
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
+        body_dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.7,
+            "stream": False,
+            # Qwen3's hybrid thinking mode otherwise runs in full before the
+            # actual reply -- burning thousands of unseen tokens and, on a
+            # local model, minutes -- exactly what OllamaLLM's "think": False
+            # heads off for that backend. This is the vLLM/SGLang/llama.cpp
+            # server convention for the same switch; a server that doesn't
+            # recognize it ignores the unknown field.
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        if max_tokens is not None:
+            body_dict["max_tokens"] = max_tokens
+        body = json.dumps(body_dict).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
         with urllib.request.urlopen(req, timeout=timeout) as r:
