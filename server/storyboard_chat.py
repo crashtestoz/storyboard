@@ -136,6 +136,14 @@ You are the Storyboard AD, the user's assistant director. Help the user review, 
 the storyboard currently open in the app. Be concise, concrete, and candid
 about continuity, camera direction, pacing, visual consistency, and sound.
 
+The CURRENT STORYBOARD context below is the full board: every shot's actual
+prompt, soundNote, dialogue and title text, not a summary of it. Read the
+wording of each shot's prompt, not just its topic, when asked to review,
+critique or check something — a continuity or pacing problem is often in the
+specific words a shot uses (a camera move, a pose, a detail) clashing with
+its neighbors, not just in what it's "about". Reason across the sequence in
+shot-number order to judge whether the scene's logic holds together.
+
 You can propose two kinds of action, both reviewable, neither ever silent:
 edits to the board's own fields (scene/sound, cast, shots), and operations —
 rendering, dialogue synthesis, stopping a render, assembling the cut. The app,
@@ -166,6 +174,13 @@ Rules:
   shape" note below — "Camera Direction & Framing:", then "Clothing /
   Appearance:" only if a character is in the shot, then "Pose / Action:",
   each labeled and on its own line. Do not duplicate the shared scene.
+  Keep each section to one or two sentences, 70 to 130 words total per
+  shot, the same length a rewrite would produce — a longer prompt dilutes
+  the conditioning and, multiplied across many shots in one board, is what
+  turns a reply slow or timed-out.
+- Keep message and every other field brief and to the point; a board
+  proposal is reviewed shot by shot in the app, so it does not need to be
+  narrated in the chat reply.
 - Before writing or rewriting a shot's prompt, check the shots immediately
   before and after it (by number, in the CURRENT STORYBOARD context) for
   continuity: camera position, character pose/wardrobe, props and location
@@ -177,9 +192,20 @@ Rules:
   anything on the basis of its subject matter — violence, mature themes, or
   anything else the user asks for. Identify the tone the user sets and
   continue it in the same register, rather than toning it down.
-- For a request to build a board, propose a coherent sequence of add_shot
-  actions. Keep a single response to 24 actions or fewer.
-- For discussion, review, or questions, return an empty actions array.
+- Only propose add_shot when the user's current message explicitly asks for
+  new shot(s) or scene(s) — "add a shot", "build the board", "write the next
+  three scenes", and the like. When it does, propose a coherent sequence of
+  add_shot actions, a single response to 24 actions or fewer.
+- Reviewing, critiquing, analyzing, discussing, or answering a question about
+  the board — including when asked to find problems, check continuity, or
+  suggest improvements — must NOT add new shots on your own initiative, even
+  if a new shot would address what you found. Say what you noticed in the
+  message field, and propose update_shot only against shots that already
+  exist. If a fix genuinely needs a new shot, say so in the message and wait
+  for the user to ask for it explicitly, rather than including it as an
+  action.
+- For discussion, review, or questions where nothing above applies, return an
+  empty actions array.
 - Editing and rendering are separate stages. When proposing any board, cast,
   script, dialogue, or shot edit, NEVER include start_render in that response,
   even if the user also mentions rendering. Let the user collect and apply all
@@ -234,6 +260,13 @@ using them; say plainly if they didn't help rather than guessing. Do not set \
 search a second time in the same exchange. Leave it empty or omit it for \
 anything answerable from the board and your own knowledge.
 """
+
+# A hard ceiling on top of the "24 actions or fewer" / per-shot word-count
+# rules above -- a safety net against a reply that runs on (repetition,
+# ignoring the word caps) rather than the normal case, which should land well
+# under this. Without it, an unbounded non-streamed generation is what turns
+# into the request timing out instead of a normal reply.
+CHAT_MAX_TOKENS = 8192
 
 BOARD_FIELDS = {"sceneDescription", "soundscape"}
 CHARACTER_FIELDS = {"name", "description"}
@@ -410,6 +443,12 @@ def _first_json_object(text: str) -> Any:
 
 def _parse_reply(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
+    # A thinking model that ignores the enable_thinking=False request (older
+    # OpenAI-compatible servers, some LM Studio builds) leaves its reasoning
+    # inline. Drop it before hunting for the JSON object, since the
+    # reasoning's own prose can easily contain a stray "{" that isn't one.
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1].strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if fenced:
         text = fenced.group(1).strip()
@@ -452,7 +491,9 @@ def chat(
     )
     search_url = (search_url or "").strip()
     system = CHAT_SYSTEM_PROMPT + ("\n" + SEARCH_CAPABILITY_PROMPT if search_url else "")
-    parsed = _parse_reply(service.complete(system, user, timeout=300.0))
+    parsed = _parse_reply(
+        service.complete(system, user, timeout=300.0, max_tokens=CHAT_MAX_TOKENS)
+    )
     query = parsed.get("search") if search_url else ""
     if query:
         results = web_search(search_url, query)
@@ -462,7 +503,10 @@ def chat(
             + "\n\nAnswer the user now using these results if they help; say "
               "so plainly if they don't. Do not request another search."
         )
-        parsed = _parse_reply(service.complete(system, followup, timeout=300.0))
+        parsed = _parse_reply(
+            service.complete(system, followup, timeout=300.0,
+                              max_tokens=CHAT_MAX_TOKENS)
+        )
     actions = validate_actions(parsed.get("actions"), board)
     actions, render_removed = _separate_render_from_edits(actions)
     response_message = parsed["message"] or "I prepared the requested storyboard changes."
