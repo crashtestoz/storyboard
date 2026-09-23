@@ -1022,7 +1022,7 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .stills-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: var(--sp-3);
 }
 .stills-cell { display: flex; flex-direction: column; gap: var(--sp-2); }

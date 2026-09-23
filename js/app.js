@@ -2857,6 +2857,19 @@ function renderBoundaryReview(host, raw, idx) {
   host.appendChild(panel);
 }
 
+// From the shots as planned, not any rendered clip, so it works pre-render.
+// Still-image shots contribute no clip to the cut (see assemble.py), so they
+// are excluded; trims and crossfade are applied the way assemble.py applies them.
+function estimatedFinalStats() {
+  const transition = Math.min(2, Math.max(0, Number((state.board.assembly || {}).transitionSeconds) || 0));
+  const lengths = shots()
+    .filter((raw) => (modelCap(effectiveShotModel(raw)) || {}).kind !== "image")
+    .map((raw) => Math.max(0, (raw.frames || 0) / 24 - (raw.trimIn || 0) - (raw.trimOut || 0)));
+  const overlap = lengths.length > 1 ? transition * (lengths.length - 1) : 0;
+  const seconds = Math.max(0, lengths.reduce((a, b) => a + b, 0) - overlap);
+  return { clips: lengths.length, seconds, frames: Math.round(seconds * 24) };
+}
+
 function renderFinal(host = $("#preview .final-video-content")) {
   if (!host) return;
   const prev = host.querySelector("video");
@@ -2914,6 +2927,13 @@ function renderFinal(host = $("#preview .final-video-content")) {
       el("div", "final-empty",
          "Not built yet. “Render all” assembles it after the last shot, or " +
          "press Assemble to join whatever is already rendered.")
+    );
+    const est = estimatedFinalStats();
+    host.appendChild(
+      el("div", "final-meta final-estimate",
+         est.clips
+           ? `Estimated once rendered: ${est.clips} clip(s) · ${dur(est.seconds)} · ${est.frames} frames @ 24fps`
+           : "No video shots yet, so there is nothing to estimate.")
     );
   }
 
@@ -3782,7 +3802,7 @@ function renderEditor() {
   head.appendChild(one);
 
   const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Stills");
-  stillsBtn.title = "Fast Krea-2 previews of this shot's start, middle and end";
+  stillsBtn.title = "Fast Krea-2 previews of this shot's start and end";
   stillsBtn.disabled = !!(state.status && state.status.busy) || stillsBusy;
   stillsBtn.addEventListener("click", async () => {
     stillsBtn.disabled = true;
@@ -4671,7 +4691,8 @@ function paintStageTiles(raw, shot) {
 
 /* --- stills ---------------------------------------------------------------- */
 
-const STILL_PHASE_LABELS = { start: "Start", mid: "Middle", end: "End" };
+const STILL_PHASE_LABELS = { start: "Start", end: "End" };
+const STILL_PHASE_ORDER = ["start", "end"];
 
 /* A generic full-size viewer, built on demand rather than living in
    index.html, since nothing about it is specific to any one dialog. */
@@ -4700,12 +4721,11 @@ function renderStillsPane(raw) {
   const failedHere = !!(st && st.error && st.shotId === raw.id && !st.busy);
 
   if (runningHere) {
-    const order = ["start", "mid", "end"];
-    const i = Math.max(0, order.indexOf(st.phase));
+    const i = Math.max(0, STILL_PHASE_ORDER.indexOf(st.phase));
     wrap.appendChild(
       el("div", "stills-status",
          `Generating ${STILL_PHASE_LABELS[st.phase] || "…"} ` +
-         `(${Math.min(i + 1, 3)} of 3)…`)
+         `(${Math.min(i + 1, STILL_PHASE_ORDER.length)} of ${STILL_PHASE_ORDER.length})…`)
     );
   } else if (failedHere) {
     wrap.appendChild(el("div", "stills-status stills-error", `Stills failed: ${st.error}`));
@@ -4715,7 +4735,7 @@ function renderStillsPane(raw) {
   // state.status.stills.results — updated as each phase finishes — wins
   // over the board's own copy, which is only refetched once the whole job
   // ends. That is what lets "start" show up the moment it is done instead
-  // of waiting on "mid" and "end" too.
+  // of waiting on "end" too.
   const live = (runningHere || failedHere) && st.results ? st.results : null;
   const stills = live || raw.stills;
 
@@ -4724,14 +4744,14 @@ function renderStillsPane(raw) {
       wrap.appendChild(
         el("div", "empty-state",
            "No stills yet — “Create Stills” renders fast Krea-2 previews of " +
-           "this shot's start, middle and end.")
+           "this shot's start and end.")
       );
     }
     return wrap;
   }
 
   const grid = el("div", "stills-grid");
-  ["start", "mid", "end"].forEach((key) => {
+  STILL_PHASE_ORDER.forEach((key) => {
     const cell = el("div", "stills-cell");
     const s = stills[key];
     if (s && s.url) {
@@ -4911,7 +4931,25 @@ function renderPreview() {
   const detailsPane = el("div", "tab-pane");
   detailsPane.dataset.tab = "details";
   const stats = el("dl", "stat-grid");
-  [
+  // Details for the Final Video tab describes the whole cut, not one shot.
+  const finalStatRows = () => {
+    const f = state.board.finalVideo;
+    const est = estimatedFinalStats();
+    const rows = [
+      ["Shots in cut", String(est.clips)],
+      ["Estimated length", est.clips ? dur(est.seconds) : "—"],
+      ["Estimated frames", est.clips ? `${est.frames} @ 24fps` : "—"],
+    ];
+    if (f && f.url) {
+      rows.push(
+        ["Assembled length", dur(f.seconds)],
+        ["Assembled frames", `${Math.round((f.seconds || 0) * 24)} @ 24fps`],
+        ["File", f.url.split("/").pop()],
+      );
+    }
+    return rows;
+  };
+  (activeMainTab === "final" ? finalStatRows() : [
     ["Status", STATUS_LABELS[shot.status] || shot.status],
     ["Model", (modelCap(effectiveShotModel(raw)) || {}).label || effectiveShotModel(raw)],
     ["Runtime", dur(shot.runtimeSeconds)],
@@ -4920,7 +4958,7 @@ function renderPreview() {
     ["Outputs", (shot.outputs || []).length
       ? (shot.outputs || []).map((u) => u.split("/").pop()).join(", ")
       : "—"],
-  ].forEach(([k, v]) => {
+  ]).forEach(([k, v]) => {
     stats.appendChild(el("dt", null, k));
     stats.appendChild(el("dd", null, v));
   });
