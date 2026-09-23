@@ -284,6 +284,12 @@ def assemble(
     background = options.get("backgroundPath")
     if background:
         argv += ["-stream_loop", "-1", "-i", background]
+    # A boundary between two clips is either crossfaded (acrossfade, below) or
+    # a hard cut. Only a hard-cut edge should get its own afade: a boundary
+    # already smoothed by acrossfade would otherwise ramp down twice (once
+    # here, once in the crossfade itself), producing an audible dip in the
+    # middle of what is meant to be a seamless blend.
+    crossfading = bool(transition and len(clips) > 1)
     filters = []
     for i, ((_, clip), (start, duration)) in enumerate(zip(clips, timings)):
         filters.append(
@@ -300,9 +306,14 @@ def assemble(
         if options.get("normalizeAudio"):
             audio += ",loudnorm=I=-16:TP=-1.5:LRA=11"
         audio += f",apad,atrim=duration={duration},asetpts=PTS-STARTPTS"
-        if fade:
-            length = min(fade, duration / 2)
-            audio += f",afade=t=in:d={length},afade=t=out:st={duration-length}:d={length}"
+        fade_in = fade if (i == 0 or not crossfading) else 0
+        fade_out = fade if (i == len(clips) - 1 or not crossfading) else 0
+        if fade_in:
+            fade_in = min(fade_in, duration / 2)
+            audio += f",afade=t=in:d={fade_in}"
+        if fade_out:
+            fade_out = min(fade_out, duration / 2)
+            audio += f",afade=t=out:st={duration-fade_out}:d={fade_out}"
         filters.append(audio + f"[a{i}]")
     total = sum(d for _, d in timings)
     if transition and len(clips) > 1:

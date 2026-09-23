@@ -17,6 +17,12 @@ run by hand against real models, not guesses from documentation:
                          A14B, port 5 fed the same shape of ``vae-encode``
                          FL2VA uses, minus End frame (Wan's DiT has no port
                          for one) and minus audio (Wan has none)
+*   ``ltx-2.5``        — text (+ optional start/end frame anchors) to
+                         video+audio on the LTX-2.5 plugin, structurally
+                         the FL2VA template against ``ltx-2.5``'s own stage
+                         types: no reference-image list at all (like
+                         FL2VA/Wan), but unlike Wan its Start frame is
+                         optional and it decodes audio jointly with video
 
 Hard-won details encoded rather than left to the user:
 
@@ -130,6 +136,31 @@ KREA_TESTED = ["1024x1024"]
 # on this machine yet (unlike H3/Krea-2 above, whose lists came from a real
 # run). Offered at every size in ALL_RESOLUTIONS, tested at none.
 WAN_TESTED: list[str] = []
+
+# LTX-2.5's VAE compresses time in chunks of 8 with a 1-frame first chunk
+# (8k+1), so only that count has a latent form; the stage rounds any other
+# count UP and says so (see vpipe-ltx-2.5's docs). There is no documented
+# decode floor the way H3 has one, so 49 (~2s @ 24fps) is a practical floor
+# for a clip worth generating, not a hard model minimum.
+LTX_FRAME_RULE = FrameRule(
+    kind="affine",
+    step=8,
+    offset=1,
+    minimum=49,
+    note="LTX-2.5's VAE compresses time in chunks of 8, so only 8k+1 has a "
+         "latent form; 49 (~2s @ 24fps) is a practical floor for a clip "
+         "worth generating, not a hard model minimum.",
+)
+
+# LTX-2.5's VAE is 32x spatial, same as H3's -- see vpipe-ltx-2.5's docs
+# ("the size must be a multiple of 32, this VAE's spatial compression").
+LTX_SIZE_ALIGN = 32
+
+# The shipped text-to-video example is 960x544 (chosen to match the MiniMax
+# H3 pipeline for comparison); 768x448 and 512x320 are the sizes its own
+# memory/image-to-video walkthroughs measure. Anything else in
+# ALL_RESOLUTIONS is offered but untested.
+LTX_TESTED = ["960x544", "768x448", "512x320"]
 
 # Prepended to the prompt in sketch mode (see the "sketch" local in
 # prepare()) — a plain style instruction, not a technical trick, so it goes
@@ -259,12 +290,27 @@ class VpipeBackend(Backend):
         except OSError:
             return False
 
+    def _ltx_plugin_path(self) -> Path:
+        """Where the LTX-2.5 plugin .so lives, if it has been dropped in.
+
+        Every ``ltx-2.5-*`` stage type comes from this plugin, not from
+        vpipe itself (see vpipe-ltx-2.5's docs) — launching a spec that
+        uses one without it loaded fails with ``unknown stage type
+        'ltx-2.5-conditioner'``. Unlike a model, there is exactly one file
+        to check for, at a fixed name under the workspace the same way
+        ``models/`` is.
+        """
+        return self.workspace / "plugins" / "vpipe-ltx-2.5.so"
+
     def capabilities(self) -> list[ModelCapability]:
         fl2va = self._model_present("local/MiniMax-H3-FL2VA-8bit")
         ref2va = self._model_present("local/MiniMax-H3-Ref2VA-8bit")
         krea = self._model_present("krea/Krea-2-Turbo")
         lora = self._model_present("mgwr/M87")
         wan_i2v = self._model_present("local/Wan2.2-I2V-A14B-8bit")
+        ltx25_model = self._model_present("local/LTX-2.5-distilled-8bit")
+        ltx25_plugin = self._ltx_plugin_path().exists()
+        ltx25 = ltx25_model and ltx25_plugin
 
         return [
             ModelCapability(
@@ -332,6 +378,44 @@ class VpipeBackend(Backend):
                 unavailable_reason=""
                 if wan_i2v
                 else "local/Wan2.2-I2V-A14B-8bit not prepared in this workspace",
+            ),
+            ModelCapability(
+                id="ltx-2.5",
+                label="LTX-2.5 · distilled — text / start+end anchors → video + audio (experimental)",
+                kind="video",
+                # ltx-2.5-conditioner takes text only -- no reference-image
+                # list of any kind, so cast portraits, style/shot references
+                # and voice cloning never reach this model (see the plugin's
+                # own docs: only a text-to-video and an image-to-video
+                # pipeline are shipped, no reference-conditioned one). Unlike
+                # Wan, a Start frame is optional -- LTX-2.5 has a real
+                # text-only mode -- and unlike both FL2VA and Wan, ports 5/6
+                # are a genuine HARD anchor: ref_strength defaults to 1.0,
+                # meaning the opening/closing frame IS that picture (measured
+                # at 31.1 dB against the source at frame 0), not guidance to
+                # reproduce approximately the way Ref2VA's references are.
+                # "experimental" in the label because this port's own docs
+                # call the end-frame anchor (ref_latent1) written but "not
+                # run end to end", and the whole plugin has one measured
+                # render at the shipped 5s/960x544 geometry, on a 64 GB
+                # machine -- unlike H3/Wan above, there is no track record on
+                # a 16-24 GB Mac at that size.
+                supports_start_anchor=True,
+                supports_end_anchor=True,
+                supports_style_refs=False,
+                supports_audio=True,
+                frame_rule=LTX_FRAME_RULE,
+                resolutions=ALL_RESOLUTIONS,
+                tested_resolutions=LTX_TESTED,
+                size_align=LTX_SIZE_ALIGN,
+                default_steps=8,
+                available=ltx25,
+                unavailable_reason=(
+                    "" if ltx25
+                    else "local/LTX-2.5-distilled-8bit not prepared in this workspace"
+                    if not ltx25_model
+                    else f"plugin not found at {self._ltx_plugin_path()}"
+                ),
             ),
             ModelCapability(
                 id="krea2-still",
@@ -526,6 +610,11 @@ class VpipeBackend(Backend):
                 spec, outputs = self._wan_i2v_spec(
                     shot, paths, prompt, width, height, render_frames, steps,
                     seed, save_frames, sketch
+                )
+            elif model == "ltx-2.5":
+                spec, outputs = self._ltx25_spec(
+                    shot, paths, prompt, width, height, render_frames, steps,
+                    seed, save_frames, with_audio, sketch
                 )
             else:
                 spec, outputs = self._fl2va_spec(
@@ -733,6 +822,103 @@ class VpipeBackend(Backend):
 
         stages.append(_generate_video(iports, w, h, frames, steps, seed))
         stages += _decode_and_save(paths, audio=False, save_frames=save_frames)
+        return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
+               _outputs(paths)
+
+    def _ltx25_spec(self, shot, paths, prompt, w, h, frames, steps, seed,
+                    save_frames=True, with_audio=True, sketch=False):
+        """Text (+ optional start/end frame anchors) to video+audio on the
+        LTX-2.5 plugin.
+
+        Structurally the FL2VA template with LTX's own stage types. Two
+        edges are specific to this conditioner, per the plugin's own docs:
+        it emits two contexts, video on oport 0 (-> generate-video iport 0)
+        and audio on oport 2 (-> iport **10**, not adjacent to the others);
+        miss the second and the render silently goes video-only rather than
+        failing. Anchors are ref_latent0/ref_latent1, exactly FL2VA's ports
+        5/6, but held HARD by default (ltx-2.5-model-config's ref_strength
+        defaults to 1.0 -- the frame IS that picture -- left unset here
+        rather than re-stated, since that default is what makes this engine
+        worth choosing over Ref2VA's soft references in the first place).
+        There is no reference-image list at all, so a cast portrait or style
+        reference never reaches this model regardless of what is attached
+        to the shot -- capabilities() reflects that with supports_style_refs
+        False, and the caller is expected to have surfaced it before this
+        runs.
+        """
+        stages: list[dict] = [
+            _model_select("local/LTX-2.5-distilled-8bit"),
+            _text_prompt(prompt),
+            {
+                "id": "ltx-2.5-conditioner",
+                "type": "ltx-2.5-conditioner",
+                "iports": [
+                    {"src": "text-prompt", "oport": 0},
+                    {"src": "", "oport": 0},
+                    {"src": "model-select", "oport": 0},
+                ],
+                "config": {"unload_when_idle": "auto"},
+            },
+            {
+                "id": "ltx-2.5-model-config",
+                "type": "ltx-2.5-model-config",
+                "iports": [],
+                "config": {"audio_seconds": 0.0},
+            },
+        ]
+
+        # anchors: a still becomes a latent via load-image -> resample ->
+        # vae-encode, exactly FL2VA's shape (see its own anchor loop for why
+        # lanczos: the anchor is the only place the source picture's detail
+        # enters the model, everything after it is latents).
+        anchor_ports: dict[int, str] = {}
+        for port, key, sid in ((5, "startRef", "start"), (6, "endRef", "end")):
+            ref = shot.get(key)
+            src = _ref_source(ref, paths)
+            if not src:
+                continue
+            if sketch:
+                src = _sketchify_ref(src, paths.abs_dir / "sketch-refs")
+            stages += [
+                {
+                    "id": f"load-{sid}",
+                    "type": "load-image",
+                    "iports": [],
+                    "config": {"url": [src]},
+                },
+                {
+                    "id": f"resample-{sid}",
+                    "type": "image-resample",
+                    "iports": [{"src": f"load-{sid}", "oport": 0}],
+                    "config": {
+                        "width": w,
+                        "height": h,
+                        "fit": "crop",
+                        "algorithm": "lanczos",
+                    },
+                },
+                {
+                    "id": f"vae-encode-{sid}",
+                    "type": "vae-encode",
+                    "iports": [
+                        {"src": f"resample-{sid}", "oport": 0},
+                        {"src": "model-select", "oport": 0},
+                    ],
+                    "config": {},
+                },
+            ]
+            anchor_ports[port] = f"vae-encode-{sid}"
+
+        iports = _empty_ports(11)
+        iports[0] = {"src": "ltx-2.5-conditioner", "oport": 0}
+        iports[2] = {"src": "model-select", "oport": 0}
+        for port, stage_id in anchor_ports.items():
+            iports[port] = {"src": stage_id, "oport": 0}
+        iports[9] = {"src": "ltx-2.5-model-config", "oport": 0}
+        iports[10] = {"src": "ltx-2.5-conditioner", "oport": 2}
+
+        stages.append(_generate_video(iports, w, h, frames, steps, seed))
+        stages += _decode_and_save(paths, audio=with_audio, save_frames=save_frames)
         return {"id": f"shot-{shot['id']}", "stages": stages, "subpipelines": []}, \
                _outputs(paths)
 
@@ -987,7 +1173,16 @@ class VpipeBackend(Backend):
         on_event: Callable[[ProgressEvent], None],
         should_cancel: Callable[[], bool],
     ) -> RunResult:
-        argv = [str(self.binary), "--launch", spec.payload["rel_spec"]]
+        argv = [str(self.binary)]
+        # Every ltx-2.5-* stage type comes from the plugin, not vpipe itself
+        # -- launching without it fails with "unknown stage type
+        # 'ltx-2.5-conditioner'". Scoped to this model only, so every other
+        # render's argv and log stay exactly as they were before this engine
+        # existed. prepare()'s capabilities() check already refused to offer
+        # this model if the plugin was missing, so the path is trusted here.
+        if spec.payload.get("model") == "ltx-2.5":
+            argv += ["--plugin", str(self._ltx_plugin_path())]
+        argv += ["--launch", spec.payload["rel_spec"]]
         result = RunResult(started_at=time.time())
 
         proc = subprocess.Popen(
@@ -1436,10 +1631,13 @@ def _resolved_prompt(
     would only compete with the visual description.
     """
     parts = []
-    if model == "fl2va":
-        # FL2VA's image inputs are true first/last-frame anchors rather than
-        # members of Ref2VA's <Picture N> list. Put the temporal alignment at
-        # the beginning of the prompt, as required by the H3 video guide.
+    if model in ("fl2va", "ltx-2.5"):
+        # FL2VA's and LTX-2.5's image inputs are true first/last-frame
+        # anchors rather than members of Ref2VA's <Picture N> list. Put the
+        # temporal alignment at the beginning of the prompt, as required by
+        # the H3 video guide -- LTX-2.5's own docs ask for the same dense,
+        # explicit style of prompt, so there is no reason to withhold it
+        # there.
         alignment = []
         if shot.get("startRef"):
             alignment.append("Picture 1 is the Start frame at 0.00 seconds")
@@ -1575,15 +1773,16 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
     render is not yet quality-validated -- see
     docs/storyboard-continuity-character-voice.md.
 
-    ``krea2-still`` and ``wan-i2v`` are not part of that automatic H3
-    routing — both are only ever used when explicitly requested.
+    ``krea2-still``, ``wan-i2v`` and ``ltx-2.5`` are not part of that
+    automatic H3 routing — all three are only ever used when explicitly
+    requested.
     """
     requested = (
         shot.get("model")
         or (project.get("defaults") or {}).get("model")
         or "ref2va"
     )
-    if requested in ("krea2-still", "wan-i2v"):
+    if requested in ("krea2-still", "wan-i2v", "ltx-2.5"):
         return requested, ""
     return "ref2va", ""
 
@@ -1938,6 +2137,20 @@ def _estimate_seconds(w: int, h: int, frames: int, steps: int,
         # until then it only has to be roughly right, per this function's
         # own docstring.
         return (fixed + denoise) * 3.0
+    if model == "ltx-2.5":
+        # A different architecture entirely, so H3's fitted curve above
+        # (denoise ~ frames**1.37) does not apply -- this is instead a
+        # straight-line scale of the ONE measured point in the plugin's own
+        # docs: 64 GB M4 Pro, w8g64 pack, 960x544x121, 8 steps (the
+        # distilled schedule is fixed -- `steps` past 8 does nothing) --
+        # 410.9s denoise (51.4s/step) + 121.1s fixed (model load, two VAE
+        # decodes, mux). One point can't fit an exponent the way H3's two
+        # did, so this scales linearly by pixel count and step count
+        # instead; expect it to be less accurate off that one measured
+        # shape, and note it was measured on a 64 GB machine, not the
+        # 16-24 GB ones H3's own numbers above come from.
+        ltx_px = (w * h) / (960 * 544)
+        return 121.1 + 51.4 * 8 * ltx_px
     return fixed + denoise
 
 

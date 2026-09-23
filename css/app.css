@@ -1263,6 +1263,21 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .chat-proposal-actions { display: flex; gap: var(--sp-2); margin-top: var(--sp-3); }
 .chat-proposal.applied { border-color: var(--ok); background: var(--ok-ghost); }
 
+.chat-proposal-item { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.chat-proposal-item .btn { flex: none; }
+.chat-proposal-detail {
+  margin: var(--sp-2) 0 var(--sp-3) var(--sp-3);
+  padding: var(--sp-2) 0 var(--sp-2) var(--sp-3);
+  border-left: 2px solid var(--accent-dim);
+}
+.chat-proposal-field + .chat-proposal-field { margin-top: var(--sp-2); }
+.chat-proposal-field-label { font-weight: 600; font-size: var(--fs-sm); margin-bottom: 2px; }
+.chat-proposal-before {
+  font-size: var(--fs-sm); line-height: 1.5; white-space: pre-wrap;
+  color: var(--text-dim); text-decoration: line-through; opacity: 0.75;
+}
+.chat-proposal-after { font-size: var(--fs-sm); line-height: 1.5; white-space: pre-wrap; }
+
 .blade-composer {
   border-top: 1px solid var(--border);
   background: var(--panel-raised);
@@ -2388,8 +2403,8 @@ textarea.ta-compact {
    a mark on top of the status rather than replacing it. */
 .stale-badge {
   position: absolute;
-  top: var(--sp-2);
-  left: var(--sp-2);
+  bottom: var(--sp-2);
+  right: var(--sp-2);
   background: var(--warn);
   color: #1a1204;
   font-size: var(--fs-xs);

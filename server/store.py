@@ -284,12 +284,12 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         ],
         "model": (requested_model := shot.get("model") or defaults.get("model") or "ref2va"),
         # Mirrors vpipe_backend.py's _effective_video_model / app.js's
-        # effectiveShotModel: krea2-still and wan-i2v are explicit engine
-        # choices that short-circuit before H3 routing; everything else is
-        # always Ref2VA now. Keep the three in sync -- this is what decides
-        # whether switching engines marks a clip stale.
+        # effectiveShotModel: krea2-still, wan-i2v and ltx-2.5 are explicit
+        # engine choices that short-circuit before H3 routing; everything
+        # else is always Ref2VA now. Keep the three in sync -- this is what
+        # decides whether switching engines marks a clip stale.
         "effectiveModel": (
-            requested_model if requested_model in ("krea2-still", "wan-i2v")
+            requested_model if requested_model in ("krea2-still", "wan-i2v", "ltx-2.5")
             else "ref2va"
         ),
         # Frame size is a project setting with a per-shot fallback, in the same
@@ -982,7 +982,7 @@ class Store:
 
         defaults = board.setdefault("defaults", {})
         # Ref2VA is the automatic default when nothing else is chosen. An
-        # explicit alternate ENGINE (currently only wan-i2v) is a real
+        # explicit alternate ENGINE (wan-i2v or ltx-2.5) is a real
         # per-project choice made in Settings -- setdefault only, never
         # force-assign, or every save/load would silently discard it (see
         # _effective_video_model in vpipe_backend.py and effectiveShotModel

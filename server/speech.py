@@ -439,8 +439,10 @@ def prepare_recording(ctx, slug, shot_id, generate_missing=True):
     if shot.get("dialogueSource") == "native":
         if model != "ref2va":
             # The project's video engine is explicitly something other than
-            # MiniMax H3 (krea2-still/wan-i2v) -- genuinely audio-incapable,
-            # not a case a fallback voice or an unassigned speaker can fix.
+            # MiniMax H3 Ref2VA -- krea2-still and wan-i2v are genuinely
+            # audio-incapable, and fl2va/ltx-2.5 generate audio but have no
+            # voice-cloning mechanism at all, so none of them is a case a
+            # fallback voice or an unassigned speaker can fix.
             raise ValueError(
                 f"Native speech requires MiniMax H3 Ref2VA, but this "
                 f"project's video engine is {model}, which generates silent "
