@@ -115,7 +115,7 @@ class Orchestrator:
         # has not finished the job.
         self._assembly: dict[str, Any] | None = None
 
-        # "Create Stills" — a separate, much shorter job (three Krea-2 stills,
+        # "Create Stills" — a separate, much shorter job (two Krea-2 stills,
         # not a shot render), but it still shares the one GPU vpipe drives, so
         # it gets its own thread and its own small piece of status rather than
         # reusing _runs/_order, which are shaped around a whole render batch.
@@ -126,8 +126,8 @@ class Orchestrator:
         self._stills_error: str = ""
         self._stills_log: list[dict[str, str]] = []
         # Filled in as each phase finishes, not just at the end — so the UI
-        # can show "start" the moment it is done instead of waiting on "mid"
-        # and "end" too.
+        # can show "start" the moment it is done instead of waiting on "end"
+        # too.
         self._stills_results: dict[str, Any] = {}
 
         # Batch Render — render several projects back to back, each with
@@ -448,12 +448,14 @@ class Orchestrator:
     # stills ("Create Stills" — start/mid/end previews, not a shot render)
     # ------------------------------------------------------------------ #
 
-    # Order matters here: it is also the order shown in the UI.
+    # Order matters here: it is also the order shown in the UI. Used to be
+    # three phases (start/mid/end), but the middle still's img2img
+    # continuation from "start" was not producing a usable image, so it was
+    # dropped rather than kept as a broken, redundant third of every run —
+    # "end" now chains directly off "start" instead.
     STILL_PHASES = (
         ("start", "The very start of this shot, before the described action "
                   "gets underway — the opening pose and composition"),
-        ("mid", "The midpoint of this shot, in the middle of the described "
-                "action"),
         ("end", "The very end of this shot, the instant the described "
                 "action finishes — the closing pose and composition"),
     )
@@ -588,7 +590,7 @@ class Orchestrator:
 
                 # Save and publish this phase's result now, not just at the
                 # end — so "start" shows up the moment it is done instead of
-                # waiting on "mid" and "end" too, and so a cancel or crash
+                # waiting on "end" too, and so a cancel or crash
                 # partway through still leaves whatever finished in place.
                 with self._lock:
                     self._stills_results = dict(results)
@@ -732,7 +734,7 @@ class Orchestrator:
             return
 
         # A render owns the generated stills for this scene. Clear both the
-        # frame dump used for chaining and the optional start/mid/end preview
+        # frame dump used for chaining and the optional start/end preview
         # images before writing the new take, so a shorter re-render cannot
         # leave an old tail available to the next scene.
         removed_stills = self._clear_scene_stills(paths.abs_dir)

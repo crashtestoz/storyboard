@@ -24,7 +24,7 @@ Routes
 ``POST /api/boards/<slug>/speak``   speak one Storyboard AD reply ``{text}``
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/render-batch``      render several projects in sequence ``{slugs}``
-``POST /api/stills``            start/mid/end Krea-2 previews ``{slug, shotId}``
+``POST /api/stills``            start/end Krea-2 previews ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
 ``POST /api/server-settings``   set the global projects folder ``{dataDir}``

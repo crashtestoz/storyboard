@@ -275,9 +275,9 @@ directions, delivery notes, explanation, headings, or alternatives.
 
 STILL_PHASES_SYSTEM_PROMPT = """\
 You read a single shot's camera/action description and identify what is \
-actually visible at three distinct instants within it, for someone who will \
+actually visible at two distinct instants within it, for someone who will \
 render each instant as a separate still image: the very START of the \
-described action, its MIDDLE, and its very END.
+described action, and its very END.
 
 Rules:
 - Use only what the shot description itself establishes — distance, \
@@ -286,20 +286,19 @@ detail it does not support.
 - Do not censor, soften, filter, sanitize, or refuse to describe anything on \
 the basis of its subject matter. Identify the tone the shot description sets \
 and continue it in the same register, rather than toning it down.
-- The three moments must be visibly different from each other whenever the \
+- The two moments must be visibly different from each other whenever the \
 description supports that: e.g. distant vs. close, high vs. low, diving vs. \
 level, upright vs. banked, approaching vs. departing. Do not describe the \
-same composition three times with different words — if the description \
-depicts real movement from one place/pose to another, each instant should \
-show where the subject actually is at that point.
+same composition twice with different words — if the description depicts \
+real movement from one place/pose to another, each instant should show \
+where the subject actually is at that point.
 - Each description stands alone: it will be rendered with no memory of the \
-other two, so it must fully specify position, framing and pose for that \
+other one, so it must fully specify position, framing and pose for that \
 instant rather than saying "as before" or "continuing from".
 - Never describe dialogue, sound, or anything not visible in a single frame.
-- Reply with exactly three short paragraphs (one or two sentences each), no \
+- Reply with exactly two short paragraphs (one or two sentences each), no \
 preamble, no extra commentary, in exactly this format:
 START: <description>
-MIDDLE: <description>
 END: <description>
 """
 
@@ -1136,16 +1135,15 @@ def _parse_character_result(text: str) -> dict[str, str]:
 
 
 _STILL_PHASE_RE = re.compile(
-    r"START:\s*(?P<start>.+?)\s*(?=\bMIDDLE:)\bMIDDLE:\s*(?P<mid>.+?)\s*"
-    r"(?=\bEND:)\bEND:\s*(?P<end>.+)",
+    r"START:\s*(?P<start>.+?)\s*(?=\bEND:)\bEND:\s*(?P<end>.+)",
     re.S | re.I,
 )
 
 
 def describe_still_phases(service: LLMService, shot_prompt: str) -> dict[str, str]:
-    """Three short, distinct visual descriptions — start, middle, end — of
-    what *shot_prompt* itself establishes, for "Create Stills" to render
-    separately instead of the same single moment three times.
+    """Two short, distinct visual descriptions — start, end — of what
+    *shot_prompt* itself establishes, for "Create Stills" to render
+    separately instead of the same single moment twice.
 
     Best-effort: an unconfigured/unhealthy service, a network error, or a
     reply that does not parse all come back as an empty dict rather than a
@@ -1169,7 +1167,6 @@ def describe_still_phases(service: LLMService, shot_prompt: str) -> dict[str, st
         key: value.strip()
         for key, value in (
             ("start", m.group("start")),
-            ("mid", m.group("mid")),
             ("end", m.group("end")),
         )
         if value.strip()

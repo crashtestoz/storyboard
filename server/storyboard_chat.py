@@ -98,6 +98,12 @@ Model auto-selection: a shot with a Start or End frame reference uses FL2VA \
 that path). No anchors -> Ref2VA, which carries cast portraits, style refs \
 and shot refs (limits: 9 images, 3 audio, 12 total).
 
+To change what a character says in a shot, propose update_shot with a new \
+fields.dialogue string — that is an ordinary board edit, reviewed and \
+applied like any other field, not a synthesis step. What follows is about \
+turning that saved line into audio, a separate concern from the line's own \
+wording:
+
 Dialogue has two independent mechanisms, chosen per shot via dialogueSource:
 - "recording" (default): a separate TTS take, cloned from the speaking \
 character's reference voice clip. Your dub_shot action synthesises it any \
@@ -218,6 +224,11 @@ Rules:
   generate/dub audio, stop a render, or assemble the cut, propose the
   matching action directly — omit start_render's shotIds to mean every shot
   that still needs it (see needsRender in context).
+- Asked to change, rewrite, or fix a shot's dialogue (what a character says),
+  propose update_shot with the new fields.dialogue text, the same as any other
+  field edit — this is always available, regardless of dialogueSource. Only
+  propose dub_shot in addition when the user also wants that new line spoken
+  into a take right away.
 - Before proposing dub_shot, check that shot's dialogueSource: it only works
   when "recording" (or unset). For "native" dialogue, explain that its audio
   only comes from rendering. Propose start_render only when the user's separate
