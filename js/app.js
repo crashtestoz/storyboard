@@ -108,14 +108,14 @@ const modelCap = (id) => state.models.find((m) => m.id === id) || null;
 const STORYBOARD_MODEL = "ref2va";
 // Mirrors server/backends/vpipe_backend.py's _effective_video_model: an
 // explicitly chosen engine (per-shot, else the project's "Video engine"
-// setting) short-circuits automatic H3 routing. Only krea2-still and
-// wan-i2v are such engines — Wan has no reference-list mode to fall back to
-// the way Ref2VA is H3's fallback, so it is never inferred automatically,
+// setting) short-circuits automatic H3 routing. krea2-still, wan-i2v and
+// ltx-2.5 are such engines — none has a reference-list mode to fall back to
+// the way Ref2VA is H3's fallback, so none is ever inferred automatically,
 // only requested.
 function effectiveShotModel(raw) {
   const defaults = state.board && state.board.defaults;
   const requested = (raw && raw.model) || (defaults && defaults.model) || STORYBOARD_MODEL;
-  if (requested === "krea2-still" || requested === "wan-i2v") return requested;
+  if (requested === "krea2-still" || requested === "wan-i2v" || requested === "ltx-2.5") return requested;
   return STORYBOARD_MODEL;
 }
 
@@ -725,6 +725,36 @@ function paintBladeSpeechControls() {
   select.value = voiced.some((c) => c.id === wanted) ? wanted : "";
 }
 
+/* The fields an action would overwrite, as {label, before, after} pairs, so
+   the proposal box can show what the AD's fix actually says before it lands
+   — proposalSummary alone only names *which* shot/character/field changes,
+   not the text itself. Returns null for actions with nothing to preview
+   (an operation like start_render has no text, only a target). */
+function proposalDetailFields(action) {
+  if (action.tool === "update_shot") {
+    const s = shotById(action.shotId);
+    return Object.entries(action.fields || {}).map(([k, v]) => ({
+      label: k, before: s ? s[k] : undefined, after: v,
+    }));
+  }
+  if (action.tool === "update_character") {
+    const c = (state.board.characters || []).find((x) => x.id === action.characterId);
+    return Object.entries(action.fields || {}).map(([k, v]) => ({
+      label: k, before: c ? c[k] : undefined, after: v,
+    }));
+  }
+  if (action.tool === "add_shot") {
+    return Object.entries(action.shot || {}).map(([k, v]) => ({ label: k, before: undefined, after: v }));
+  }
+  if (action.tool === "add_character") {
+    return Object.entries(action.character || {}).map(([k, v]) => ({ label: k, before: undefined, after: v }));
+  }
+  if (action.tool === "set_board_fields") {
+    return Object.entries(action.fields || {}).map(([k, v]) => ({ label: k, before: state.board[k], after: v }));
+  }
+  return null;
+}
+
 function proposalSummary(action) {
   if (action.tool === "set_board_fields") return "Update project scene or sound";
   if (action.tool === "add_character") return `Add cast member “${action.character.name}”`;
@@ -777,7 +807,36 @@ function renderAssistantChat() {
         turn.applied ? `${turn.actions.length} change${turn.actions.length === 1 ? "" : "s"} applied`
           : `${turn.actions.length} proposed change${turn.actions.length === 1 ? "" : "s"}`));
       const list = el("div", "chat-proposal-list");
-      turn.actions.forEach((action) => list.appendChild(el("div", null, `• ${proposalSummary(action)}`)));
+      turn.actions.forEach((action) => {
+        const row = el("div", "chat-proposal-item");
+        row.appendChild(el("span", null, `• ${proposalSummary(action)}`));
+        const fields = proposalDetailFields(action);
+        if (fields && fields.length) {
+          const detail = el("div", "chat-proposal-detail");
+          detail.style.display = "none";
+          fields.forEach(({ label, before, after }) => {
+            const field = el("div", "chat-proposal-field");
+            field.appendChild(el("div", "chat-proposal-field-label", label));
+            const afterText = after === undefined || after === null || after === "" ? "(empty)" : String(after);
+            if (before !== undefined && before !== after) {
+              const beforeText = before === undefined || before === null || before === "" ? "(empty)" : String(before);
+              field.appendChild(el("div", "chat-proposal-before", beforeText));
+            }
+            field.appendChild(el("div", "chat-proposal-after", afterText));
+            detail.appendChild(field);
+          });
+          const view = el("button", "btn btn-sm btn-ghost", "View");
+          view.addEventListener("click", () => {
+            const showing = detail.style.display !== "none";
+            detail.style.display = showing ? "none" : "block";
+            view.textContent = showing ? "View" : "Hide";
+          });
+          row.appendChild(view);
+          list.append(row, detail);
+        } else {
+          list.appendChild(row);
+        }
+      });
       proposal.appendChild(list);
       if (!turn.applied) {
         const buttons = el("div", "chat-proposal-actions");
@@ -1127,8 +1186,9 @@ function renderBackendBadge() {
   // never opted into it should not be warned about a model it will never
   // render with.
   const requiredModels = [STORYBOARD_MODEL];
-  if (state.board && state.board.defaults && state.board.defaults.model === "wan-i2v") {
-    requiredModels.push("wan-i2v");
+  const engineDefault = state.board && state.board.defaults && state.board.defaults.model;
+  if (engineDefault === "wan-i2v" || engineDefault === "ltx-2.5") {
+    requiredModels.push(engineDefault);
   }
   const unavailable = state.models.filter(
     (m) => requiredModels.includes(m.id) && !m.available
@@ -2478,7 +2538,7 @@ function renderRail() {
     auto.value = "";
     engineSel.appendChild(auto);
     state.models
-      .filter((m) => m.id === "wan-i2v")
+      .filter((m) => m.id === "wan-i2v" || m.id === "ltx-2.5")
       .forEach((m) => {
         const o = el("option", null, m.available ? m.label : `${m.label} — unavailable`);
         o.value = m.id;
@@ -4045,6 +4105,8 @@ function renderEditor() {
       const mediaMsg =
         modelNow === "wan-i2v"
           ? `${withMedia.length} character reference set(s) are selected, but Wan 2.2 does not send separate Cast media — only the shot prompt and its required Start frame reach the model. Describe appearance in the Cast description instead.`
+          : modelNow === "ltx-2.5"
+          ? `${withMedia.length} character reference set(s) are selected, but LTX-2.5 has no reference-image mechanism at all — only the shot prompt and any Start/End frame anchor reach the model. Describe appearance in the Cast description instead.`
           : `${withMedia.length} character reference set(s) will be included in the Ref2VA request.`;
       castPanel.appendChild(el("div", "inline-warn", mediaMsg));
     }
@@ -4053,9 +4115,10 @@ function renderEditor() {
 
   // Ref2VA receives Start/End frame images (manually chosen or chained from
   // the previous shot's last frame) as ordered references, never a hard
-  // anchor. Wan is the one exception: it has no reference-list mode at all,
-  // and wires its required Start frame directly to its own image-to-video
-  // input instead.
+  // anchor. Wan and LTX-2.5 are the exceptions: neither has a reference-list
+  // mode at all, and each wires Start (and, for LTX-2.5, End) frame directly
+  // to its own image-to-video input instead — Wan requires one, LTX-2.5
+  // does not.
   const isVideoShot = cap && cap.kind !== "image";
   if (isVideoShot) {
     const refPanel = el("div", "panel");
@@ -4066,6 +4129,8 @@ function renderEditor() {
       "Start & end references",
       modelNow === "wan-i2v"
         ? "Wan 2.2 requires a Start frame; End frame is not sent"
+        : modelNow === "ltx-2.5"
+        ? "Sent to LTX-2.5 as hard-pinned anchors, not ordered references — the frame IS that picture"
         : "Sent to Ref2VA as ordered references, never hard-pinned frames"
     ));
 
@@ -4094,7 +4159,9 @@ function renderEditor() {
                el("span", null, `Chain start frame from shot ${idx}'s last rendered frame`));
       wrap.appendChild(t);
       wrap.appendChild(el("div", "field-note",
-        "Sent to Ref2VA as an ordered reference — guides the opening (identity, environment, lighting, direction of motion) without pinning an exact frame. Upload a still above instead for a hand-picked opening image."));
+        modelNow === "wan-i2v" || modelNow === "ltx-2.5"
+          ? `Sent to ${modelNow === "wan-i2v" ? "Wan 2.2" : "LTX-2.5"} as a hard-pinned anchor — the opening frame IS that picture, not guidance. Upload a still above instead for a hand-picked opening image.`
+          : "Sent to Ref2VA as an ordered reference — guides the opening (identity, environment, lighting, direction of motion) without pinning an exact frame. Upload a still above instead for a hand-picked opening image."));
       refPanel.appendChild(wrap);
     }
     refPanel.appendChild(
@@ -4103,19 +4170,21 @@ function renderEditor() {
         "hint-body",
         modelNow === "wan-i2v"
           ? "Wan 2.2 wires Start frame directly to the model's image-to-video input, and requires one — this checkpoint has no text-only mode, and rendering without a Start frame set will fail. End frame is not sent — Wan has no port for one. Separate Cast, style and shot-reference images are not sent either."
+          : modelNow === "ltx-2.5"
+          ? "LTX-2.5 has a genuine text-only mode, so Start/End frame are optional here — but when set, each is wired straight to the model as a hard anchor (the opening/closing frame IS that picture), not a soft reference. Separate Cast, style and shot-reference images are not sent — describe appearance in the prompt instead."
           : "Ref2VA receives Start frame, End frame, and other reference images (cast, style, shot references) together as an ordered reference set — none of them pin an exact frame."
       )
     );
     host.appendChild(refPanel);
     const trim = el("div", "panel");
-    trim.appendChild(el("div", "section-label", "Trim for the final cut"));
-    for (const [key, title] of [["trimIn", "Remove from start (seconds)"], ["trimOut", "Remove from end (seconds)"]]) {
+    trim.appendChild(paneHint("Trim for the final cut", "removes whole frames from each end, at this shot's 24fps"));
+    for (const [key, title] of [["trimIn", "Remove from start (frames)"], ["trimOut", "Remove from end (frames)"]]) {
       const label = el("label", "field-note", title + " ");
-      const input = el("input"); input.type = "number"; input.min = "0"; input.step = "0.05";
-      input.value = String(raw[key] || 0);
+      const input = el("input"); input.type = "number"; input.min = "0"; input.step = "1";
+      input.value = String(Math.round((raw[key] || 0) * 24));
       input.addEventListener("change", () => {
         const n = Number(input.value);
-        if (Number.isFinite(n) && n >= 0) { live()[key] = n; markDirty(); }
+        if (Number.isFinite(n) && n >= 0) { live()[key] = Math.round(n) / 24; markDirty(); }
       });
       label.appendChild(input); trim.appendChild(label);
     }
@@ -4133,6 +4202,8 @@ function renderEditor() {
     const noteModel = effectiveShotModel(raw);
     const note = noteModel === "wan-i2v"
       ? "Wan 2.2 is the selected video engine. These separate images are retained on the board but are not sent — Wan only reads the shot prompt and its required Start frame."
+      : noteModel === "ltx-2.5"
+      ? "LTX-2.5 is the selected video engine. These separate images are retained on the board but are not sent — LTX-2.5 only reads the shot prompt and its Start/End frame anchors."
       : `${cap.label.split("—")[0].trim()} uses these alongside the ` +
         `cast portraits selected for this shot. Style references are a library — ` +
         `add one here to include it in this shot's render. Tag an image as @name to ` +
