@@ -349,7 +349,12 @@ placeholders on purpose. Point them at your own services after cloning
 rather than committing a real hostname or IP back into them.
 `server-config.json` is created by the app and gitignored, so your data-dir
 choice, per-machine model choices and any API keys saved in Settings never
-get committed at all. The server only serves `index.html` and the `css/`,
+get committed at all. `render-timings.json`, beside it and also gitignored,
+records how long each render actually took on this machine: it is the only
+source of render-time estimates (in the run log, the runtime check and the
+Storyboard AD's "how long will this take"). Until a model has been timed on a
+machine there is no estimate, and the runtime check is skipped rather than
+held to a guess. The server only serves `index.html` and the `css/`,
 `js/` and `assets/` folders, so none of these config files can be downloaded
 from it either.
 

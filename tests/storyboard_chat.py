@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,8 @@ from server.storyboard_chat import (  # noqa: E402
     CHAT_SYSTEM_PROMPT, SEARCH_CAPABILITY_PROMPT, chat, compact_board_context,
     validate_actions,
 )
+from server.backends.vpipe_backend import estimate_render_seconds  # noqa: E402
+from server.render_timings import RenderTimings  # noqa: E402
 from server.store import (  # noqa: E402
     default_board, default_character, default_shot, render_fingerprint,
 )
@@ -34,7 +37,7 @@ class FakeLLM:
     def health(self):
         return True, ""
 
-    def complete(self, system, user, *, timeout=120.0):
+    def complete(self, system, user, *, timeout=120.0, max_tokens=None):
         self.seen = (system, user, timeout)
         self.calls.append(self.seen)
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
@@ -85,7 +88,7 @@ class StoryboardChatTests(unittest.TestCase):
         self.assertEqual(result["message"], "Ready to apply.")
         self.assertEqual(result["actions"][0]["fields"]["title"], "The threshold")
         self.assertNotIn("large-output", model.seen[1])
-        self.assertEqual(model.seen[2], 180.0)
+        self.assertEqual(model.seen[2], 300.0)  # raised in f5be0ce
 
     def test_plain_text_reply_remains_a_useful_chat_answer(self):
         result = chat(FakeLLM("The pacing works, but shot two needs an eyeline."),
@@ -105,7 +108,14 @@ class StoryboardChatTests(unittest.TestCase):
         self.assertNotIn("{", result["message"])
 
     def test_context_flags_render_need_and_estimates_only_when_needed(self):
+        # No render timed on this machine yet: no estimate, never a guess.
         context = compact_board_context(self.board)
+        self.assertIsNone(context["shots"][0]["estimatedRenderSeconds"])
+
+        timings = RenderTimings(Path(tempfile.mkdtemp()) / "t.json")
+        timings.record(model="ref2va", width=960, height=544, frames=124,
+                       steps=8, seconds=300)
+        context = compact_board_context(self.board, timings=timings)
         shot_ctx = context["shots"][0]
         # setUp's shot has an output but no matching renderFingerprint, so
         # store.stale_reason calls it stale — it still needs a render.
@@ -115,10 +125,25 @@ class StoryboardChatTests(unittest.TestCase):
 
         current = self.board["shots"][0]
         current["renderFingerprint"] = render_fingerprint(current, self.board)
-        context = compact_board_context(self.board)
+        context = compact_board_context(self.board, timings=timings)
         shot_ctx = context["shots"][0]
         self.assertFalse(shot_ctx["needsRender"])
         self.assertIsNone(shot_ctx["estimatedRenderSeconds"])
+
+    def test_estimate_comes_only_from_measured_renders(self):
+        shot = {"id": "s1", "frames": 124, "steps": 8}
+        board = {"defaults": {"resolution": "960x544"}, "shots": [shot]}
+        timings = RenderTimings(Path(tempfile.mkdtemp()) / "t.json")
+        self.assertIsNone(estimate_render_seconds(shot, board, timings))
+        timings.record(model="ref2va", width=960, height=544, frames=124, steps=8, seconds=274)
+        self.assertEqual(estimate_render_seconds(shot, board, timings), 274)
+        # a different length is scaled from that measurement, not a formula
+        shorter = {"id": "s2", "frames": 39, "steps": 8}
+        self.assertAlmostEqual(estimate_render_seconds(shorter, board, timings),
+                               274 * 39 / 124, places=3)
+        # another model has no history of its own
+        timings.record(model="fl2va", width=960, height=544, frames=124, steps=8, seconds=100)
+        self.assertEqual(estimate_render_seconds(shot, board, timings), 274)
 
     def test_operation_actions_are_allow_listed(self):
         sid = self.board["shots"][0]["id"]

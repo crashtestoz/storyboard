@@ -38,6 +38,7 @@ from typing import Any, Callable
 from . import assemble as assembly
 from .backends.base import Backend, ProgressEvent, ShotPaths
 from .dubbing import mux_speech
+from .render_timings import RenderTimings
 from .store import Store, last_saved_frame, render_fingerprint, stale_reason
 
 # statuses that a "render all" should pick up
@@ -88,8 +89,12 @@ class ShotRun:
 
 class Orchestrator:
     def __init__(self, backend: Backend, store: Store, workspace: Path,
-                 data_dir: Path | None = None):
+                 data_dir: Path | None = None,
+                 timings: RenderTimings | None = None):
         self.prepare_dialogue = None
+        # This machine's measured render times -- the only source of an
+        # expected duration (see render_timings.py).
+        self.timings = timings
         self.backend = backend
         self.store = store
         self.workspace = Path(workspace)
@@ -736,6 +741,7 @@ class Orchestrator:
                 fresh_shot.update(status="failed", reason=run.reason, progress=0)
                 self.store.save(slug, fresh_board)
             return
+        spec.expected_seconds = self._expected_seconds(spec) or 0.0
 
         # A render owns the generated stills for this scene. Clear both the
         # frame dump used for chaining and the optional start/end preview
@@ -795,6 +801,12 @@ class Orchestrator:
             return
 
         validation = self.backend.validate(spec, result)
+        # A run that produced its outputs is a real measurement, whatever a
+        # soft check made of it -- "review" included.
+        if self.timings is not None and validation.verdict in ("done", "review"):
+            g = self._geometry(spec)
+            if g:
+                self.timings.record(**g, seconds=result.seconds)
         run.validation = validation.to_json()
         run.status = validation.verdict
         run.reason = validation.reason
@@ -1048,6 +1060,55 @@ class Orchestrator:
             ref["contentHash"] = hashlib.sha256(frame.read_bytes()).hexdigest()
         return None
 
+    @staticmethod
+    def _geometry(spec) -> dict[str, Any] | None:
+        p = spec.payload or {}
+        try:
+            g = {"model": str(p["model"]), "width": int(p["width"]),
+                 "height": int(p["height"]), "frames": int(p["frames"]),
+                 "steps": int(p["steps"])}
+        except (KeyError, TypeError, ValueError):
+            return None
+        return g if g["frames"] > 0 else None
+
+    def _expected_seconds(self, spec) -> float | None:
+        g = self._geometry(spec)
+        if self.timings is None or g is None:
+            return None
+        return self.timings.estimate(**g)
+
+    def accept_review(self, slug: str, shot_id: str) -> dict[str, Any]:
+        """The user vouching for a take the checks flagged but did not fail.
+
+        Marks it done both on the board and in this batch's live run state:
+        the UI overlays the live run's status on the board's, and a shot
+        chained from this one is gated on that live status too, so updating
+        only the board left it looking -- and acting -- like "review".
+        """
+        board = self.store.load(slug)
+        idx = next((i for i, s in enumerate(board.get("shots") or [])
+                    if s["id"] == shot_id), None)
+        if idx is None:
+            raise RuntimeError("shot not found")
+        shot = board["shots"][idx]
+        run = self._runs.get(shot_id)
+        status = run.status if run else shot.get("status")
+        if status != "review":
+            raise RuntimeError("only a shot flagged for review can be accepted")
+        if run is not None:
+            run.status, run.reason, run.progress = "done", "", 100.0
+        validation = dict(shot.get("validation") or {})
+        validation.update(verdict="done", reason="", acceptedByUser=True)
+        shot.update(status="done", reason="", progress=100, validation=validation)
+        if run is not None:
+            run.validation = validation
+        # Held back from a flagged take; a clean one would have had it.
+        if shot.get("renderedDialogueSource") != "native":
+            shot_dir = self.data_dir / self.store.shot_rel_dir(slug, idx + 1)
+            self._relay_speech(shot, shot_dir, run or ShotRun(shot_id=shot_id))
+        self.store.save(slug, board)
+        return self.status()
+
     def _write_log(self, shot_dir: Path, run: ShotRun, spec, result) -> str | None:
         """Dump this run's stdout plus a short header to <shot>/run.log."""
         try:
@@ -1058,7 +1119,9 @@ class Orchestrator:
                 f"# summary   {run.summary}",
                 f"# exit      {result.exit_code}",
                 f"# seconds   {round(result.seconds, 1)}",
-                f"# expected  ~{round(spec.expected_seconds)}s",
+                f"# expected  "
+                + (f"~{round(spec.expected_seconds)}s" if spec.expected_seconds
+                   else "unknown (no render of this model timed here yet)"),
                 "",
             ]
             body = [f"[{lvl}] {text}" for lvl, text in result.log]

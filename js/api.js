@@ -155,6 +155,9 @@ const API = {
   // "This clip really is a render of what the board says now" — an assertion
   // the user is entitled to make, and the only alternative to paying for a
   // re-render to prove it.
+  acceptReview: (slug, shotId) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept-review`, {}),
+
   accept: (slug, shotId) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept`, {}),
   stop: () => req("POST", "/api/stop"),

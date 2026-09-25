@@ -34,6 +34,40 @@ class Continuity(unittest.TestCase):
         p.write_bytes(content)
         return p
 
+    def test_accepting_a_review_take_unblocks_the_shot_chained_from_it(self):
+        # A take flagged "review" (e.g. faster than expected) gates the next
+        # shot through the live run state, not just the board's copy.
+        self.frame(1)
+        shots = self.board['shots']
+        shots[0].update(status='review', renderedDialogueSource='native',
+                        validation={'verdict': 'review', 'reason': 'runtime'})
+        self.orch.store.save(self.slug, self.board)
+        self.orch._runs['s1'] = ShotRun('s1', status='review')
+        self.assertIn('review', self.orch._resolve_chain(shots[1], shots, self.slug))
+
+        self.orch.accept_review(self.slug, 's1')
+        board = self.orch.store.load(self.slug)
+        self.assertEqual(board['shots'][0]['status'], 'done')
+        self.assertTrue(board['shots'][0]['validation']['acceptedByUser'])
+        self.assertEqual(self.orch._runs['s1'].status, 'done')
+        self.assertIsNone(self.orch._resolve_chain(board['shots'][1], board['shots'], self.slug))
+
+    def test_accept_only_applies_to_a_take_flagged_for_review(self):
+        with self.assertRaises(RuntimeError):
+            self.orch.accept_review(self.slug, 's1')
+
+    def test_expected_runtime_comes_only_from_this_machines_timings(self):
+        from server.backends.base import JobSpec
+        from server.render_timings import RenderTimings
+        spec = JobSpec('s1', payload={'model': 'ref2va', 'width': 960, 'height': 544,
+                                      'frames': 124, 'steps': 8})
+        self.assertIsNone(self.orch._expected_seconds(spec))
+        self.orch.timings = RenderTimings(self.root / 'timings.json')
+        self.assertIsNone(self.orch._expected_seconds(spec))
+        self.orch.timings.record(model='ref2va', width=960, height=544, frames=124,
+                                 steps=8, seconds=274)
+        self.assertEqual(self.orch._expected_seconds(spec), 274)
+
     def test_reference_manifest_retains_identity_and_voice(self):
         shot = self.board['shots'][1]
         shot.update(dialogueSource='native', dialogue='Hello', characterIds=['frog'])

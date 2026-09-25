@@ -6,3 +6,4 @@ node_modules/
 server.log
 server.pid
 server-config.json
+render-timings.json

@@ -12,6 +12,7 @@ from pathlib import Path
 from .app import SERVER_CONFIG_NAME, Context, build_server
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
+from .render_timings import FILE_NAME as TIMINGS_FILE, RenderTimings
 from .store import Store
 from .llm import CONFIG_NAME as LLM_CONFIG_NAME
 from .llm import load_services as load_llm_services
@@ -156,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
     # Anything left mid-run by a previous process is not running now.
     stranded = store.reconcile_startup()
     orch = Orchestrator(backend=backend, store=store, workspace=workspace,
-                        data_dir=data_dir)
+                        data_dir=data_dir,
+                        timings=RenderTimings(UI_ROOT / TIMINGS_FILE))
     ctx = Context(UI_ROOT, workspace, store, backend, orch,
                   data_dir=data_dir, data_dir_source=data_dir_source,
                   vpipe_binary=args.vpipe.expanduser(), default_tts=args.tts,

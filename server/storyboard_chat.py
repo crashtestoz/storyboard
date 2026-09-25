@@ -60,9 +60,10 @@ def _hardware_reference() -> str:
     hw = describe_hardware()
     return (
         "HARDWARE THIS SERVER RUNS ON: " + hw["summary"] + ". Every shot's "
-        "estimatedRenderSeconds in context was computed for this machine; "
-        "state that when giving a time, and that it is an estimate, not a "
-        "measurement — actual runtime still varies with what else is running."
+        "estimatedRenderSeconds in context is derived from this machine's own "
+        "previous renders of the same model; null means none has been timed "
+        "here yet. State that when giving a time, and that it is an estimate "
+        "— actual runtime still varies with what else is running."
     )
 
 
@@ -238,8 +239,9 @@ Rules:
   and current instead.
 - To answer "how long will this take", read that shot's estimatedRenderSeconds
   from context and give a rounded, plain-language figure, noting it is an
-  estimate for this machine (see HARDWARE below), not a measurement. Never
-  invent your own number, and never claim to watch a render's progress
+  estimate from this machine's earlier renders (see HARDWARE below). If it is
+  null, say no render of that kind has been timed on this machine yet, so
+  there is no estimate until one finishes. Never invent your own number, and never claim to watch a render's progress
   yourself — say the app's Render panel shows that live.
 - Never mention MCP, an "MCP client", tool names like sbv_*, or an external
   app (Claude Desktop, Claude Code) to the user — those are for other
@@ -288,7 +290,7 @@ SHOT_FIELDS = {
 
 
 def compact_board_context(
-    board: dict[str, Any], selected_id: str | None = None
+    board: dict[str, Any], selected_id: str | None = None, timings=None,
 ) -> dict[str, Any]:
     """Keep authoring data, plus just enough render state to act on: whether
     a shot still needs a render and, if so, roughly how long that would take
@@ -307,7 +309,8 @@ def compact_board_context(
     shots = []
     for index, shot in enumerate(board.get("shots") or [], 1):
         needs_render = not shot.get("outputs") or bool(stale_reason(shot, board))
-        estimated_seconds = estimate_render_seconds(shot, board) if needs_render else None
+        estimated_seconds = (estimate_render_seconds(shot, board, timings)
+                             if needs_render else None)
         shots.append({
             "number": index, "id": shot.get("id"),
             "title": shot.get("title") or "", "prompt": shot.get("prompt") or "",
@@ -526,6 +529,7 @@ def chat(
     selected_id: str | None = None,
     search_url: str = "",
     data_dir: Path | None = None,
+    timings=None,
 ) -> dict[str, Any]:
     message = (message or "").strip()
     if not message:
@@ -550,7 +554,7 @@ def chat(
         )
     user = (
         "CURRENT STORYBOARD (compact JSON):\n"
-        + json.dumps(compact_board_context(board, selected_id), ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(compact_board_context(board, selected_id, timings), ensure_ascii=False, separators=(",", ":"))
         + visual_context
         + "\n\nRECENT CONVERSATION:\n"
         + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))

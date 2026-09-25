@@ -5500,11 +5500,20 @@ function diagnostic(raw, shot) {
 
   if (shot.status === "review") {
     const accept = el("button", "btn btn-sm btn-ghost", "Accept anyway");
-    accept.addEventListener("click", () => {
-      // by id, not through the captured object: state.board may have been
-      // replaced since this button was built
-      (shotById(raw.id) || raw).status = "done";
-      markDirty();
+    accept.addEventListener("click", async () => {
+      // Server-side, not a local status edit: the live run state is laid
+      // over the board's (view()), and a shot chained from this one is gated
+      // on that live state, so both have to change together.
+      accept.disabled = true;
+      try {
+        await saveNow();
+        state.status = await API.acceptReview(state.slug, raw.id);
+        state.board = await API.getBoard(state.slug);
+        toast("Accepted — shots that continue from this one can render now.", "info");
+      } catch (err) {
+        toast(err.message, "error");
+        accept.disabled = false;
+      }
       render();
     });
     actions.appendChild(accept);
