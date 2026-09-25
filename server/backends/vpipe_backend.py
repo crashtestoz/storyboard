@@ -602,7 +602,6 @@ class VpipeBackend(Backend):
                 chain_ref_path=chain_ref_path, chain_strength=chain_strength,
                 identity_ref_path=identity_ref_path,
             )
-            expected_seconds = 150.0
             frames_dir = None
             frames = 0
             render_frames = 0
@@ -638,7 +637,6 @@ class VpipeBackend(Backend):
                     shot, paths, prompt, width, height, render_frames, steps,
                     seed, draft, save_frames, with_audio, sketch
                 )
-            expected_seconds = _estimate_seconds(width, height, render_frames, steps, model)
             frames_dir = paths.abs_frames if save_frames else None
 
         spec_path = paths.abs_dir / "shot.vpipeline"
@@ -649,13 +647,17 @@ class VpipeBackend(Backend):
             expected_outputs=outputs,
             frames_dir=frames_dir,
             expected_frames=render_frames if save_frames else 0,
-            expected_seconds=expected_seconds,
+            # Filled in by the orchestrator from this machine's own timings
+            # (render_timings.py); a backend has no business guessing it.
             payload={
                 "spec_path": str(spec_path),
                 "rel_spec": f"{paths.pipe_dir}/shot.vpipeline",
                 "cwd": str(self.workspace),
                 "model": model,
                 "frames": render_frames,
+                "width": width,
+                "height": height,
+                "steps": steps,
                 "draft": draft,
                 "save_frames": save_frames,
                 "nativeDialogueSpoken": natively_spoken,
@@ -1785,7 +1787,7 @@ def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
     -- manually chosen or chained from a previous shot's last rendered frame
     -- as an ordered soft reference, never a hard-pinned keyframe. This
     carries two costs worth knowing: Ref2VA runs roughly 1.3x slower than
-    FL2VA for equivalent geometry (see _estimate_seconds), and "Start/End
+    FL2VA for equivalent geometry, and "Start/End
     frame + cast identity references + native voice cloning" together in one
     render is not yet quality-validated -- see
     docs/storyboard-continuity-character-voice.md.
@@ -2113,90 +2115,45 @@ def _sketchify_ref(src: str, sketch_dir: Path) -> str:
         return src
 
 
-def _estimate_seconds(w: int, h: int, frames: int, steps: int,
-                      model: str = "fl2va") -> float:
-    """Baseline for the runtime sanity check.
-
-    Only used to catch a run that finished implausibly fast, so it needs to be
-    roughly right rather than precise — the check trips below 25% of this.
-
-    Fitted to two measured runs on this machine (M4 Pro, 48 GB, 960x544,
-    8 steps): 124 frames took 27m 44s with ~24m of that in denoise, and 39
-    frames took 7m 32s with ~5m in denoise. Denoise is not linear in frames
-    (attention grows faster than the sequence), and those two points give an
-    exponent of about 1.37:
-
-        log(1438/296) / log(124/39) ~= 1.37
-        denoise ~= 1.95 * frames**1.37
-
-    Plus a fixed floor for model load, the 32B prompt encode and VAE decode.
-    Predicts 26.8m and 7.8m against the measured 27.7m and 7.5m.
-    """
-    px = (w * h) / (960 * 544)
-    fixed = 170.0
-    denoise = 1.95 * (frames ** 1.37) * (steps / 8.0) * px
-
-    # Ref2VA packs its references into the same sequence being denoised, and
-    # encodes each one twice up front (vision tower, then video VAE). Measured
-    # on this machine: ~35 min against ~27 min for the same geometry on FL2VA
-    # with one image reference. Approximate, and only used to spot a run that
-    # finished implausibly fast.
-    if model == "ref2va":
-        return (fixed + denoise) * 1.3
-    if model == "wan-i2v":
-        # UNMEASURED — no Wan clip has actually been timed on this machine
-        # yet. Rough reasoning, not a fit: Wan is not guidance-distilled (2
-        # forward passes/step, H3 has 1) and its shipped examples run ~40
-        # steps against H3's 8, so total DiT compute per clip is plausibly
-        # an order of magnitude higher per frame even though each of its
-        # two resident 14B experts is smaller than H3's 33B stack. Replace
-        # this multiplier with a fitted curve once a clip has been timed —
-        # until then it only has to be roughly right, per this function's
-        # own docstring.
-        return (fixed + denoise) * 3.0
-    if model == "ltx-2.5":
-        # A different architecture entirely, so H3's fitted curve above
-        # (denoise ~ frames**1.37) does not apply -- this is instead a
-        # straight-line scale of the ONE measured point in the plugin's own
-        # docs: 64 GB M4 Pro, w8g64 pack, 960x544x121, 8 steps (the
-        # distilled schedule is fixed -- `steps` past 8 does nothing) --
-        # 410.9s denoise (51.4s/step) + 121.1s fixed (model load, two VAE
-        # decodes, mux). One point can't fit an exponent the way H3's two
-        # did, so this scales linearly by pixel count and step count
-        # instead; expect it to be less accurate off that one measured
-        # shape, and note it was measured on a 64 GB machine, not the
-        # 16-24 GB ones H3's own numbers above come from.
-        ltx_px = (w * h) / (960 * 544)
-        return 121.1 + 51.4 * 8 * ltx_px
-    return fixed + denoise
+_MODEL_GEOMETRY = {
+    "ref2va": (H3_FRAME_RULE, H3_SIZE_ALIGN),
+    "fl2va": (H3_FRAME_RULE, H3_SIZE_ALIGN),
+    "wan-i2v": (WAN_FRAME_RULE, WAN_SIZE_ALIGN),
+    "ltx-2.5": (LTX_FRAME_RULE, LTX_SIZE_ALIGN),
+}
 
 
-def estimate_render_seconds(shot: dict, project: dict) -> float | None:
+def estimate_render_seconds(shot: dict, project: dict, timings=None) -> float | None:
     """Predicted wall-clock seconds to render *shot*, for a human (or the
-    Storyboard AD assistant) asking "how long will this take" before
-    spending the time. None for a shot that renders as a still
-    (``krea2-still``) or whose reference setup is currently invalid, since
-    the frame-based formula below does not apply to either.
+    Storyboard AD assistant) asking "how long will this take".
 
-    Built from the same pieces the render path itself uses — model
-    selection, draft geometry — and calls the same :func:`_estimate_seconds`
-    the runtime-plausibility check validates a finished run against, so a
-    prediction given before rendering and that check's baseline never
-    quietly disagree.
+    Only ever from *timings* -- this machine's own measured renders (see
+    render_timings.py) -- at the geometry prepare() would actually run:
+    snapped frame count and size, draft and sketch applied. None when no
+    render of that model has been timed here yet, for a still, or when the
+    shot's reference setup is invalid.
     """
+    if timings is None:
+        return None
     try:
         model, _ = _effective_video_model(shot, project)
     except ValueError:
         return None
-    if model == "krea2-still":
+    if model not in _MODEL_GEOMETRY:
         return None
+    rule, align = _MODEL_GEOMETRY[model]
     defaults = project.get("defaults") or {}
-    w, h = _wh(shot.get("resolution") or defaults.get("resolution") or "960x544")
-    frames = shot.get("frames") or defaults.get("frames") or 124
-    steps = shot.get("steps") or defaults.get("steps") or 8
+    w, h = _wh(defaults.get("resolution") or shot.get("resolution") or "960x544")
+    # The same fallbacks prepare() uses, so an estimate is looked up at the
+    # geometry the render would record.
+    frames = rule.snap(int(shot.get("frames") or rule.minimum))
+    steps = int(shot.get("steps") or 8)
     if defaults.get("draft"):
-        w, h, steps = _draft_geometry(w, h, steps)
-    return _estimate_seconds(w, h, frames, steps, model)
+        w, h, steps = _draft_geometry(w, h, steps, align)
+        if defaults.get("sketch"):
+            frames = rule.minimum
+    return timings.estimate(model=model, width=_align_up(w, align),
+                            height=_align_up(h, align), frames=frames, steps=steps)
 
 
 def _overall(phase_pct: dict[str, float]) -> float:

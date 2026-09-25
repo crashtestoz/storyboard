@@ -495,6 +495,12 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._accept_take(m.group(1), m.group(2))
 
+        # "Accept anyway" on a take flagged for review (not the same as
+        # /accept above, which vouches for a clip against board edits).
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/accept-review", path)
+        if m:
+            return self._send_json(ctx.orch.accept_review(m.group(1), m.group(2)))
+
         if path == "/api/render-preview":
             from .backends.vpipe_backend import (
                 SKETCH_STYLE_PREFIX, _clones_voice, _effective_video_model,
@@ -725,6 +731,7 @@ class Handler(BaseHTTPRequestHandler):
                 selected_id=payload.get("selectedShotId"),
                 search_url=ctx.search_url(),
                 data_dir=ctx.data_dir,
+                timings=ctx.orch.timings,
             ))
 
         if path == "/api/describe-character":
