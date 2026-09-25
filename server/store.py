@@ -422,6 +422,7 @@ def default_board(name: str) -> dict[str, Any]:
             "draft": False,
             "sketch": False,
             "stillsSize": "small",
+            "stillsEngine": "auto",
             "tts": "none",
             "llm": "",       # "" means: use the server's default service
             "adSpeakerId": "",   # cast member whose voice the AD borrows to speak
@@ -994,6 +995,7 @@ class Store:
         defaults.setdefault("draft", False)
         defaults.setdefault("sketch", False)
         defaults.setdefault("stillsSize", "small")
+        defaults.setdefault("stillsEngine", "auto")
         defaults.setdefault("tts", "none")
         defaults.setdefault("llm", "")
         # Which cast member's reference voice the Storyboard AD borrows when

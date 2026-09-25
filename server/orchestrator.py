@@ -115,8 +115,8 @@ class Orchestrator:
         # has not finished the job.
         self._assembly: dict[str, Any] | None = None
 
-        # "Create Stills" — a separate, much shorter job (two Krea-2 stills,
-        # not a shot render), but it still shares the one GPU vpipe drives, so
+        # "Create Stills" — a separate, much shorter job (two stills, not a
+        # shot render), but it still shares the one GPU the renders use, so
         # it gets its own thread and its own small piece of status rather than
         # reusing _runs/_order, which are shaped around a whole render batch.
         self._stills_thread: threading.Thread | None = None
@@ -468,16 +468,24 @@ class Orchestrator:
         if self.stills_busy:
             raise RuntimeError("stills are already generating for this board")
 
-        ok, msg = self.backend.health()
-        if not ok:
-            raise RuntimeError(msg)
-
         board = self.store.load(slug)
         shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
         if shot is None:
             raise RuntimeError("shot not found")
         if not (shot.get("prompt") or "").strip():
             raise RuntimeError("nothing to sketch — this shot has no prompt yet")
+
+        still_model = self._still_model(board)
+        cap = self.backend.capability(still_model)
+        if cap is None:
+            raise RuntimeError(f"unknown still engine: {still_model}")
+        if not cap.available:
+            raise RuntimeError(cap.unavailable_reason or f"{still_model} is not available")
+        mflux = getattr(self.backend, "mflux", None)
+        if not (mflux and mflux.handles(still_model)):
+            ok, msg = self.backend.health()
+            if not ok:
+                raise RuntimeError(msg)
 
         with self._lock:
             self._cancel.clear()
@@ -494,6 +502,16 @@ class Orchestrator:
         )
         self._stills_thread.start()
         return self.status()
+
+    def _still_model(self, board: dict) -> str:
+        """The board's still engine; "auto" is the first available image
+        model, vpipe's Krea-2 ahead of the mflux engines."""
+        choice = (board.get("defaults") or {}).get("stillsEngine") or "auto"
+        if choice != "auto":
+            return choice
+        images = [c for c in self.backend.capabilities() if c.kind == "image"]
+        available = next((c.id for c in images if c.available), None)
+        return available or "krea2-still"
 
     def _run_stills(
         self, slug: str, shot_id: str, phase_prompts: dict[str, str]
@@ -521,6 +539,7 @@ class Orchestrator:
                 **(board.get("defaults") or {}), "draft": not large, "sketch": False,
             }
 
+            still_model = self._still_model(board)
             prev_still: Path | None = None
             for i, (key, phase_hint) in enumerate(self.STILL_PHASES):
                 if self._cancel.is_set():
@@ -529,12 +548,12 @@ class Orchestrator:
                     self._stills_phase = key
                     self._stills_progress = (i / len(self.STILL_PHASES)) * 100
 
-                # A synthetic shot, not a real one: always Krea-2 regardless
-                # of what this shot is set to render as, since stills are a
-                # fast preview, not the shot's own model. Scene, cast and any
-                # style refs still come from _resolved_prompt via prepare().
+                # A synthetic shot, not a real one: the board's still engine
+                # regardless of what this shot is set to render as, since
+                # stills are a fast preview, not the shot's own model. Scene,
+                # cast and any style refs still come from _resolved_prompt.
                 still_shot = dict(shot)
-                still_shot["model"] = "krea2-still"
+                still_shot["model"] = still_model
                 still_shot["steps"] = 8 if large else 4
                 # An LLM-extracted description of what THIS shot's own prompt
                 # actually establishes at this point in the action (see
@@ -580,7 +599,9 @@ class Orchestrator:
                     raise RuntimeError("stopped before completion")
                 if result.error or result.exit_code != 0:
                     raise RuntimeError(
-                        result.error or f"vpipe exited {result.exit_code}"
+                        result.error
+                        or f"{still_model} exited {result.exit_code}: "
+                        + next((t for lvl, t in reversed(result.log) if lvl == "ERROR"), "")
                     )
                 out = next((p for p in spec.expected_outputs if p.exists()), None)
                 if out is None:
