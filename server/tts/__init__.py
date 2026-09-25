@@ -39,10 +39,13 @@ from ..local_config import ensure_local_copy
 
 __all__ = [
     "TTSEngine", "Voice", "SpeechResult",
-    "NullTTS", "load_engines", "DEFAULT_SERVICES", "CONFIG_NAME",
+    "NullTTS", "load_engines", "DEFAULT_SERVICES", "CONFIG_NAME", "KNOWN_KINDS",
 ]
 
 CONFIG_NAME = "tts-services.json"
+
+# Engine types build_one knows; offered in Settings → Audio.
+KNOWN_KINDS = ("vpipe-moss", "qwen3-clone", "plain-sherpa")
 
 DEFAULT_SERVICES: list[dict[str, Any]] = [
     {
@@ -81,7 +84,7 @@ class NullTTS(TTSEngine):
 
 def load_config(project_root: Path) -> list[dict[str, Any]]:
     """Read this machine's ``tts-services.json``, first creating it from the
-    committed ``tts-services.example.json`` if it is absent."""
+    committed ``tts-services-sample.json`` if it is absent."""
     path = ensure_local_copy(project_root, CONFIG_NAME, {"services": DEFAULT_SERVICES})
     if not path.exists():
         return list(DEFAULT_SERVICES)

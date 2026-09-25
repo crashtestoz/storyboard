@@ -4,7 +4,7 @@ committed template.
 llm-services.json, tts-services.json and mflux-engines.json describe the
 services and models on *this* machine, so each install edits its own copy
 and a `git pull` never overwrites it. What is committed is
-``<name>.example.json``; the first start copies it into place.
+``<name>-sample.json``; each page load copies it into place if missing.
 """
 
 from __future__ import annotations
@@ -15,20 +15,38 @@ from pathlib import Path
 from typing import Any
 
 
-def example_path(path: Path) -> Path:
-    return path.with_name(f"{path.stem}.example{path.suffix}")
+CONFIG_NAMES = ("llm-services.json", "tts-services.json", "mflux-engines.json")
+
+
+def sample_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}-sample{path.suffix}")
+
+
+def ensure_local_configs(root: Path) -> None:
+    """Copy each committed sample into place where this machine has no copy
+    yet. Called on page load; a config without a sample is left to its
+    loader, which writes built-in defaults."""
+    for name in CONFIG_NAMES:
+        path = Path(root) / name
+        sample = sample_path(path)
+        if path.exists() or not sample.exists():
+            continue
+        try:
+            shutil.copyfile(sample, path)
+        except OSError:
+            pass
 
 
 def ensure_local_copy(root: Path, name: str, default_doc: dict[str, Any]) -> Path:
     """Path of this machine's *name*, created first if missing -- from the
-    committed example when there is one, else from *default_doc*."""
+    committed sample when there is one, else from *default_doc*."""
     path = Path(root) / name
     if path.exists():
         return path
-    example = example_path(path)
+    sample = sample_path(path)
     try:
-        if example.exists():
-            shutil.copyfile(example, path)
+        if sample.exists():
+            shutil.copyfile(sample, path)
         else:
             path.write_text(json.dumps(default_doc, indent=2) + "\n")
     except OSError:

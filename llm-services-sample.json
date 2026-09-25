@@ -1,0 +1,18 @@
+{
+  "services": [
+    {
+      "id": "ollama-local",
+      "label": "Llama 3.1 8B (Ollama)",
+      "kind": "ollama",
+      "url": "http://localhost:11434",
+      "model": "llama3.1:8b"
+    },
+    {
+      "id": "lmstudio-local",
+      "label": "Local model (LM Studio)",
+      "kind": "openai",
+      "url": "http://localhost:1234",
+      "model": "qwen2.5-7b-instruct"
+    }
+  ]
+}

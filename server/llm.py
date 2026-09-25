@@ -713,14 +713,51 @@ class OllamaLLM(LLMService):
         return ((doc.get("message") or {}).get("content") or "").strip()
 
 
-class OpenAICompatLLM(LLMService):
-    """Anything exposing ``/v1/chat/completions`` — llama.cpp, vLLM, LM Studio."""
+# Service types offered in Settings. Every kind but "ollama" and "anthropic"
+# speaks OpenAI's chat-completions API; the hosted ones differ only in their
+# default URL and the request fields they reject (OpenAICompatLLM._dumps).
+LOCAL_OPENAI_KINDS = ("openai", "openai-compatible", "lmstudio")
+CLOUD_KINDS = ("openai-api", "gemini", "openrouter", "groq", "mistral")
+KNOWN_KINDS = ("ollama", "anthropic", *LOCAL_OPENAI_KINDS, *CLOUD_KINDS)
+KIND_DEFAULT_URLS = {
+    "ollama": "http://localhost:11434",
+    "lmstudio": "http://localhost:1234",
+    "openai-api": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+}
 
-    def __init__(self, sid: str, label: str, url: str, model: str):
+
+class OpenAICompatLLM(LLMService):
+    """Anything exposing ``/v1/chat/completions`` — llama.cpp, vLLM, LM Studio,
+    and the hosted APIs that copy OpenAI's (OpenAI, Gemini, OpenRouter, Groq,
+    Mistral)."""
+
+    def __init__(self, sid: str, label: str, url: str, model: str,
+                 kind: str = "openai"):
         self.id = sid
         self.label = label
-        self.url = (url or "").rstrip("/")
+        self.kind = kind
+        self.url = (url or KIND_DEFAULT_URLS.get(kind, "")).rstrip("/")
         self.model = model
+        # A URL that already names its API version (".../v1", Gemini's
+        # ".../v1beta/openai") is used as is; a bare host gets "/v1".
+        self.api = (self.url if re.search(r"/v\d+[a-z]*(/openai)?$", self.url)
+                    else f"{self.url}/v1")
+
+    def _dumps(self, body: dict[str, Any]) -> str:
+        """JSON for a chat request, trimmed for hosted APIs: they reject the
+        local-server thinking switch, and several of their models accept only
+        the default temperature."""
+        if self.kind in CLOUD_KINDS:
+            body = {k: v for k, v in body.items()
+                    if k not in ("chat_template_kwargs", "temperature")}
+            if self.kind == "openai-api" and "max_tokens" in body:
+                body["max_completion_tokens"] = body.pop("max_tokens")
+        return json.dumps(body)
 
     def health(self) -> tuple[bool, str]:
         if not self.url:
@@ -730,7 +767,7 @@ class OpenAICompatLLM(LLMService):
         if self._key_problem():
             return False, self._key_problem()
         try:
-            req = urllib.request.Request(f"{self.url}/v1/models",
+            req = urllib.request.Request(f"{self.api}/models",
                                          headers=self._headers())
             with urllib.request.urlopen(req, timeout=4) as r:
                 doc = json.loads(r.read().decode())
@@ -741,7 +778,8 @@ class OpenAICompatLLM(LLMService):
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
             return False, f"cannot reach {self.url} ({e})"
         ids = {m.get("id") for m in doc.get("data") or []}
-        if ids and self.model not in ids:
+        # Gemini lists its models as "models/<name>".
+        if ids and self.model not in ids and f"models/{self.model}" not in ids:
             return False, f"{self.url} does not serve {self.model!r}"
         return True, ""
 
@@ -765,8 +803,8 @@ class OpenAICompatLLM(LLMService):
         }
         if max_tokens is not None:
             body_dict["max_tokens"] = max_tokens
-        body = json.dumps(body_dict).encode()
-        req = urllib.request.Request(f"{self.url}/v1/chat/completions",
+        body = self._dumps(body_dict).encode()
+        req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
@@ -783,7 +821,7 @@ class OpenAICompatLLM(LLMService):
     ) -> str:
         mime = mimetypes.guess_type(str(image))[0] or "application/octet-stream"
         encoded = base64.b64encode(image.read_bytes()).decode("ascii")
-        body = json.dumps(
+        body = self._dumps(
             {
                 "model": self.model,
                 "messages": [
@@ -808,7 +846,7 @@ class OpenAICompatLLM(LLMService):
                 "chat_template_kwargs": {"enable_thinking": False},
             }
         ).encode()
-        req = urllib.request.Request(f"{self.url}/v1/chat/completions",
+        req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
@@ -835,7 +873,7 @@ class OpenAICompatLLM(LLMService):
                 "data": base64.b64encode(audio.read_bytes()).decode("ascii"),
                 "format": fmt,
             }})
-        body = json.dumps({
+        body = self._dumps({
             "model": self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": content}],
@@ -844,7 +882,7 @@ class OpenAICompatLLM(LLMService):
             # this is the switch that keeps a Qwen3 model from thinking first.
             "chat_template_kwargs": {"enable_thinking": False},
         }).encode()
-        req = urllib.request.Request(f"{self.url}/v1/chat/completions",
+        req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         try:
             with self._open(req, timeout) as r:
@@ -882,6 +920,93 @@ class OpenAICompatLLM(LLMService):
         return ((choices[0].get("message") or {}).get("content") or "").strip()
 
 
+class AnthropicLLM(LLMService):
+    """Claude, through the official ``anthropic`` SDK. The SDK is imported
+    only when a service of this kind is used, so installs without Claude
+    services don't need it."""
+
+    DEFAULT_MAX_TOKENS = 16000
+
+    def __init__(self, sid: str, label: str, url: str, model: str):
+        self.id = sid
+        self.label = label
+        self.url = (url or KIND_DEFAULT_URLS["anthropic"]).rstrip("/")
+        self.model = model
+
+    def _client(self, timeout: float, retries: int = 2):
+        import anthropic  # optional dependency: pip install anthropic
+        kwargs: dict[str, Any] = {"api_key": self.api_key or None,
+                                  "timeout": timeout, "max_retries": retries}
+        if self.url != KIND_DEFAULT_URLS["anthropic"]:
+            kwargs["base_url"] = self.url
+        return anthropic, anthropic.Anthropic(**kwargs)
+
+    def health(self) -> tuple[bool, str]:
+        if not self.model:
+            return False, f"{self.id}: no model set in {CONFIG_NAME}"
+        if self._key_problem():
+            return False, self._key_problem()
+        try:
+            anthropic, client = self._client(timeout=4.0, retries=0)
+        except ImportError:
+            return False, ("Claude needs the anthropic Python package — run "
+                           "`pip install anthropic` for the Python that runs "
+                           "Storyboard, then restart it.")
+        try:
+            client.models.retrieve(self.model)
+        except anthropic.NotFoundError:
+            return False, f"Anthropic has no model {self.model!r}"
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+            return False, self._rejected(exc.status_code)
+        except anthropic.APIConnectionError as exc:
+            return False, f"cannot reach {self.url} ({exc})"
+        except anthropic.APIStatusError as exc:
+            return False, f"{self.url} answered HTTP {exc.status_code}"
+        return True, ""
+
+    def _create(self, system: str, content: Any, timeout: float,
+                max_tokens: int | None) -> str:
+        anthropic, client = self._client(timeout=timeout)
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens or self.DEFAULT_MAX_TOKENS,
+                system=system,
+                messages=[{"role": "user", "content": content}],
+            )
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
+            raise RuntimeError(self._rejected(exc.status_code)) from exc
+        if response.stop_reason == "refusal":
+            raise RuntimeError(f"{self.label} declined this request.")
+        return "".join(b.text for b in response.content if b.type == "text").strip()
+
+    def complete(self, system: str, user: str, *, timeout: float = 300.0,
+                 max_tokens: int | None = None) -> str:
+        return self._create(system, user, timeout, max_tokens)
+
+    def complete_with_image(self, system: str, user: str, image: Path, *,
+                            timeout: float = 300.0) -> str:
+        return self.complete_with_media(system, user, images=[image], timeout=timeout)
+
+    def complete_with_media(
+        self, system: str, user: str, *, images: list[Path] | None = None,
+        audio: Path | None = None, timeout: float = 300.0,
+    ) -> str:
+        if audio is not None and not images:
+            return super().complete_with_media(system, user, audio=audio, timeout=timeout)
+        # Claude reads images but not audio; a voice sample is left out rather
+        # than blocking the portrait description.
+        content: list[dict[str, Any]] = []
+        for image in images or []:
+            mime = mimetypes.guess_type(str(image))[0] or "image/png"
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": mime,
+                "data": base64.standard_b64encode(image.read_bytes()).decode("utf-8"),
+            }})
+        content.append({"type": "text", "text": user})
+        return self._create(system, content, timeout, None)
+
+
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
@@ -889,7 +1014,7 @@ class OpenAICompatLLM(LLMService):
 
 def load_config(project_root: Path) -> list[dict[str, Any]]:
     """Read this machine's ``llm-services.json``, first creating it from the
-    committed ``llm-services.example.json`` if it is absent."""
+    committed ``llm-services-sample.json`` if it is absent."""
     path = ensure_local_copy(project_root, CONFIG_NAME, {"services": DEFAULT_SERVICES})
     if not path.exists():
         return list(DEFAULT_SERVICES)
@@ -946,14 +1071,17 @@ def build_one(entry: dict[str, Any], saved_key: str = "") -> LLMService:
         return _apply_key(OllamaLLM(sid, label, url, model,
                                     num_ctx=int(entry.get("numCtx") or 8192)),
                           entry, saved_key)
-    if kind in ("openai", "openai-compatible"):
-        return _apply_key(OpenAICompatLLM(sid, label, url, model), entry, saved_key)
+    if kind in LOCAL_OPENAI_KINDS or kind in CLOUD_KINDS:
+        return _apply_key(OpenAICompatLLM(sid, label, url, model, kind=kind),
+                          entry, saved_key)
+    if kind == "anthropic":
+        return _apply_key(AnthropicLLM(sid, label, url, model), entry, saved_key)
     if kind == "broken":
         return BrokenLLM(sid, label, str(entry.get("why") or "misconfigured"))
     return BrokenLLM(
         sid, label,
         f"unknown service kind {kind!r} in {CONFIG_NAME} "
-        "(expected ollama or openai)",
+        f"(expected one of: {', '.join(KNOWN_KINDS)})",
     )
 
 

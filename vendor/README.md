@@ -1,5 +1,25 @@
 # vendor/
 
+## Running the Qwen3-TTS voice-clone server
+
+Storyboard's **Qwen3-TTS voice clone** speech engine (`qwen3-clone` in
+`tts-services.json`) talks to this server at `http://127.0.0.1:8790`. Start it
+in its own Terminal tab and leave it running while you use Storyboard:
+
+```sh
+vendor/start-qwen3-tts.sh
+```
+
+The first run creates `vendor/.venv` (gitignored) and installs
+`requirements.txt`, which takes a few minutes; the first launch then downloads
+the ~2.5 GB `Qwen/Qwen3-TTS-12Hz-0.6B-Base` model and a small Whisper model
+(for transcribing reference clips) into the Hugging Face cache. After that it
+starts in well under a minute. Any `serve_qwen3_tts.py` option passes through,
+e.g. `vendor/start-qwen3-tts.sh --port 8791`. Needs Python 3.10+
+(`brew install python@3.14`); on Apple Silicon it runs on the GPU in bfloat16
+(see below).
+
+
 `serve_qwen3_tts.py` is a copy of the Qwen3-TTS voice-clone server that
 normally lives alongside a separate TTS-hosting project's own
 `tts-voice-clone` skill, with one change made here.

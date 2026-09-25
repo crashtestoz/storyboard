@@ -345,10 +345,10 @@ from outside the code — nothing here should ever need editing in a `.py` or
 
 `llm-services.json`, `tts-services.json` and `mflux-engines.json` are yours
 to edit and are **not** tracked: git ignores them, so a `git pull` never
-overwrites your services. What the repo ships is `llm-services.example.json`,
-`tts-services.example.json` and `mflux-engines.example.json`; the first start
+overwrites your services. What the repo ships is `llm-services-sample.json`,
+`tts-services-sample.json` and `mflux-engines-sample.json`; loading the page
 copies each one into place if your own copy is missing. Change the
-`.example.json` files only to change what a new install starts with.
+`-sample.json` files only to change what a new install starts with.
 `server-config.json` is created by the app and gitignored, so your data-dir
 choice, per-machine model choices and any API keys saved in Settings never
 get committed at all. `render-timings.json`, beside it and also gitignored,
