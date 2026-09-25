@@ -116,12 +116,15 @@ class ModelCapability:
     # set False when the weights are not present on this machine yet
     available: bool = True
     unavailable_reason: str = ""
+    # which program renders it, when that differs from the backend's own
+    engine: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "label": self.label,
             "kind": self.kind,
+            "engine": self.engine,
             "supportsStartAnchor": self.supports_start_anchor,
             "supportsEndAnchor": self.supports_end_anchor,
             "supportsStyleRefs": self.supports_style_refs,

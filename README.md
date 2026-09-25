@@ -89,6 +89,7 @@ Minimum versions:
 | lsof | `./start.sh --restart` | Used to find the process listening on the selected port. |
 | Ollama or OpenAI-compatible LLM service | Prompt rewrite and character-description AI buttons | Optional; configured in `llm-services.json`. |
 | TTS service or MOSS models | Spoken dialogue | Optional; configured in `tts-services.json`. |
+| mflux | Create Stills without vpipe's Krea-2 (Z-Image Turbo or Krea-2 via MLX) | Optional; `uv tool install mflux`. Engines are configured in `mflux-engines.json` and picked under **Settings → Create Stills → Engine**. mflux downloads each model itself on first use. |
 | Node.js | Browser/JS regression tests only | Not needed to run the app. |
 
 There is deliberately no `pip install -r requirements.txt` and no

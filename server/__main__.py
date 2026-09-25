@@ -139,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         vpipe_binary=args.vpipe.expanduser(),
         workspace=workspace,
         comfyui_url=args.comfyui_url,
+        project_root=UI_ROOT,
     )
     # Engines come from tts-services.json: a service is a name and a URL, so
     # adding another instance is an edit rather than a code change. None loads

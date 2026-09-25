@@ -1522,6 +1522,12 @@ function wireChrome() {
     render();
   });
 
+  $("#stillsEngine").addEventListener("change", (e) => {
+    state.board.defaults.stillsEngine = e.target.value;
+    markDirty();
+    render();
+  });
+
   $("#llmService").addEventListener("change", (e) => {
     state.board.defaults.llm = e.target.value;
     markDirty();
@@ -2582,6 +2588,44 @@ function renderRail() {
       `to use as a reference image, but noticeably slower than the small size.`
     : `Renders at draft size (384px long edge, 4 steps) — fast, good for ` +
       `judging composition, too small to use as a reference image.`;
+
+  // stills engine — mirrors Orchestrator._still_model's "auto" rule
+  const stillsEngineSel = $("#stillsEngine");
+  const imageModels = state.models.filter((m) => m.kind === "image");
+  if (stillsEngineSel.dataset.built !== "1") {
+    const auto = el("option", null, "Automatic");
+    auto.value = "auto";
+    stillsEngineSel.appendChild(auto);
+    imageModels.forEach((m) => {
+      const name = m.label.split("—")[0].trim();
+      const o = el("option", null, m.available ? name : `${name} — unavailable`);
+      o.value = m.id;
+      stillsEngineSel.appendChild(o);
+    });
+    stillsEngineSel.dataset.built = "1";
+  }
+  const stillsEngine = state.board.defaults.stillsEngine || "auto";
+  stillsEngineSel.value = stillsEngine;
+  const autoPick = imageModels.find((m) => m.available);
+  const engineCapStill = stillsEngine === "auto" ? autoPick : modelCap(stillsEngine);
+  const stillsEngineNote = $("#stillsEngineNote");
+  if (!engineCapStill) {
+    stillsEngineNote.textContent = "No still engine is ready — download Krea-2 into " +
+      "the vpipe workspace, or install mflux (uv tool install mflux).";
+    stillsEngineNote.className = "field-warn";
+  } else if (!engineCapStill.available) {
+    stillsEngineNote.textContent = engineCapStill.unavailableReason || "Not available.";
+    stillsEngineNote.className = "field-warn";
+  } else {
+    const name = engineCapStill.label.split("—")[0].trim();
+    stillsEngineNote.textContent = (stillsEngine === "auto" ? `Using ${name}. ` : "") +
+      (engineCapStill.engine === "mflux"
+        ? "mflux downloads the model itself the first time it runs. Uses the shot's " +
+          "prompt, scene and cast descriptions; reference images are not used."
+        : "Uses the shot's prompt, scene and cast, plus its Start Ref or a cast " +
+          "portrait as an identity reference.");
+    stillsEngineNote.className = "field-note";
+  }
 
   const ttsSel = $("#ttsEngine");
   if (ttsSel.dataset.built !== "1") {
@@ -3810,7 +3854,7 @@ function renderEditor() {
   head.appendChild(one);
 
   const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Stills");
-  stillsBtn.title = "Fast Krea-2 previews of this shot's start and end";
+  stillsBtn.title = "Fast previews of this shot's start and end (engine: Settings → Create Stills)";
   stillsBtn.disabled = !!(state.status && state.status.busy) || stillsBusy;
   stillsBtn.addEventListener("click", async () => {
     stillsBtn.disabled = true;
@@ -4751,7 +4795,7 @@ function renderStillsPane(raw) {
     if (!runningHere) {
       wrap.appendChild(
         el("div", "empty-state",
-           "No stills yet — “Create Stills” renders fast Krea-2 previews of " +
+           "No stills yet — “Create Stills” renders fast previews of " +
            "this shot's start and end.")
       );
     }

@@ -1,0 +1,20 @@
+{
+  "engines": [
+    {
+      "id": "mflux-z-image-turbo",
+      "label": "Z-Image Turbo via mflux",
+      "command": "mflux-generate-z-image-turbo",
+      "model": "z-image-turbo",
+      "quantize": 8,
+      "steps": 8
+    },
+    {
+      "id": "mflux-krea2",
+      "label": "Krea-2 Turbo via mflux",
+      "command": "mflux-generate-krea2",
+      "model": "krea2",
+      "quantize": 8,
+      "steps": 8
+    }
+  ]
+}
