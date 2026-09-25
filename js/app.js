@@ -2840,8 +2840,8 @@ function renderRail() {
     } else if (sv.keySource === "env") {
       keyNote.textContent = `Using ${envName} from the environment. A key saved here takes priority.`;
     } else if (sv.keySource === "file") {
-      keyNote.textContent = "Using the apiKey written in llm-services.json, which is tracked in git — " +
-        "saving the key here instead is safer, and takes priority.";
+      keyNote.textContent = "Using the apiKey written in plain text in llm-services.json — " +
+        "saving the key here instead is safer (readable only by you), and takes priority.";
       keyNote.className = "field-warn";
     } else if (sv.needsKey) {
       keyNote.textContent = "This service needs a key" +

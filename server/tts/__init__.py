@@ -35,6 +35,7 @@ from typing import Any
 from .base import SpeechResult, TTSEngine, Voice
 from .http_services import PlainSherpaTTS, Qwen3CloneTTS
 from .vpipe_moss import VpipeMossTTS
+from ..local_config import ensure_local_copy
 
 __all__ = [
     "TTSEngine", "Voice", "SpeechResult",
@@ -79,13 +80,10 @@ class NullTTS(TTSEngine):
 
 
 def load_config(project_root: Path) -> list[dict[str, Any]]:
-    """Read ``tts-services.json``, writing the defaults if it is absent."""
-    path = Path(project_root) / CONFIG_NAME
+    """Read this machine's ``tts-services.json``, first creating it from the
+    committed ``tts-services.example.json`` if it is absent."""
+    path = ensure_local_copy(project_root, CONFIG_NAME, {"services": DEFAULT_SERVICES})
     if not path.exists():
-        try:
-            path.write_text(json.dumps({"services": DEFAULT_SERVICES}, indent=2) + "\n")
-        except OSError:
-            return list(DEFAULT_SERVICES)
         return list(DEFAULT_SERVICES)
     try:
         doc = json.loads(path.read_text())

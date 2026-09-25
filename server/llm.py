@@ -28,6 +28,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .local_config import ensure_local_copy
+
 CONFIG_NAME = "llm-services.json"
 
 DEFAULT_SERVICES: list[dict[str, Any]] = [
@@ -886,11 +888,10 @@ class OpenAICompatLLM(LLMService):
 
 
 def load_config(project_root: Path) -> list[dict[str, Any]]:
-    path = Path(project_root) / CONFIG_NAME
+    """Read this machine's ``llm-services.json``, first creating it from the
+    committed ``llm-services.example.json`` if it is absent."""
+    path = ensure_local_copy(project_root, CONFIG_NAME, {"services": DEFAULT_SERVICES})
     if not path.exists():
-        path.write_text(
-            json.dumps({"services": DEFAULT_SERVICES}, indent=2) + "\n"
-        )
         return list(DEFAULT_SERVICES)
     try:
         doc = json.loads(path.read_text())

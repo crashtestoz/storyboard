@@ -1,0 +1,21 @@
+{
+  "services": [
+    {
+      "id": "vpipe-moss",
+      "label": "MOSS-TTS 8B via vpipe (local, clones a voice)",
+      "kind": "vpipe-moss"
+    },
+    {
+      "id": "qwen3-clone",
+      "label": "Qwen3-TTS voice clone (local, MPS)",
+      "kind": "qwen3-clone",
+      "url": "http://127.0.0.1:8790"
+    },
+    {
+      "id": "plain-sherpa",
+      "label": "Plain sherpa-onnx voice (no cloning)",
+      "kind": "plain-sherpa",
+      "url": "http://127.0.0.1:3000"
+    }
+  ]
+}

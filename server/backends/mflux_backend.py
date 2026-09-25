@@ -41,6 +41,7 @@ from .base import (
     RunResult,
     ShotPaths,
 )
+from ..local_config import ensure_local_copy
 from .vpipe_backend import (
     ALL_RESOLUTIONS,
     SKETCH_STYLE_PREFIX,
@@ -172,21 +173,16 @@ class MfluxEngine:
 
 
 def load_engines(project_root: Path) -> list[MfluxEngine]:
-    """Read ``mflux-engines.json``, writing the defaults if it is absent."""
-    path = Path(project_root) / CONFIG_NAME
+    """Read this machine's ``mflux-engines.json``, first creating it from the
+    committed ``mflux-engines.example.json`` if it is absent."""
+    path = ensure_local_copy(project_root, CONFIG_NAME, {"engines": DEFAULT_ENGINES})
     entries: list[dict[str, Any]] = DEFAULT_ENGINES
-    if path.exists():
-        try:
-            doc = json.loads(path.read_text())
-            if isinstance(doc.get("engines"), list):
-                entries = doc["engines"]
-        except (OSError, json.JSONDecodeError):
-            pass
-    else:
-        try:
-            path.write_text(json.dumps({"engines": DEFAULT_ENGINES}, indent=2) + "\n")
-        except OSError:
-            pass
+    try:
+        doc = json.loads(path.read_text())
+        if isinstance(doc.get("engines"), list):
+            entries = doc["engines"]
+    except (OSError, json.JSONDecodeError):
+        pass
     return [MfluxEngine(e) for e in entries if isinstance(e, dict) and e.get("id")]
 
 
