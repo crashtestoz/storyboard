@@ -24,7 +24,7 @@ Routes
 ``POST /api/boards/<slug>/speak``   speak one Storyboard AD reply ``{text}``
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/render-batch``      render several projects in sequence ``{slugs}``
-``POST /api/stills``            start/end Krea-2 previews ``{slug, shotId}``
+``POST /api/stills``            one opening-frame preview still ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
 ``GET  /api/status``            live queue state (polled by the UI)
 ``POST /api/server-settings``   set the global projects folder ``{dataDir}``
@@ -354,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                         "overridden": bool(os.environ.get("SBV_SEARCH_URL", "").strip()),
                     },
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
+                    "mflux": (ctx.backend.mflux.describe()
+                              if getattr(ctx.backend, "mflux", None) else []),
                     "llm": {
                         "default": ctx.default_llm,
                         "services": [s.to_json() for s in ctx.llm_services().values()],
@@ -801,11 +803,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("slug and shotId are required")
             # A generic "the start of this shot" means nothing to a model
             # with no sense of time — asking the configured rewrite model to
-            # extract what the shot's own prompt actually says happens at
-            # each of the three points gives Create Stills something concrete
-            # to render instead of the same single moment three times. Best-
-            # effort: create_stills() falls back to a generic phase label per
-            # phase when this comes back empty (no service configured, or it
+            # describe what the shot's own prompt shows at its opening instant
+            # gives Create Stills something concrete to render. Best-effort:
+            # create_stills() falls back to a generic "start of this shot"
+            # hint when this comes back empty (no service configured, or it
             # errored) rather than blocking the button on it.
             board = ctx.store.load(slug)
             shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
@@ -823,7 +824,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/server-settings":
             payload = self._read_json() or {}
-            if "dataDir" not in payload and "searchUrl" not in payload:
+            if not {"dataDir", "searchUrl", "mfluxModel", "llmKey"} & set(payload):
                 raise ValueError("nothing to save")
             cfg = ctx.ui_root / SERVER_CONFIG_NAME
             doc: dict[str, Any] = {}
@@ -858,9 +859,50 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("searchUrl must start with http:// or https://")
                 doc["searchUrl"] = raw
                 result["searchUrl"] = raw
+            if "mfluxModel" in payload:
+                # {"engine": id, "model": repo or absolute folder, "" = automatic}
+                choice = payload.get("mfluxModel") or {}
+                engine_id = str(choice.get("engine") or "")
+                model = str(choice.get("model") or "").strip()
+                mflux = getattr(ctx.backend, "mflux", None)
+                if mflux is None or not mflux.valid_choice(engine_id, model):
+                    raise ValueError(
+                        "not a downloaded model for that engine (pick one from "
+                        "the list, or an absolute path to a model folder)"
+                    )
+                models = doc.get("mfluxModels")
+                models = models if isinstance(models, dict) else {}
+                if model:
+                    models[engine_id] = model
+                else:
+                    models.pop(engine_id, None)
+                doc["mfluxModels"] = models
+            if "llmKey" in payload:
+                # {"service": id, "key": "..."}; "" removes the saved key.
+                choice = payload.get("llmKey") or {}
+                sid = str(choice.get("service") or "")
+                key = str(choice.get("key") or "").strip()
+                svc = ctx.llm_services().get(sid)
+                if svc is None or not svc.supports_key:
+                    raise ValueError(f"no prompt-rewriting service {sid!r} takes an API key")
+                keys = doc.get("llmKeys")
+                keys = keys if isinstance(keys, dict) else {}
+                if key:
+                    keys[sid] = key
+                else:
+                    keys.pop(sid, None)
+                doc["llmKeys"] = keys
             tmp = cfg.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(doc, indent=2) + "\n")
+            # It can hold API keys now: readable by this user only.
+            os.chmod(tmp, 0o600)
             tmp.replace(cfg)
+            if "llmKey" in payload:
+                # Status only, read back after the write -- never the key.
+                result["llm"] = [s.to_json() for s in ctx.llm_services().values()]
+            if "mfluxModel" in payload:
+                # after the write: describe() reads the saved choice back
+                result["mflux"] = ctx.backend.mflux.describe()
             return self._send_json(result)
 
         if path == "/api/server-settings/restart":
@@ -1114,9 +1156,18 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return candidate
 
+    # The UI root is also the project root, beside server-config.json (which
+    # can hold API keys), llm-services.json and the server's own source, so
+    # only the page itself and its asset folders are served from it.
+    STATIC_DIRS = ("css", "js", "assets")
+
     def _serve_static(self, path: str) -> None:
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         target = self._resolve_within(self.ctx.ui_root, rel)
+        if target is not None:
+            inside = target.relative_to(self.ctx.ui_root).parts
+            if not (inside == ("index.html",) or (len(inside) > 1 and inside[0] in self.STATIC_DIRS)):
+                target = None
         if target is None or not target.is_file():
             return self._err(404, "not found")
         return self._send_file(target, cache=False)

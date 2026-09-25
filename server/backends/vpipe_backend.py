@@ -543,9 +543,12 @@ class VpipeBackend(Backend):
         seed = int(shot.get("seed") or 0)
 
         if draft:
-            width, height, steps = _draft_geometry(
+            width, height, draft_steps = _draft_geometry(
                 width, height, steps, cap.size_align
             )
+            # Create Stills sets _fixedSteps when the user chose a step count.
+            if not shot.get("_fixedSteps"):
+                steps = draft_steps
         # Full-size too: most of ASPECT_TABLE is a multiple of 32 already, but
         # 640x368 and 960x720 are not, and an un-snapped size costs the anchor.
         width = _align_up(width, cap.size_align)

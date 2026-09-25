@@ -87,6 +87,16 @@ const API = {
   // no restart needed. An empty string disables web search again.
   setSearchUrl: (searchUrl) => req("POST", "/api/server-settings", { searchUrl }),
 
+  // Which downloaded checkpoint an mflux still engine runs on this machine;
+  // model "" = automatic (a downloaded one, else mflux fetches the default).
+  // A prompt-rewriting service's API key, kept on this machine only; key ""
+  // removes it. The reply carries each service's key *status*, never a key.
+  setLlmKey: (service, key) =>
+    req("POST", "/api/server-settings", { llmKey: { service, key } }),
+
+  setMfluxModel: (engine, model) =>
+    req("POST", "/api/server-settings", { mfluxModel: { engine, model } }),
+
   addShot: (slug, patch) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots`, patch || {}),
 

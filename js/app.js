@@ -1363,6 +1363,12 @@ function wireChrome() {
   $("#btnDeleteBoard").addEventListener("click", deleteProject);
   $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
   $("#btnSaveSearchUrl").addEventListener("click", saveSearchUrl);
+  $("#btnSaveLlmKey").addEventListener("click", () => {
+    const key = $("#llmKeyInput").value.trim();
+    if (key) saveLlmKey(key);
+    else toast("Paste the API key first.", "warn");
+  });
+  $("#btnClearLlmKey").addEventListener("click", () => saveLlmKey(""));
 
   $("#settingsClose").addEventListener("click", () => {
     $("#settings").hidden = true;
@@ -1525,6 +1531,37 @@ function wireChrome() {
   $("#stillsEngine").addEventListener("change", (e) => {
     state.board.defaults.stillsEngine = e.target.value;
     markDirty();
+    render();
+  });
+
+  // Blank means automatic (steps) / random (seed): stored as 0.
+  const stillsNumber = (id, key, parse) => {
+    $(id).addEventListener("input", (e) => {
+      const v = e.target.value.trim();
+      state.board.defaults[key] = v === "" ? 0 : parse(v);
+      markDirty();
+    });
+    $(id).addEventListener("change", () => render());
+  };
+  stillsNumber("#stillsSteps", "stillsSteps", (v) => Math.min(50, Math.max(1, parseInt(v, 10) || 0)));
+  stillsNumber("#stillsSeed", "stillsSeed", (v) => Math.max(0, parseInt(v, 10) || 0));
+  $("#stillsSeedNote").addEventListener("click", (e) => {
+    const seed = e.target.dataset && e.target.dataset.seed;
+    if (!seed) return;
+    state.board.defaults.stillsSeed = Number(seed);
+    markDirty();
+    render();
+  });
+
+  // A machine setting, not a board one: saved server-side, never markDirty().
+  $("#stillsModel").addEventListener("change", async (e) => {
+    const sel = e.target;
+    try {
+      const r = await API.setMfluxModel(sel.dataset.engine, sel.value);
+      if (r.mflux && state.info) state.info.mflux = r.mflux;
+    } catch (err) {
+      toast(err.message, "error");
+    }
     render();
   });
 
@@ -1872,6 +1909,10 @@ function openSettings() {
   paintDataDir();
   paintSearchUrl();
   $("#settings").hidden = false;
+  // Downloads finish while the app is open, so re-read what mflux has cached.
+  API.info().then((i) => {
+    if (state.info) { state.info.mflux = i.mflux || []; render(); }
+  }).catch(() => {});
 }
 
 function paintDataDir() {
@@ -2047,6 +2088,35 @@ async function saveDataDirAndRestart() {
   } finally {
     btn.disabled = false;
     btn.textContent = was;
+  }
+}
+
+async function saveLlmKey(key) {
+  const service = $("#llmService").value;
+  const removing = key === "";
+  const btn = removing ? $("#btnClearLlmKey") : $("#btnSaveLlmKey");
+  btn.disabled = true;
+  try {
+    const r = await API.setLlmKey(service, key);
+    $("#llmKeyInput").value = "";
+    if (r.llm && state.info && state.info.llm) {
+      state.info.llm.services = r.llm;
+      // Health (and so each option's "unavailable" label) may have changed.
+      const sel = $("#llmService");
+      sel.textContent = "";
+      sel.dataset.built = "";
+    }
+    const now = (r.llm || []).find((s) => s.id === service);
+    toast(
+      removing ? "Saved key removed." :
+        now && !now.healthy ? `Key saved, but: ${now.message}` : "Key saved.",
+      now && !now.healthy && !removing ? "warn" : "info"
+    );
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+    render();
   }
 }
 
@@ -2620,11 +2690,83 @@ function renderRail() {
     const name = engineCapStill.label.split("—")[0].trim();
     stillsEngineNote.textContent = (stillsEngine === "auto" ? `Using ${name}. ` : "") +
       (engineCapStill.engine === "mflux"
-        ? "mflux downloads the model itself the first time it runs. Uses the shot's " +
-          "prompt, scene and cast descriptions; reference images are not used."
+        ? "Uses the shot's prompt, scene and cast descriptions; reference images " +
+          "are not used."
         : "Uses the shot's prompt, scene and cast, plus its Start Ref or a cast " +
           "portrait as an identity reference.");
     stillsEngineNote.className = "field-note";
+  }
+
+  // mflux model: what this Mac already has downloaded, and only when there is
+  // nothing does it fall back to letting mflux download the default.
+  const mfx = engineCapStill && engineCapStill.available && engineCapStill.engine === "mflux"
+    ? ((state.info && state.info.mflux) || []).find((e) => e.id === engineCapStill.id)
+    : null;
+  $("#stillsModelWrap").hidden = !mfx;
+  if (mfx) {
+    const gb = (b) => `${(b / 1e9).toFixed(1)} GB`;
+    const modelSel = $("#stillsModel");
+    const sig = [mfx.id, mfx.chosen, mfx.resolved.source, ...mfx.cached.map((c) => c.model)].join("|");
+    if (modelSel.dataset.sig !== sig) {
+      modelSel.textContent = "";
+      const auto = el("option", null, mfx.cached.length
+        ? "Automatic — use a downloaded model"
+        : `Download ${mfx.defaultModel} on first use`);
+      auto.value = "";
+      modelSel.appendChild(auto);
+      mfx.cached.forEach((c) => {
+        const o = el("option", null, `${c.model} — ${gb(c.sizeBytes)}, ` +
+          (c.quantization ? `${c.quantization}-bit` : "full precision"));
+        o.value = c.model;
+        modelSel.appendChild(o);
+      });
+      // A chosen local folder is not in the cache list; a chosen repo that is
+      // no longer downloaded is simply not offered (resolve() ignores it too).
+      if (mfx.resolved.source === "selected" && !mfx.cached.some((c) => c.model === mfx.chosen)) {
+        const o = el("option", null, mfx.chosen);
+        o.value = mfx.chosen;
+        modelSel.appendChild(o);
+      }
+      modelSel.dataset.sig = sig;
+    }
+    modelSel.dataset.engine = mfx.id;
+    modelSel.value = mfx.resolved.source === "selected" ? mfx.chosen : "";
+    const r = mfx.resolved;
+    const modelNote = $("#stillsModelNote");
+    if (r.source === "download") {
+      modelNote.textContent = `Nothing downloaded for this engine yet — mflux will ` +
+        `download ${r.model} the first time you create stills.`;
+      modelNote.className = "field-warn";
+    } else {
+      modelNote.textContent = `Using ${r.model}` +
+        (r.quantization ? ` (already ${r.quantization}-bit)` : " (full precision)") +
+        " — already downloaded, nothing to fetch.";
+      modelNote.className = "field-note";
+    }
+  }
+
+  // stills steps / seed — mirror orchestrator.still_params
+  const stillDefaults = state.board.defaults;
+  const paintInput = (id, v) => {
+    const inp = $(id);
+    if (document.activeElement !== inp) inp.value = v;
+  };
+  paintInput("#stillsSteps", stillDefaults.stillsSteps || "");
+  paintInput("#stillsSeed", stillDefaults.stillsSeed || "");
+  $("#stillsStepsNote").textContent = stillDefaults.stillsSteps
+    ? `${stillDefaults.stillsSteps} steps at both sizes. Turbo models look good at 4–8; more is slower and rarely better.`
+    : `Automatic: ${largeStills ? 8 : 4} steps at this size (4 at Small, 8 at Large).`;
+  const seedNote = $("#stillsSeedNote");
+  seedNote.textContent = stillDefaults.stillsSeed
+    ? "Same seed every time, so the same prompt gives the same stills."
+    : "A new random seed each time you press Create Stills.";
+  const lastStills = (selectedShot() || {}).stills || {};
+  const lastSeed = lastStills.start && lastStills.start.seed;
+  if (lastSeed && lastSeed !== stillDefaults.stillsSeed) {
+    const keep = el("button", "btn btn-ghost btn-sm", `Keep seed ${lastSeed}`);
+    keep.dataset.seed = lastSeed;
+    keep.title = "Fix the seed this shot's current stills were made with";
+    seedNote.append(" ", keep);
   }
 
   const ttsSel = $("#ttsEngine");
@@ -2680,6 +2822,35 @@ function renderRail() {
     ? "Rewrites are shown for approval before they replace anything."
     : "";
   llmNote.className = sv && !sv.healthy ? "field-warn" : "field-note";
+
+  // API key for the selected service: shown only for services that can take
+  // one, and only ever as where the key comes from, never the key.
+  $("#llmKeyWrap").hidden = !(sv && sv.supportsKey);
+  if (sv && sv.supportsKey) {
+    const keyInput = $("#llmKeyInput");
+    keyInput.placeholder = sv.keySource === "settings"
+      ? "A key is saved — paste a new one to replace it"
+      : "Paste the API key";
+    $("#btnClearLlmKey").hidden = sv.keySource !== "settings";
+    const keyNote = $("#llmKeyNote");
+    const envName = sv.keyEnv ? `$${sv.keyEnv}` : "";
+    keyNote.className = "field-note";
+    if (sv.keySource === "settings") {
+      keyNote.textContent = "Using the key saved on this Mac (server-config.json, readable only by you).";
+    } else if (sv.keySource === "env") {
+      keyNote.textContent = `Using ${envName} from the environment. A key saved here takes priority.`;
+    } else if (sv.keySource === "file") {
+      keyNote.textContent = "Using the apiKey written in llm-services.json, which is tracked in git — " +
+        "saving the key here instead is safer, and takes priority.";
+      keyNote.className = "field-warn";
+    } else if (sv.needsKey) {
+      keyNote.textContent = "This service needs a key" +
+        (envName ? ` — save one here, or set ${envName} before starting Storyboard.` : ".");
+      keyNote.className = "field-warn";
+    } else {
+      keyNote.textContent = "Optional — leave blank if this service doesn't need one.";
+    }
+  }
 
   const stepsInput = $("#defSteps");
   if (document.activeElement !== stepsInput) {
@@ -3854,7 +4025,7 @@ function renderEditor() {
   head.appendChild(one);
 
   const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Stills");
-  stillsBtn.title = "Fast previews of this shot's start and end (engine: Settings → Create Stills)";
+  stillsBtn.title = "A fast preview of this shot's opening frame (engine: Settings → Create Stills)";
   stillsBtn.disabled = !!(state.status && state.status.busy) || stillsBusy;
   stillsBtn.addEventListener("click", async () => {
     stillsBtn.disabled = true;
@@ -4743,8 +4914,10 @@ function paintStageTiles(raw, shot) {
 
 /* --- stills ---------------------------------------------------------------- */
 
-const STILL_PHASE_LABELS = { start: "Start", end: "End" };
-const STILL_PHASE_ORDER = ["start", "end"];
+// One still (the opening frame). Boards from before may also hold an "end"
+// still; it is simply not shown.
+const STILL_PHASE_LABELS = { start: "Opening frame" };
+const STILL_PHASE_ORDER = ["start"];
 
 /* A generic full-size viewer, built on demand rather than living in
    index.html, since nothing about it is specific to any one dialog. */
@@ -4773,21 +4946,14 @@ function renderStillsPane(raw) {
   const failedHere = !!(st && st.error && st.shotId === raw.id && !st.busy);
 
   if (runningHere) {
-    const i = Math.max(0, STILL_PHASE_ORDER.indexOf(st.phase));
-    wrap.appendChild(
-      el("div", "stills-status",
-         `Generating ${STILL_PHASE_LABELS[st.phase] || "…"} ` +
-         `(${Math.min(i + 1, STILL_PHASE_ORDER.length)} of ${STILL_PHASE_ORDER.length})…`)
-    );
+    wrap.appendChild(el("div", "stills-status", "Generating still…"));
   } else if (failedHere) {
     wrap.appendChild(el("div", "stills-status stills-error", `Stills failed: ${st.error}`));
   }
 
-  // While a job for this shot is running (or just failed partway through),
-  // state.status.stills.results — updated as each phase finishes — wins
-  // over the board's own copy, which is only refetched once the whole job
-  // ends. That is what lets "start" show up the moment it is done instead
-  // of waiting on "end" too.
+  // While a job for this shot is running (or just failed), the live
+  // state.status.stills.results wins over the board's own copy, which is
+  // only refetched once the job ends.
   const live = (runningHere || failedHere) && st.results ? st.results : null;
   const stills = live || raw.stills;
 
@@ -4795,8 +4961,8 @@ function renderStillsPane(raw) {
     if (!runningHere) {
       wrap.appendChild(
         el("div", "empty-state",
-           "No stills yet — “Create Stills” renders fast previews of " +
-           "this shot's start and end.")
+           "No still yet — “Create Stills” renders a fast preview of " +
+           "this shot's opening frame.")
       );
     }
     return wrap;

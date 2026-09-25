@@ -187,7 +187,7 @@ button, input, textarea, select {
   margin-bottom: var(--sp-1);
 }
 
-textarea, input[type="text"], input[type="number"], select {
+textarea, input[type="text"], input[type="number"], input[type="password"], select {
   width: 100%;
   background: var(--bg-sunken);
   border: 1px solid var(--border);
@@ -1022,7 +1022,7 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .stills-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: 1fr;
   gap: var(--sp-3);
 }
 .stills-cell { display: flex; flex-direction: column; gap: var(--sp-2); }
@@ -1069,9 +1069,6 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   letter-spacing: 0.04em;
 }
 
-@media (max-width: 640px) {
-  .stills-grid { grid-template-columns: 1fr; }
-}
 
 @media (max-width: 1180px) {
   .app {
