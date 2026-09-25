@@ -14,8 +14,7 @@ Only the Create Stills preview uses these engines. They are exposed as
 :class:`WithMfluxStills` routes those ids here while every other model
 still goes to the video backend.
 
-Text-to-image, plus img2img for Create Stills' chained mid/end phases.
-The identity-reference path (a Start Ref or cast portrait steering the
+Text-to-image only. The identity-reference path (a Start Ref or cast portrait steering the
 still) is vpipe Krea-2 only; here those references reach the model as
 their text description, through the same prompt vpipe builds.
 """
@@ -47,7 +46,6 @@ from .vpipe_backend import (
     SKETCH_STYLE_PREFIX,
     _align_up,
     _draft_geometry,
-    _ref_source,
     _resolved_prompt,
     _wh,
 )
@@ -88,6 +86,57 @@ FAILURE_PATTERNS = (
 )
 
 
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def hub_cache_dir() -> Path:
+    """Where huggingface_hub (and so mflux) caches repos."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _quantization(model_dir: Path) -> str:
+    """mflux stamps ``quantization_level`` into the safetensors metadata of a
+    model it saved quantized; a full-precision checkpoint has none."""
+    for f in sorted(model_dir.rglob("*.safetensors"))[:3]:
+        try:
+            with open(f, "rb") as fh:
+                n = int.from_bytes(fh.read(8), "little")
+                if n > 100_000_000:
+                    continue
+                meta = json.loads(fh.read(n)).get("__metadata__") or {}
+        except (OSError, ValueError):
+            continue
+        if meta.get("quantization_level"):
+            return str(meta["quantization_level"])
+    return ""
+
+
+def _snapshot(repo_dir: Path) -> Path | None:
+    """The newest snapshot of a cached repo, if it is completely downloaded."""
+    blobs = repo_dir / "blobs"
+    if blobs.is_dir() and any(blobs.glob("*.incomplete")):
+        return None
+    snaps = [p for p in (repo_dir / "snapshots").glob("*") if p.is_dir()]
+    snaps.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for snap in snaps:
+        if any(snap.rglob("*.safetensors")):
+            return snap
+    return None
+
+
+def _size_bytes(repo_dir: Path) -> int:
+    blobs = repo_dir / "blobs"
+    try:
+        return sum(f.stat().st_size for f in blobs.iterdir() if f.is_file())
+    except OSError:
+        return 0
+
+
 class MfluxEngine:
     def __init__(self, entry: dict[str, Any]):
         self.id = str(entry["id"])
@@ -98,6 +147,16 @@ class MfluxEngine:
         self.quantize = entry.get("quantize")
         self.steps = int(entry.get("steps") or 8)
         self.extra_args = [str(a) for a in entry.get("extraArgs") or []]
+        # Cached Hugging Face repos whose name contains any of these (letters
+        # and digits only, lowercased) are offered as this engine's model.
+        self.match = [_norm(m) for m in entry.get("match") or []] or [
+            _norm(self.base_model or self.model)
+        ]
+
+    @property
+    def family(self) -> str:
+        """``--base-model`` for a checkpoint that is not mflux's own alias."""
+        return self.base_model or ("" if "/" in self.model else self.model)
 
     def resolve_command(self) -> str | None:
         """The CLI's absolute path. ``uv tool install`` puts it in
@@ -135,12 +194,89 @@ class MfluxStills(Backend):
     id = "mflux"
     label = "mflux (still images)"
 
-    def __init__(self, engines: list[MfluxEngine]):
+    def __init__(self, engines: list[MfluxEngine], settings_path: Path | None = None):
         self.engines = {e.id: e for e in engines}
+        # Per-machine model choice ({"mfluxModels": {engine id: model}}),
+        # kept with the other machine-local settings, not in a board.
+        self.settings_path = settings_path
         self._proc: subprocess.Popen | None = None
 
     def handles(self, model_id: str | None) -> bool:
         return bool(model_id) and model_id in self.engines
+
+    # -- which checkpoint an engine runs ---------------------------------
+
+    def cached_models(self, engine: MfluxEngine) -> list[dict[str, Any]]:
+        """Completely downloaded Hugging Face repos this engine can run,
+        pre-quantized ones first (smaller, and no quantize pass at load)."""
+        found = []
+        root = hub_cache_dir()
+        try:
+            dirs = [d for d in root.iterdir() if d.name.startswith("models--")]
+        except OSError:
+            return []
+        for d in dirs:
+            repo = d.name[len("models--"):].replace("--", "/", 1)
+            if not any(m and m in _norm(repo) for m in engine.match):
+                continue
+            snap = _snapshot(d)
+            if snap is None:
+                continue
+            found.append({"model": repo, "sizeBytes": _size_bytes(d),
+                          "quantization": _quantization(snap)})
+        found.sort(key=lambda c: (not c["quantization"], c["model"].lower()))
+        return found
+
+    def _selected(self) -> dict[str, str]:
+        if not self.settings_path or not self.settings_path.exists():
+            return {}
+        try:
+            doc = json.loads(self.settings_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        sel = doc.get("mfluxModels")
+        return sel if isinstance(sel, dict) else {}
+
+    def valid_choice(self, engine_id: str, model: str) -> bool:
+        engine = self.engines.get(engine_id)
+        if engine is None:
+            return False
+        if not model:
+            return True
+        if model in {c["model"] for c in self.cached_models(engine)}:
+            return True
+        return Path(model).expanduser().is_absolute() and Path(model).expanduser().is_dir()
+
+    def resolve(self, engine: MfluxEngine) -> dict[str, Any]:
+        """The chosen model if it is still usable, else a downloaded one,
+        and only when nothing is downloaded the engine's default -- which
+        mflux fetches itself."""
+        cached = self.cached_models(engine)
+        by_name = {c["model"]: c for c in cached}
+        chosen = str(self._selected().get(engine.id) or "")
+        local = Path(chosen).expanduser() if chosen else None
+        if chosen and (chosen in by_name or (local and local.is_absolute() and local.is_dir())):
+            model, source = chosen, "selected"
+            quant = by_name[chosen]["quantization"] if chosen in by_name else _quantization(local)
+        elif cached:
+            model, source, quant = cached[0]["model"], "cached", cached[0]["quantization"]
+        else:
+            model, source, quant = engine.model, "download", ""
+        return {"model": model, "source": source, "quantization": quant,
+                "chosen": chosen}
+
+    def describe(self) -> list[dict[str, Any]]:
+        out = []
+        for e in self.engines.values():
+            r = self.resolve(e)
+            out.append({
+                "id": e.id,
+                "defaultModel": e.model,
+                "chosen": r["chosen"],
+                "resolved": {k: r[k] for k in ("model", "source", "quantization")},
+                "cached": self.cached_models(e),
+            })
+        return out
 
     def capabilities(self) -> list[ModelCapability]:
         caps = []
@@ -177,7 +313,9 @@ class MfluxStills(Backend):
         steps = int(shot.get("steps") or engine.steps)
         draft = bool(defaults.get("draft"))
         if draft:
-            width, height, steps = _draft_geometry(width, height, steps, MFLUX_SIZE_ALIGN)
+            width, height, draft_steps = _draft_geometry(width, height, steps, MFLUX_SIZE_ALIGN)
+            if not shot.get("_fixedSteps"):
+                steps = draft_steps
         width = _align_up(width, MFLUX_SIZE_ALIGN)
         height = _align_up(height, MFLUX_SIZE_ALIGN)
 
@@ -187,20 +325,20 @@ class MfluxStills(Backend):
             prompt = f"{SKETCH_STYLE_PREFIX} {prompt}"
 
         out = paths.abs_dir / "still.jpeg"
-        argv = [cmd, "--model", engine.model]
-        if engine.base_model:
+        picked = self.resolve(engine)
+        model = picked["model"]
+        argv = [cmd, "--model", model]
+        if model != engine.model and engine.family:
+            argv += ["--base-model", engine.family]
+        elif engine.base_model:
             argv += ["--base-model", engine.base_model]
-        if engine.quantize:
+        if engine.quantize and not picked["quantization"]:
             argv += ["--quantize", str(engine.quantize)]
         argv += ["--prompt", prompt, "--width", str(width), "--height", str(height),
                  "--steps", str(steps)]
         seed = int(shot.get("seed") or 0)
         if seed:
             argv += ["--seed", str(seed)]
-        chain_ref = _ref_source(shot.get("_chainRef"), paths)
-        if chain_ref:
-            strength = float(shot.get("imgStrength") or 0.6)
-            argv += ["--image", chain_ref, str(strength)]
         argv += engine.extra_args
 
         return JobSpec(
@@ -208,7 +346,7 @@ class MfluxStills(Backend):
             expected_outputs=[out],
             payload={"engine": "mflux", "argv": argv, "cwd": str(paths.abs_dir),
                      "model": engine.id, "output": str(out)},
-            summary=f"{engine.label} · {width}x{height} · {steps} steps"
+            summary=f"{engine.label} · {model} · {width}x{height} · {steps} steps"
                     + (" · DRAFT" if draft else ""),
         )
 

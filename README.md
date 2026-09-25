@@ -89,7 +89,7 @@ Minimum versions:
 | lsof | `./start.sh --restart` | Used to find the process listening on the selected port. |
 | Ollama or OpenAI-compatible LLM service | Prompt rewrite and character-description AI buttons | Optional; configured in `llm-services.json`. |
 | TTS service or MOSS models | Spoken dialogue | Optional; configured in `tts-services.json`. |
-| mflux | Create Stills without vpipe's Krea-2 (Z-Image Turbo or Krea-2 via MLX) | Optional; `uv tool install mflux`. Engines are configured in `mflux-engines.json` and picked under **Settings → Create Stills → Engine**. mflux downloads each model itself on first use. |
+| mflux | Create Stills without vpipe's Krea-2 (Z-Image Turbo or Krea-2 via MLX) | Optional; `uv tool install mflux`. Engines are configured in `mflux-engines.json` and picked under **Settings → Create Stills → Engine**. Its **Model** list shows the matching models already in your Hugging Face cache (the choice is saved per machine in `server-config.json`); only when none is downloaded does mflux fetch the engine's default itself. |
 | Node.js | Browser/JS regression tests only | Not needed to run the app. |
 
 There is deliberately no `pip install -r requirements.txt` and no
@@ -264,8 +264,21 @@ a Qwen-style voice-clone service, or a plain HTTP TTS service. Edit
 description services such as Ollama or an OpenAI-compatible
 `/v1/chat/completions` server.
 
-For services needing an API key, use `apiKeyEnv` in the config and keep the
-secret in the named environment variable.
+API keys are optional: a prompt-rewriting service (Ollama or
+OpenAI-compatible) is called with no key unless one is set, so local
+services need nothing. For one that does need a key, either paste it in
+**Settings → Prompt rewriting → API key** — saved on that machine only, in the
+gitignored `server-config.json` (readable by your user only) and never sent
+back to the browser — or name an environment variable with `apiKeyEnv` in the
+service's entry. Add `"requiresKey": true` (implied by `apiKeyEnv`) so the
+service reports "needs an API key" up front instead of failing on first use.
+When several are set, the Settings key wins, then the environment variable,
+then an inline `apiKey` (avoid that one: the file is tracked in git).
+
+```json
+{ "id": "my-cloud-llm", "label": "Cloud LLM", "kind": "openai",
+  "url": "https://api.example.com", "model": "some-model", "requiresKey": true }
+```
 
 ## Running it
 
@@ -335,7 +348,10 @@ they contain ships with the repo — the versions here use `127.0.0.1`
 placeholders on purpose. Point them at your own services after cloning
 rather than committing a real hostname or IP back into them.
 `server-config.json` is created by the app and gitignored, so your data-dir
-choice never gets committed at all.
+choice, per-machine model choices and any API keys saved in Settings never
+get committed at all. The server only serves `index.html` and the `css/`,
+`js/` and `assets/` folders, so none of these config files can be downloaded
+from it either.
 
 ## Where things live
 

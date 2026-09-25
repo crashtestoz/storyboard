@@ -312,6 +312,15 @@
           <select id="llmService"></select>
           <div class="field-note" id="llmNote"></div>
         </div>
+        <div class="field" id="llmKeyWrap" hidden>
+          <label>API key <span class="hint-inline">this Mac only</span></label>
+          <input type="password" id="llmKeyInput" autocomplete="off" spellcheck="false">
+          <div class="rename-row" style="margin-top:var(--sp-2)">
+            <button class="btn btn-sm" id="btnSaveLlmKey">Save key</button>
+            <button class="btn btn-ghost btn-sm" id="btnClearLlmKey">Remove saved key</button>
+          </div>
+          <div class="field-note" id="llmKeyNote"></div>
+        </div>
         </section>
 
         <section>
@@ -336,7 +345,7 @@
         <section>
         <div class="section-label">
           Create Stills
-          <span class="hint">— the start/mid/end preview button</span>
+          <span class="hint">— a one-image preview of the shot's opening frame</span>
         </div>
         <div class="field">
           <label>Size</label>
@@ -351,6 +360,23 @@
           <select id="stillsEngine"></select>
         </div>
         <div class="field-note" id="stillsEngineNote"></div>
+        <div id="stillsModelWrap" hidden>
+          <div class="field">
+            <label>Model <span class="hint-inline">— this Mac only</span></label>
+            <select id="stillsModel"></select>
+          </div>
+          <div class="field-note" id="stillsModelNote"></div>
+        </div>
+        <div class="field">
+          <label>Steps <span class="hint-inline">blank = automatic</span></label>
+          <input type="number" id="stillsSteps" min="1" max="50" step="1" placeholder="Auto">
+        </div>
+        <div class="field-note" id="stillsStepsNote"></div>
+        <div class="field">
+          <label>Seed <span class="hint-inline">blank = random each time</span></label>
+          <input type="number" id="stillsSeed" min="1" step="1" placeholder="Random">
+        </div>
+        <div class="field-note" id="stillsSeedNote"></div>
         </section>
 
         <section>

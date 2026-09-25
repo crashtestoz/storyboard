@@ -27,6 +27,7 @@ Responsibilities, in order of how much they matter:
 from __future__ import annotations
 
 import hashlib
+import random
 import threading
 import time
 import shutil
@@ -115,7 +116,7 @@ class Orchestrator:
         # has not finished the job.
         self._assembly: dict[str, Any] | None = None
 
-        # "Create Stills" — a separate, much shorter job (two stills, not a
+        # "Create Stills" — a separate, much shorter job (one still, not a
         # shot render), but it still shares the one GPU the renders use, so
         # it gets its own thread and its own small piece of status rather than
         # reusing _runs/_order, which are shaped around a whole render batch.
@@ -125,9 +126,7 @@ class Orchestrator:
         self._stills_progress: float = 0.0
         self._stills_error: str = ""
         self._stills_log: list[dict[str, str]] = []
-        # Filled in as each phase finishes, not just at the end — so the UI
-        # can show "start" the moment it is done instead of waiting on "end"
-        # too.
+        # Filled in as the still finishes, before the job wraps up.
         self._stills_results: dict[str, Any] = {}
 
         # Batch Render — render several projects back to back, each with
@@ -445,19 +444,15 @@ class Orchestrator:
         return self.status()
 
     # ------------------------------------------------------------------ #
-    # stills ("Create Stills" — start/mid/end previews, not a shot render)
+    # stills ("Create Stills" — a single preview image, not a shot render)
     # ------------------------------------------------------------------ #
 
-    # Order matters here: it is also the order shown in the UI. Used to be
-    # three phases (start/mid/end), but the middle still's img2img
-    # continuation from "start" was not producing a usable image, so it was
-    # dropped rather than kept as a broken, redundant third of every run —
-    # "end" now chains directly off "start" instead.
+    # One still: the opening composition, which is also the frame most useful
+    # fed back in as a Start frame. (It used to be start/mid/end, then
+    # start/end chained by img2img; a single preview is all that is needed.)
     STILL_PHASES = (
         ("start", "The very start of this shot, before the described action "
                   "gets underway — the opening pose and composition"),
-        ("end", "The very end of this shot, the instant the described "
-                "action finishes — the closing pose and composition"),
     )
 
     def create_stills(
@@ -540,7 +535,7 @@ class Orchestrator:
             }
 
             still_model = self._still_model(board)
-            prev_still: Path | None = None
+            steps, seed = still_params(board.get("defaults") or {}, large)
             for i, (key, phase_hint) in enumerate(self.STILL_PHASES):
                 if self._cancel.is_set():
                     raise RuntimeError("stopped before completion")
@@ -554,7 +549,11 @@ class Orchestrator:
                 # cast and any style refs still come from _resolved_prompt.
                 still_shot = dict(shot)
                 still_shot["model"] = still_model
-                still_shot["steps"] = 8 if large else 4
+                still_shot["steps"] = steps
+                # An explicit step count survives the draft geometry that
+                # Small otherwise applies (which caps steps at 4).
+                still_shot["_fixedSteps"] = True
+                still_shot["seed"] = seed
                 # An LLM-extracted description of what THIS shot's own prompt
                 # actually establishes at this point in the action (see
                 # llm.describe_still_phases) beats a generic phase label —
@@ -566,19 +565,6 @@ class Orchestrator:
                 still_shot["prompt"] = (
                     extracted or f"{phase_hint}. {shot.get('prompt') or ''}".strip()
                 )
-                if prev_still is not None:
-                    # Build each later still from the one before it — plain
-                    # img2img continuation, a separate field from startRef
-                    # (see prepare()'s krea2-still branch) so it never gets
-                    # confused with a real anchor/identity reference, which
-                    # uses a different mechanism (the identity-edit LoRA).
-                    # Moderate strength: enough freedom to move toward this
-                    # phase's prompt, not enough to redesign the subject.
-                    # The *first* still keeps dict(shot)'s own startRef and
-                    # characterIds untouched — those drive the identity-edit
-                    # path instead (see prepare()).
-                    still_shot["_chainRef"] = str(prev_still)
-                    still_shot["imgStrength"] = 0.55
                 paths = ShotPaths(
                     workspace=self.workspace,
                     abs_dir=self.data_dir / base_rel / key,
@@ -606,13 +592,10 @@ class Orchestrator:
                 out = next((p for p in spec.expected_outputs if p.exists()), None)
                 if out is None:
                     raise RuntimeError(f"{key} still did not produce an image")
-                results[key] = {"url": self._as_url(out)}
-                prev_still = out
+                results[key] = {"url": self._as_url(out), "seed": seed, "steps": steps}
 
-                # Save and publish this phase's result now, not just at the
-                # end — so "start" shows up the moment it is done instead of
-                # waiting on "end" too, and so a cancel or crash
-                # partway through still leaves whatever finished in place.
+                # Save and publish the result as soon as it exists, so a
+                # cancel or crash afterwards still leaves it in place.
                 with self._lock:
                     self._stills_results = dict(results)
                 fresh_board, fresh_shot = self._reload_shot(slug, shot_id)
@@ -1154,6 +1137,30 @@ class Orchestrator:
                         shot.update(status="interrupted", reason=run.reason)
         if board:
             self.store.save(self._slug, board)
+
+
+STILLS_MAX_STEPS = 50
+
+
+def still_params(defaults: dict, large: bool) -> tuple[int, int]:
+    """(steps, seed) for one Create Stills run.
+
+    Steps 0 means automatic: 4 at Small, 8 at Large. Seed 0 means a fresh
+    random one per run -- chosen here, not left to the engine, because vpipe
+    treats 0 as a real seed while mflux treats "no seed" as random, and the
+    seed actually used is recorded with the stills either way.
+    """
+    def num(key: str, cast, default):
+        try:
+            return cast(defaults.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    steps = num("stillsSteps", int, 0)
+    steps = min(max(steps, 1), STILLS_MAX_STEPS) if steps > 0 else (8 if large else 4)
+    seed = num("stillsSeed", int, 0)
+    seed = seed if 0 < seed < 2**31 else random.randint(1, 2**31 - 1)
+    return steps, seed
 
 
 def _any_output(shots: list[dict]) -> bool:

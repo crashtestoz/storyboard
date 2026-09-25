@@ -30,4 +30,6 @@ def build_backend(kind: str, *, vpipe_binary: Path, workspace: Path,
         raise ValueError(f"unknown backend: {kind!r} (expected one of {BACKEND_IDS})")
     if project_root is None:
         return inner
-    return WithMfluxStills(inner, MfluxStills(load_mflux_engines(project_root)))
+    mflux = MfluxStills(load_mflux_engines(project_root),
+                        settings_path=Path(project_root) / "server-config.json")
+    return WithMfluxStills(inner, mflux)

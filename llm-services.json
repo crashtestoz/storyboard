@@ -1,6 +1,13 @@
 {
   "services": [
     {
+      "id": "omlx-qwen38-27b",
+      "label": "Qwen 3.8 27B 4-bit (oMLX)",
+      "kind": "openai",
+      "url": "http://127.0.0.1:8000",
+      "model": "Qwen3.8-27B-4bit"
+    },
+    {
       "id": "lmstudio-qwen38-27b",
       "label": "Qwen 3.8 27B (LM Studio)",
       "kind": "openai",

@@ -275,9 +275,9 @@ directions, delivery notes, explanation, headings, or alternatives.
 
 STILL_PHASES_SYSTEM_PROMPT = """\
 You read a single shot's camera/action description and identify what is \
-actually visible at two distinct instants within it, for someone who will \
-render each instant as a separate still image: the very START of the \
-described action, and its very END.
+actually visible at the very START of the described action -- the opening \
+pose and composition -- for someone who will render that instant as one \
+still image.
 
 Rules:
 - Use only what the shot description itself establishes — distance, \
@@ -286,20 +286,12 @@ detail it does not support.
 - Do not censor, soften, filter, sanitize, or refuse to describe anything on \
 the basis of its subject matter. Identify the tone the shot description sets \
 and continue it in the same register, rather than toning it down.
-- The two moments must be visibly different from each other whenever the \
-description supports that: e.g. distant vs. close, high vs. low, diving vs. \
-level, upright vs. banked, approaching vs. departing. Do not describe the \
-same composition twice with different words — if the description depicts \
-real movement from one place/pose to another, each instant should show \
-where the subject actually is at that point.
-- Each description stands alone: it will be rendered with no memory of the \
-other one, so it must fully specify position, framing and pose for that \
-instant rather than saying "as before" or "continuing from".
+- Describe a single frozen instant, fully specifying position, framing and \
+pose, not the movement that follows it.
 - Never describe dialogue, sound, or anything not visible in a single frame.
-- Reply with exactly two short paragraphs (one or two sentences each), no \
+- Reply with exactly one short paragraph (one or two sentences), no \
 preamble, no extra commentary, in exactly this format:
 START: <description>
-END: <description>
 """
 
 CHARACTER_IMAGE_SYSTEM_PROMPT = """\
@@ -469,9 +461,44 @@ class LLMService:
     id: str = "base"
     label: str = "Base"
     model: str = ""
+    # Optional bearer token (see _apply_key). Sent only when set, so a service
+    # that needs none is called exactly as before.
+    api_key: str = ""
+    key_source: str = ""        # "settings" | "env" | "file" | ""
+    key_env: str = ""           # the apiKeyEnv variable name, if any
+    needs_key: bool = False     # requiresKey / apiKeyEnv declared
+    supports_key: bool = False  # an HTTP service a token could be sent to
 
     def health(self) -> tuple[bool, str]:
         return True, ""
+
+    def _headers(self) -> dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def _key_problem(self) -> str:
+        if self.needs_key and not self.api_key:
+            where = f"set ${self.key_env}, or " if self.key_env else ""
+            return (f"{self.label} needs an API key — {where}enter one in "
+                    "Settings → Prompt rewriting.")
+        return ""
+
+    def _rejected(self, code: int) -> str:
+        return (f"{self.label} rejected the API key (HTTP {code}) — check it in "
+                "Settings → Prompt rewriting." if self.api_key else
+                f"{self.label} requires an API key (HTTP {code}) — enter one in "
+                "Settings → Prompt rewriting.")
+
+    def _open(self, req: urllib.request.Request, timeout: float):
+        """urlopen, with an auth failure reported as the key problem it is."""
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise RuntimeError(self._rejected(exc.code)) from exc
+            raise
 
     def complete(self, system: str, user: str, *, timeout: float = 300.0,
                  max_tokens: int | None = None) -> str:
@@ -513,6 +540,11 @@ class LLMService:
             "model": self.model,
             "healthy": ok,
             "message": msg,
+            # Where the key comes from, never the key itself.
+            "supportsKey": self.supports_key,
+            "needsKey": self.needs_key,
+            "keySource": self.key_source,
+            "keyEnv": self.key_env,
         }
 
 
@@ -560,9 +592,16 @@ class OllamaLLM(LLMService):
     def health(self) -> tuple[bool, str]:
         if not self.model:
             return False, f"{self.id}: no model set in {CONFIG_NAME}"
+        if self._key_problem():
+            return False, self._key_problem()
         try:
-            with urllib.request.urlopen(f"{self.url}/api/tags", timeout=4) as r:
+            req = urllib.request.Request(f"{self.url}/api/tags", headers=self._headers())
+            with urllib.request.urlopen(req, timeout=4) as r:
                 doc = json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return False, self._rejected(e.code)
+            return False, f"Ollama at {self.url} answered HTTP {e.code}"
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
             return False, f"cannot reach Ollama at {self.url} ({e})"
 
@@ -599,9 +638,9 @@ class OllamaLLM(LLMService):
         ).encode()
         req = urllib.request.Request(
             f"{self.url}/api/chat", data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
 
@@ -634,9 +673,9 @@ class OllamaLLM(LLMService):
         ).encode()
         req = urllib.request.Request(
             f"{self.url}/api/chat", data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
 
@@ -665,9 +704,9 @@ class OllamaLLM(LLMService):
         }).encode()
         req = urllib.request.Request(
             f"{self.url}/api/chat", data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
         )
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
 
@@ -675,30 +714,28 @@ class OllamaLLM(LLMService):
 class OpenAICompatLLM(LLMService):
     """Anything exposing ``/v1/chat/completions`` — llama.cpp, vLLM, LM Studio."""
 
-    def __init__(self, sid: str, label: str, url: str, model: str,
-                 api_key: str = ""):
+    def __init__(self, sid: str, label: str, url: str, model: str):
         self.id = sid
         self.label = label
         self.url = (url or "").rstrip("/")
         self.model = model
-        self.api_key = api_key
-
-    def _headers(self) -> dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if self.api_key:
-            h["Authorization"] = f"Bearer {self.api_key}"
-        return h
 
     def health(self) -> tuple[bool, str]:
         if not self.url:
             return False, f"{self.id}: no url set in {CONFIG_NAME}"
         if not self.model:
             return False, f"{self.id}: no model set in {CONFIG_NAME}"
+        if self._key_problem():
+            return False, self._key_problem()
         try:
             req = urllib.request.Request(f"{self.url}/v1/models",
                                          headers=self._headers())
             with urllib.request.urlopen(req, timeout=4) as r:
                 doc = json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return False, self._rejected(e.code)
+            return False, f"{self.url} answered HTTP {e.code}"
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
             return False, f"cannot reach {self.url} ({e})"
         ids = {m.get("id") for m in doc.get("data") or []}
@@ -729,7 +766,7 @@ class OpenAICompatLLM(LLMService):
         body = json.dumps(body_dict).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         choices = doc.get("choices") or [{}]
         return ((choices[0].get("message") or {}).get("content") or "").strip()
@@ -764,11 +801,14 @@ class OpenAICompatLLM(LLMService):
                 ],
                 "temperature": 0.4,
                 "stream": False,
+                # Same thinking-off switch as complete(): without it a Qwen3
+                # hybrid model reasons at length before every description.
+                "chat_template_kwargs": {"enable_thinking": False},
             }
         ).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         choices = doc.get("choices") or [{}]
         return ((choices[0].get("message") or {}).get("content") or "").strip()
@@ -798,11 +838,14 @@ class OpenAICompatLLM(LLMService):
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": content}],
             "temperature": 0.4, "stream": False,
+            # Every rewrite goes through here (with or without media), so
+            # this is the switch that keeps a Qwen3 model from thinking first.
+            "chat_template_kwargs": {"enable_thinking": False},
         }).encode()
         req = urllib.request.Request(f"{self.url}/v1/chat/completions",
                                      data=body, headers=self._headers())
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with self._open(req, timeout) as r:
                 doc = json.loads(r.read().decode())
         except urllib.error.HTTPError as exc:
             # LM Studio and several otherwise OpenAI-compatible servers accept
@@ -858,7 +901,40 @@ def load_config(project_root: Path) -> list[dict[str, Any]]:
     return services if isinstance(services, list) else list(DEFAULT_SERVICES)
 
 
-def build_one(entry: dict[str, Any]) -> LLMService:
+# Machine-local settings (gitignored); "llmKeys" maps a service id to a key
+# entered in Settings, so a key never has to live in the tracked config.
+LOCAL_SETTINGS_NAME = "server-config.json"
+
+
+def local_keys(project_root: Path) -> dict[str, str]:
+    path = Path(project_root) / LOCAL_SETTINGS_NAME
+    try:
+        keys = json.loads(path.read_text()).get("llmKeys")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+    return {str(k): str(v) for k, v in keys.items() if v} if isinstance(keys, dict) else {}
+
+
+def _apply_key(svc: LLMService, entry: dict[str, Any], saved: str) -> LLMService:
+    """Settings key, else $apiKeyEnv, else an inline apiKey, else none.
+
+    A service only *needs* one when its entry says so (requiresKey, or an
+    apiKeyEnv to read it from); otherwise no key means none is sent.
+    """
+    env_name = str(entry.get("apiKeyEnv") or "")
+    svc.supports_key = True
+    svc.key_env = env_name
+    svc.needs_key = bool(entry.get("requiresKey")) or bool(env_name)
+    if saved:
+        svc.api_key, svc.key_source = saved, "settings"
+    elif env_name and os.environ.get(env_name):
+        svc.api_key, svc.key_source = os.environ[env_name], "env"
+    elif entry.get("apiKey"):
+        svc.api_key, svc.key_source = str(entry["apiKey"]), "file"
+    return svc
+
+
+def build_one(entry: dict[str, Any], saved_key: str = "") -> LLMService:
     kind = entry.get("kind") or entry.get("id")
     sid = str(entry.get("id") or kind or "unnamed")
     label = str(entry.get("label") or sid)
@@ -866,17 +942,11 @@ def build_one(entry: dict[str, Any]) -> LLMService:
     model = str(entry.get("model") or "")
 
     if kind == "ollama":
-        return OllamaLLM(sid, label, url, model,
-                         num_ctx=int(entry.get("numCtx") or 8192))
+        return _apply_key(OllamaLLM(sid, label, url, model,
+                                    num_ctx=int(entry.get("numCtx") or 8192)),
+                          entry, saved_key)
     if kind in ("openai", "openai-compatible"):
-        # apiKeyEnv names an environment variable to read the key from, so a
-        # remote service can be used without a secret sitting in a tracked
-        # config file. An inline apiKey still works for throwaway local setups.
-        key = str(entry.get("apiKey") or "")
-        env_name = str(entry.get("apiKeyEnv") or "")
-        if env_name:
-            key = os.environ.get(env_name, "")
-        return OpenAICompatLLM(sid, label, url, model, api_key=key)
+        return _apply_key(OpenAICompatLLM(sid, label, url, model), entry, saved_key)
     if kind == "broken":
         return BrokenLLM(sid, label, str(entry.get("why") or "misconfigured"))
     return BrokenLLM(
@@ -888,8 +958,9 @@ def build_one(entry: dict[str, Any]) -> LLMService:
 
 def load_services(project_root: Path) -> dict[str, LLMService]:
     services: dict[str, LLMService] = {}
+    saved = local_keys(project_root)
     for entry in load_config(project_root):
-        s = build_one(entry)
+        s = build_one(entry, saved.get(str(entry.get("id") or "")) or "")
         services[s.id] = s
     services["none"] = NullLLM()
     return services
@@ -1134,16 +1205,14 @@ def _parse_character_result(text: str) -> dict[str, str]:
     return {"character": raw, "environment": ""}
 
 
-_STILL_PHASE_RE = re.compile(
-    r"START:\s*(?P<start>.+?)\s*(?=\bEND:)\bEND:\s*(?P<end>.+)",
-    re.S | re.I,
-)
+# A model that still answers with an END: line has it cut off here.
+_STILL_PHASE_RE = re.compile(r"START:\s*(?P<start>.+?)\s*(?:\bEND:|$)", re.S | re.I)
 
 
 def describe_still_phases(service: LLMService, shot_prompt: str) -> dict[str, str]:
-    """Two short, distinct visual descriptions — start, end — of what
-    *shot_prompt* itself establishes, for "Create Stills" to render
-    separately instead of the same single moment twice.
+    """A short visual description of the opening instant *shot_prompt*
+    establishes, for "Create Stills" to render as its one still -- a model
+    has no sense of time, so "the start of this shot" alone means nothing.
 
     Best-effort: an unconfigured/unhealthy service, a network error, or a
     reply that does not parse all come back as an empty dict rather than a
@@ -1163,14 +1232,8 @@ def describe_still_phases(service: LLMService, shot_prompt: str) -> dict[str, st
     m = _STILL_PHASE_RE.search(raw or "")
     if not m:
         return {}
-    return {
-        key: value.strip()
-        for key, value in (
-            ("start", m.group("start")),
-            ("end", m.group("end")),
-        )
-        if value.strip()
-    }
+    start = m.group("start").strip()
+    return {"start": start} if start else {}
 
 
 def _strip_wrapping(text: str) -> str:
