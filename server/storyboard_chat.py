@@ -342,6 +342,51 @@ def compact_board_context(
     }
 
 
+def _chat_reference_images(
+    board: dict[str, Any], selected_id: str | None, data_dir: Path | None,
+) -> tuple[list[Path], list[str]]:
+    """Resolve the focused shot's visual references for multimodal chat."""
+    if data_dir is None:
+        return [], []
+    shots = board.get("shots") or []
+    shot = next((s for s in shots if s.get("id") == selected_id), None)
+    if shot is None and len(shots) == 1:
+        shot = shots[0]
+    refs: list[tuple[str, Any]] = []
+    if shot:
+        refs.extend((label, ref) for label, ref in (
+            ("Shot start frame", shot.get("startRef")),
+            ("Shot end frame", shot.get("endRef")),
+        ) if ref)
+        refs.extend((f"Shot reference {i}", ref) for i, ref in enumerate(
+            shot.get("referenceImages") or [], 1))
+        wanted = set(shot.get("characterIds") or [])
+        refs.extend((f"Character portrait: {c.get('name') or 'unnamed'}", c.get("image"))
+                    for c in board.get("characters") or []
+                    if c.get("id") in wanted and c.get("image"))
+    refs.extend((f"Project style reference {i}", ref) for i, ref in enumerate(
+        board.get("styleRefs") or [], 1))
+    files: list[Path] = []
+    labels: list[str] = []
+    root = data_dir.resolve()
+    for label, ref in refs:
+        value = ref.get("path") if isinstance(ref, dict) else ref
+        if not isinstance(value, str) or not value.strip():
+            continue
+        target = (root / value.lstrip("/\\")).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        if target.is_file() and target.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            files.append(target)
+            tag = ref.get("tag") if isinstance(ref, dict) else None
+            labels.append(f"{label}{f' ({tag})' if tag else ''}")
+            if len(files) >= 9:
+                break
+    return files, labels
+
+
 def _clean_fields(value: Any, allowed: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -480,6 +525,7 @@ def chat(
     history: list[dict[str, Any]] | None = None,
     selected_id: str | None = None,
     search_url: str = "",
+    data_dir: Path | None = None,
 ) -> dict[str, Any]:
     message = (message or "").strip()
     if not message:
@@ -493,18 +539,31 @@ def chat(
         content = turn.get("content") if isinstance(turn, dict) else None
         if role in ("user", "assistant") and isinstance(content, str):
             recent.append({"role": role, "content": content[:4000]})
+    images, image_labels = _chat_reference_images(board, selected_id, data_dir)
+    visual_context = ""
+    if image_labels:
+        visual_context = (
+            "\n\nATTACHED SCENE REFERENCE IMAGES (inspect their visual contents and use "
+            "them as context for the user's request):\n" + "\n".join(
+                f"- Image {i}: {label}" for i, label in enumerate(image_labels, 1)
+            )
+        )
     user = (
         "CURRENT STORYBOARD (compact JSON):\n"
         + json.dumps(compact_board_context(board, selected_id), ensure_ascii=False, separators=(",", ":"))
+        + visual_context
         + "\n\nRECENT CONVERSATION:\n"
         + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
         + "\n\nUSER:\n" + message
     )
     search_url = (search_url or "").strip()
     system = CHAT_SYSTEM_PROMPT + ("\n" + SEARCH_CAPABILITY_PROMPT if search_url else "")
-    parsed = _parse_reply(
-        service.complete(system, user, timeout=300.0, max_tokens=CHAT_MAX_TOKENS)
-    )
+    complete = (lambda prompt: service.complete_with_media(
+        system, prompt, images=images, timeout=300.0
+    )) if images else (lambda prompt: service.complete(
+        system, prompt, timeout=300.0, max_tokens=CHAT_MAX_TOKENS
+    ))
+    parsed = _parse_reply(complete(user))
     query = parsed.get("search") if search_url else ""
     if query:
         results = web_search(search_url, query)
@@ -514,10 +573,7 @@ def chat(
             + "\n\nAnswer the user now using these results if they help; say "
               "so plainly if they don't. Do not request another search."
         )
-        parsed = _parse_reply(
-            service.complete(system, followup, timeout=300.0,
-                              max_tokens=CHAT_MAX_TOKENS)
-        )
+        parsed = _parse_reply(complete(followup))
     actions = validate_actions(parsed.get("actions"), board)
     actions, render_removed = _separate_render_from_edits(actions)
     response_message = parsed["message"] or "I prepared the requested storyboard changes."
