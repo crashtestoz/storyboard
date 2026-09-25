@@ -722,6 +722,7 @@ class Handler(BaseHTTPRequestHandler):
                 history=payload.get("history") or [],
                 selected_id=payload.get("selectedShotId"),
                 search_url=ctx.search_url(),
+                data_dir=ctx.data_dir,
             ))
 
         if path == "/api/describe-character":

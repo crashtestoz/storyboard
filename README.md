@@ -601,7 +601,10 @@ this tracked file.
 The **Storyboard AD** handle on the right edge opens a chat with that same selected
 prompt-rewriting model. It receives a compact authoring snapshot of the open
 board—scene, cast, shot prompts, dialogue, timing, reference presence, and the
-focused shot—while render outputs and logs are left out to save context. It can
+focused shot—while render outputs and logs are left out to save context. When a
+shot is focused, its start/end frames, shot references, relevant cast portraits,
+and project style references are also attached to the request (up to nine
+images), so a configured vision model can inspect what they depict. It can
 review the board or propose scene, cast, and shot changes using the authoring
 part of Storyboard's MCP vocabulary. Proposed edits are never silent: they are
 shown as an Apply/Discard card, and only **Apply changes** saves them to the

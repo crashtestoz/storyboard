@@ -566,12 +566,26 @@ class VpipeBackend(Backend):
             #    shown to Krea-2 at all, only described in words, which
             #    "Create Stills" showed is not enough on its own.
             #
+            # A Start Ref of kind "chain" is excluded from this, though: that's
+            # an auto-continuation from whatever the previous shot happened to
+            # end on, not a reference anyone chose for this shot's own subject.
+            # The identity-edit LoRA doesn't just softly nudge composition —
+            # per _still_spec's own docstring, it grounds the prompt in what
+            # the reference actually shows, so pointing it at an unrelated
+            # inherited frame (e.g. the prior live-action shot's last frame,
+            # for a shot that is actually a title card) overrides this shot's
+            # own prompt instead of anchoring it. A manually chosen Start Ref
+            # is exactly the kind of deliberate per-shot reference this path
+            # is for, so only the auto-chained kind is skipped here.
+            #
             # Krea-2 takes exactly one reference either way, so only the
             # first candidate found is used, never a blend of several.
             chain_ref_path = _ref_source(shot.get("_chainRef"), paths)
             identity_ref_path = None
             if not chain_ref_path:
-                identity_ref_path = _ref_source(shot.get("startRef"), paths)
+                start_ref = shot.get("startRef")
+                if not (isinstance(start_ref, dict) and start_ref.get("kind") == "chain"):
+                    identity_ref_path = _ref_source(start_ref, paths)
                 if not identity_ref_path:
                     wanted = set(shot.get("characterIds") or [])
                     for ch in project.get("characters") or []:

@@ -3630,12 +3630,20 @@ function renderEditor() {
       castHere.find((c) => c.id === raw.speakerId) || inferred;
 
     if (castHere.length > 1) {
+      // A distinct "Auto" option, separate from any real character's id, so
+      // picking the character that's already inferred is a genuine value
+      // change the native <select> will actually fire — otherwise, with the
+      // inferred choice pre-selected, clicking that same name again is a
+      // no-op to the browser and speakerId never commits.
       const pick = select(
-        castHere.map((c) => [
-          c.id,
-          c.voice && c.voice.path ? `${c.name} (cloned voice)` : `${c.name} (no clip)`,
-        ]),
-        (speaker && speaker.id) || "",
+        [
+          ["", `Auto${inferred ? ` (${inferred.name})` : ""}`],
+          ...castHere.map((c) => [
+            c.id,
+            c.voice && c.voice.path ? `${c.name} (cloned voice)` : `${c.name} (no clip)`,
+          ]),
+        ],
+        raw.speakerId || "",
         (v) => {
           live().speakerId = v;
           markDirty();
