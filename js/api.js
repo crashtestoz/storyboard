@@ -93,6 +93,9 @@ const API = {
   // removes it. The reply carries each service's key *status*, never a key.
   setLlmKey: (service, key) =>
     req("POST", "/api/server-settings", { llmKey: { service, key } }),
+  setLlmServices: (services) => req("POST", "/api/llm-services", { services }),
+  setTtsServices: (services) => req("POST", "/api/tts-services", { services }),
+  setMfluxEngines: (engines) => req("POST", "/api/mflux-engines", { engines }),
 
   setMfluxModel: (engine, model) =>
     req("POST", "/api/server-settings", { mfluxModel: { engine, model } }),

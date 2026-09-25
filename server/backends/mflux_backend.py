@@ -14,9 +14,21 @@ Only the Create Stills preview uses these engines. They are exposed as
 :class:`WithMfluxStills` routes those ids here while every other model
 still goes to the video backend.
 
-Text-to-image only. The identity-reference path (a Start Ref or cast portrait steering the
-still) is vpipe Krea-2 only; here those references reach the model as
-their text description, through the same prompt vpipe builds.
+Reference images reach an mflux engine as far as its generator allows
+(``MfluxEngine.references``):
+
+* ``edit`` — the ``*-edit`` generators (Qwen-Image Edit, FLUX.2 edit) take
+  several reference images: the shot's Start Ref, its characters' portraits
+  and its Reference images (up to ``maxReferences``, default 3).
+* ``img2img`` — every other generator takes one init image, so only a
+  hand-picked Start Ref seeds the still (the still *is* the opening frame).
+  A portrait as an init image would copy the portrait's framing, so cast
+  stay as their text descriptions.
+* ``none`` — text prompt only.
+
+Whatever the mode, the prompt is the same one vpipe builds, cast
+descriptions included, so an engine with no image input still gets them in
+words.
 """
 
 from __future__ import annotations
@@ -47,7 +59,9 @@ from .vpipe_backend import (
     SKETCH_STYLE_PREFIX,
     _align_up,
     _draft_geometry,
+    _ref_source,
     _resolved_prompt,
+    _shot_characters,
     _wh,
 )
 
@@ -138,6 +152,34 @@ def _size_bytes(repo_dir: Path) -> int:
         return 0
 
 
+def still_references(shot: dict, project: dict, paths: ShotPaths) -> list[tuple[str, str]]:
+    """(absolute path, label) for each reference image a still can use: a
+    hand-picked Start Ref, the shot's characters' portraits, then its own
+    Reference images — characters ahead of scenery, since an edit model
+    takes only a few images and who is in the frame matters most. An auto-chained Start
+    Ref (the previous shot's last frame) is left out, as the vpipe still
+    leaves it out: nobody chose it for this shot's subject. Files that are
+    missing are skipped, and each image is listed once."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(ref: Any, label: str) -> None:
+        path = _ref_source(ref, paths)
+        if path and path not in seen and Path(path).is_file():
+            seen.add(path)
+            found.append((path, label))
+
+    start = shot.get("startRef")
+    if start and not (isinstance(start, dict) and start.get("kind") == "chain"):
+        add(start, "Start frame (opening composition)")
+    for ch in _shot_characters(shot, project):
+        if ch.get("image"):
+            add(ch["image"], f"{ch.get('name') or 'character'} (character identity)")
+    for ref in shot.get("referenceImages") or []:
+        add(ref, "shot reference (environment and composition)")
+    return found
+
+
 class MfluxEngine:
     def __init__(self, entry: dict[str, Any]):
         self.id = str(entry["id"])
@@ -153,6 +195,15 @@ class MfluxEngine:
         self.match = [_norm(m) for m in entry.get("match") or []] or [
             _norm(self.base_model or self.model)
         ]
+        # How reference images reach this generator (see the module
+        # docstring). "auto" goes by the command: the *-edit generators take
+        # --image-paths, the rest take a single --image init image.
+        mode = str(entry.get("references") or "auto")
+        if mode == "auto":
+            mode = "edit" if self.command.rstrip("/").split("/")[-1].endswith("-edit") else "img2img"
+        self.references = mode if mode in ("edit", "img2img", "none") else "none"
+        self.image_strength = float(entry.get("imageStrength") or 0.4)
+        self.max_references = int(entry.get("maxReferences") or 3)
 
     @property
     def family(self) -> str:
@@ -172,9 +223,9 @@ class MfluxEngine:
         return str(local) if os.access(local, os.X_OK) else None
 
 
-def load_engines(project_root: Path) -> list[MfluxEngine]:
-    """Read this machine's ``mflux-engines.json``, first creating it from the
-    committed ``mflux-engines.example.json`` if it is absent."""
+def load_config(project_root: Path) -> list[dict[str, Any]]:
+    """The raw entries of this machine's ``mflux-engines.json``, first creating
+    it from the committed ``mflux-engines-sample.json`` if it is absent."""
     path = ensure_local_copy(project_root, CONFIG_NAME, {"engines": DEFAULT_ENGINES})
     entries: list[dict[str, Any]] = DEFAULT_ENGINES
     try:
@@ -183,7 +234,11 @@ def load_engines(project_root: Path) -> list[MfluxEngine]:
             entries = doc["engines"]
     except (OSError, json.JSONDecodeError):
         pass
-    return [MfluxEngine(e) for e in entries if isinstance(e, dict) and e.get("id")]
+    return [e for e in entries if isinstance(e, dict) and e.get("id")]
+
+
+def load_engines(project_root: Path) -> list[MfluxEngine]:
+    return [MfluxEngine(e) for e in load_config(project_root)]
 
 
 class MfluxStills(Backend):
@@ -199,6 +254,10 @@ class MfluxStills(Backend):
 
     def handles(self, model_id: str | None) -> bool:
         return bool(model_id) and model_id in self.engines
+
+    def reload(self, project_root: Path) -> None:
+        """Re-read mflux-engines.json after Settings edits it."""
+        self.engines = {e.id: e for e in load_engines(project_root)}
 
     # -- which checkpoint an engine runs ---------------------------------
 
@@ -267,6 +326,7 @@ class MfluxStills(Backend):
             r = self.resolve(e)
             out.append({
                 "id": e.id,
+                "references": e.references,
                 "defaultModel": e.model,
                 "chosen": r["chosen"],
                 "resolved": {k: r[k] for k in ("model", "source", "quantization")},
@@ -330,6 +390,19 @@ class MfluxStills(Backend):
             argv += ["--base-model", engine.base_model]
         if engine.quantize and not picked["quantization"]:
             argv += ["--quantize", str(engine.quantize)]
+        refs = still_references(shot, project, paths)
+        used: list[tuple[str, str]] = []
+        if engine.references == "edit" and refs:
+            used = refs[: engine.max_references]
+            argv += ["--image-paths", *[path for path, _ in used]]
+            # Say which picture is which, as the video render does.
+            listing = "; ".join(f"image {i + 1}: {label}" for i, (_, label) in enumerate(used))
+            prompt = f"Reference images — {listing}. {prompt}"
+        elif engine.references == "img2img":
+            opening = next(((path, label) for path, label in refs if label.startswith("Start frame")), None)
+            if opening:
+                used = [opening]
+                argv += ["--image", opening[0], str(engine.image_strength)]
         argv += ["--prompt", prompt, "--width", str(width), "--height", str(height),
                  "--steps", str(steps)]
         seed = int(shot.get("seed") or 0)
@@ -343,7 +416,9 @@ class MfluxStills(Backend):
             payload={"engine": "mflux", "argv": argv, "cwd": str(paths.abs_dir),
                      "model": engine.id, "output": str(out)},
             summary=f"{engine.label} · {model} · {width}x{height} · {steps} steps"
-                    + (" · DRAFT" if draft else ""),
+                    + (" · DRAFT" if draft else "")
+                    + (f" · references: {', '.join(label for _, label in used)}" if used
+                       else " · text prompt only"),
         )
 
     def run(

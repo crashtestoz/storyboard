@@ -1362,13 +1362,8 @@ function wireChrome() {
   $("#btnRename").addEventListener("click", renameProject);
   $("#btnDeleteBoard").addEventListener("click", deleteProject);
   $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
-  $("#btnSaveSearchUrl").addEventListener("click", saveSearchUrl);
-  $("#btnSaveLlmKey").addEventListener("click", () => {
-    const key = $("#llmKeyInput").value.trim();
-    if (key) saveLlmKey(key);
-    else toast("Paste the API key first.", "warn");
-  });
-  $("#btnClearLlmKey").addEventListener("click", () => saveLlmKey(""));
+  // Saved as soon as you leave the field or press Enter — no Save button.
+  $("#searchUrlInput").addEventListener("change", saveSearchUrl);
 
   $("#settingsClose").addEventListener("click", () => {
     $("#settings").hidden = true;
@@ -1437,13 +1432,6 @@ function wireChrome() {
     if (e.target === $("#batchDialog")) $("#batchDialog").hidden = true;
   });
   $("#batchStart").addEventListener("click", startProjectBatch);
-  $("#batchBannerStop").addEventListener("click", async () => {
-    try {
-      await API.stop();
-    } catch (err) {
-      toast(err.message, "error");
-    }
-  });
 
   $("#boardPicker").addEventListener("change", async (e) => {
     await saveNow();
@@ -1529,9 +1517,10 @@ function wireChrome() {
   });
 
   $("#stillsEngine").addEventListener("change", (e) => {
+    if (e.target.value === "") return openStillsEditor("");
     state.board.defaults.stillsEngine = e.target.value;
     markDirty();
-    render();
+    paintStillsEngineManager();
   });
 
   // Blank means automatic (steps) / random (seed): stored as 0.
@@ -1566,14 +1555,16 @@ function wireChrome() {
   });
 
   $("#llmService").addEventListener("change", (e) => {
+    if (e.target.value === "") return openLlmEditor("");
     state.board.defaults.llm = e.target.value;
     markDirty();
-    render();
+    paintLlmServiceManager();
   });
   $("#ttsEngine").addEventListener("change", (e) => {
+    if (e.target.value === "") return openTtsEditor("");
     state.board.defaults.tts = e.target.value;
     markDirty();
-    render();
+    paintTtsServiceManager();
   });
 
   $("#defSteps").addEventListener("input", (e) => {
@@ -1908,11 +1899,637 @@ function openSettings() {
   $("#btnDeleteBoard").disabled = !state.board || state.deletingBoard;
   paintDataDir();
   paintSearchUrl();
+  initializeSettingsTabs();
+  paintLlmServiceManager();
+  paintTtsServiceManager();
+  paintStillsEngineManager();
   $("#settings").hidden = false;
   // Downloads finish while the app is open, so re-read what mflux has cached.
   API.info().then((i) => {
     if (state.info) { state.info.mflux = i.mflux || []; render(); }
   }).catch(() => {});
+}
+
+function initializeSettingsTabs() {
+  const body = $(".settings-body");
+  const panes = Object.fromEntries([...body.querySelectorAll("[data-settings-pane]")]
+    .map((p) => [p.dataset.settingsPane, p]));
+  body.querySelectorAll("section").forEach((section) => {
+    const title = (section.querySelector(".card-heading-title")?.textContent || "").trim();
+    let tab = "general";
+    if (/Clip settings|Draft mode/i.test(title)) tab = "video";
+    if (/Audio settings/i.test(title)) tab = "audio";
+    if (/Create Image/i.test(title)) tab = "image";
+    panes[tab].appendChild(section);
+  });
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    button.onclick = () => {
+      const active = button.dataset.settingsTab;
+      document.querySelectorAll("[data-settings-tab]").forEach((b) => {
+        const selected = b === button;
+        b.classList.toggle("active", selected);
+        b.setAttribute("aria-selected", String(selected));
+      });
+      Object.entries(panes).forEach(([name, pane]) => pane.classList.toggle("active", name === active));
+    };
+  });
+  $("#btnNewLlmService").onclick = () => openLlmEditor("");
+  $("#btnEditLlmService").onclick = () => {
+    const id = $("#llmService").value;
+    // Servers started before service definitions were sent can't be edited
+    // from here; saving without them would drop the other services.
+    if (!llmConfigs().some((c) => c.id === id)) {
+      return toast("Restart the Storyboard server to edit this service.", "warn");
+    }
+    openLlmEditor(id);
+  };
+  $("#btnSaveLlmService").onclick = saveLlmServiceFromForm;
+  $("#btnCancelLlmService").onclick = () => paintLlmServiceManager();
+  $("#btnDeleteLlmService").onclick = deleteLlmService;
+  $("#llmServiceAuth").onchange = (e) => { $("#llmServiceKeyWrap").hidden = !e.target.checked; };
+  $("#llmServiceKind").onchange = onLlmKindChange;
+  $("#btnNewTtsService").onclick = () => openTtsEditor("");
+  $("#btnEditTtsService").onclick = () => {
+    const id = $("#ttsEngine").value;
+    // Servers started before engine definitions were sent can't be edited
+    // from here; saving without them would drop the other engines.
+    if (!ttsConfigs().some((c) => c.id === id)) {
+      return toast("Restart the Storyboard server to edit this engine.", "warn");
+    }
+    openTtsEditor(id);
+  };
+  $("#btnSaveTtsService").onclick = saveTtsServiceFromForm;
+  $("#btnCancelTtsService").onclick = () => paintTtsServiceManager();
+  $("#btnDeleteTtsService").onclick = deleteTtsService;
+  $("#ttsServiceKind").onchange = onTtsKindChange;
+  $("#btnNewStillsEngine").onclick = () => openStillsEditor("");
+  $("#btnEditStillsEngine").onclick = () => {
+    const id = $("#stillsEngine").value;
+    if (!mfluxConfigs().some((c) => c.id === id)) {
+      return toast("Restart the Storyboard server to edit this engine.", "warn");
+    }
+    openStillsEditor(id);
+  };
+  $("#btnSaveStillsEngine").onclick = saveStillsEngineFromForm;
+  $("#btnCancelStillsEngine").onclick = () => paintStillsEngineManager();
+  $("#btnDeleteStillsEngine").onclick = deleteStillsEngine;
+  $("#stillsEngPreset").onchange = onStillsPresetChange;
+  $("#stillsEngModel").oninput = paintStillsEngineHelp;
+  $("#llmServiceUrl").oninput = paintLlmKindHelp;
+}
+
+/* What each service type needs: its usual URL, whether it is a cloud API
+   (and so needs a key), and where to find a model name that server accepts.
+   Kept in step with KNOWN_KINDS / KIND_DEFAULT_URLS in server/llm.py. */
+const LLM_KINDS = {
+  "ollama": { url: "http://localhost:11434", model: "llama3.1:8b",
+    urlHelp: "Where Ollama listens — http://localhost:11434 on this Mac, or http://&lt;ip&gt;:11434 for another machine.",
+    modelHelp: "Run <code>ollama list</code> on the machine running Ollama and copy the NAME column exactly, tag included (e.g. <code>llama3.1:8b</code>). Get new models with <code>ollama pull &lt;name&gt;</code>." },
+  "lmstudio": { url: "http://localhost:1234", model: "qwen2.5-7b-instruct",
+    urlHelp: "Start the server in LM Studio's Developer tab — it listens on port 1234 by default. /v1 is added automatically.",
+    modelHelp: "In LM Studio, load the model and copy its API identifier from the Developer tab (e.g. <code>qwen2.5-7b-instruct</code>). Every name the server accepts is listed at {models}." },
+  "openai": { url: "", model: "model id",
+    urlHelp: "The server's base address, e.g. http://localhost:8080. /v1 is added automatically.",
+    modelHelp: "Must match an <code>id</code> listed at {models}. llama.cpp uses its <code>--alias</code> (or the model file name), vLLM its <code>--served-model-name</code>, mlx_lm.server the model path." },
+  "openai-api": { cloud: true, url: "https://api.openai.com/v1", model: "gpt-5-mini",
+    keyUrl: "https://platform.openai.com/api-keys",
+    modelHelp: "An OpenAI model ID from <a href=\"https://platform.openai.com/docs/models\" target=\"_blank\" rel=\"noopener\">platform.openai.com/docs/models</a>, e.g. <code>gpt-5-mini</code>." },
+  "anthropic": { cloud: true, url: "https://api.anthropic.com", model: "claude-opus-5",
+    keyUrl: "https://console.anthropic.com/settings/keys",
+    modelHelp: "A Claude model ID from <a href=\"https://docs.anthropic.com/en/docs/about-claude/models\" target=\"_blank\" rel=\"noopener\">Anthropic's model list</a>, e.g. <code>claude-opus-5</code> or <code>claude-haiku-4-5</code>. Needs the <code>anthropic</code> Python package on the Storyboard server." },
+  "gemini": { cloud: true, url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash",
+    keyUrl: "https://aistudio.google.com/apikey",
+    modelHelp: "A Gemini model ID from <a href=\"https://ai.google.dev/gemini-api/docs/models\" target=\"_blank\" rel=\"noopener\">ai.google.dev/gemini-api/docs/models</a>, e.g. <code>gemini-2.5-flash</code>." },
+  "openrouter": { cloud: true, url: "https://openrouter.ai/api/v1", model: "meta-llama/llama-3.3-70b-instruct",
+    keyUrl: "https://openrouter.ai/keys",
+    modelHelp: "The <code>provider/model</code> ID shown on <a href=\"https://openrouter.ai/models\" target=\"_blank\" rel=\"noopener\">openrouter.ai/models</a>, e.g. <code>meta-llama/llama-3.3-70b-instruct</code>." },
+  "groq": { cloud: true, url: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile",
+    keyUrl: "https://console.groq.com/keys",
+    modelHelp: "A model ID from <a href=\"https://console.groq.com/docs/models\" target=\"_blank\" rel=\"noopener\">console.groq.com/docs/models</a>, e.g. <code>llama-3.3-70b-versatile</code>." },
+  "mistral": { cloud: true, url: "https://api.mistral.ai/v1", model: "mistral-small-latest",
+    keyUrl: "https://console.mistral.ai/api-keys",
+    modelHelp: "A model ID from <a href=\"https://docs.mistral.ai/getting-started/models/\" target=\"_blank\" rel=\"noopener\">Mistral's model list</a>, e.g. <code>mistral-small-latest</code>." },
+};
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+// Refresh the URL / model / key help for the chosen type. {models} becomes a
+// link to the server's own model list, built from the URL as typed.
+function paintLlmKindHelp() {
+  const info = LLM_KINDS[$("#llmServiceKind").value] || LLM_KINDS.openai;
+  const url = ($("#llmServiceUrl").value.trim() || info.url).replace(/\/+$/, "");
+  $("#llmServiceUrl").placeholder = info.url || "http://localhost:8080";
+  $("#llmServiceModel").placeholder = `e.g. ${info.model}`;
+  $("#llmServiceUrlNote").innerHTML = info.cloud
+    ? "Filled in for you — only change it if you use a proxy or a regional endpoint."
+    : info.urlHelp;
+  let modelsLink = "the server's <code>/v1/models</code> page";
+  if (/^https?:\/\//.test(url)) {
+    const list = /\/v\d+[a-z]*(\/openai)?$/.test(url) ? `${url}/models` : `${url}/v1/models`;
+    modelsLink = `<a href="${escapeHtml(list)}" target="_blank" rel="noopener">${escapeHtml(list)}</a>`;
+  }
+  $("#llmServiceModelNote").innerHTML = info.modelHelp.replace("{models}", modelsLink) +
+    " The name must match exactly — the tag next to the dropdown turns Online once the server finds it.";
+  $("#llmServiceKeyHelp").innerHTML = info.keyUrl
+    ? `Get a key at <a href="${info.keyUrl}" target="_blank" rel="noopener">${info.keyUrl.replace(/^https:\/\//, "")}</a>.`
+    : "";
+}
+
+// Switching type: swap in the new type's usual URL unless you typed your own,
+// and switch on the API key for cloud services.
+function onLlmKindChange() {
+  const info = LLM_KINDS[$("#llmServiceKind").value] || {};
+  const urlInput = $("#llmServiceUrl");
+  const defaults = Object.values(LLM_KINDS).map((k) => k.url);
+  if (!urlInput.value.trim() || defaults.includes(urlInput.value.trim())) urlInput.value = info.url || "";
+  if (info.cloud) {
+    $("#llmServiceAuth").checked = true;
+    $("#llmServiceKeyWrap").hidden = false;
+  }
+  paintLlmKindHelp();
+}
+
+/* LLM services share one dropdown with prompt rewriting: picking a service
+   uses it for this project. "Edit" opens the chosen service's definition in
+   the editor below; "+ Add" opens the same editor blank. */
+function llmConfigs() {
+  return (state.info?.llm?.configs || []).filter((s) => s.id !== "none");
+}
+
+function llmAddingNew() {
+  const editor = $("#llmEditor");
+  return !!editor && !editor.hidden && !editor.dataset.editing;
+}
+
+// Close the editor, dropping any unsaved "New service…" draft, and repaint
+// the dropdown.
+function paintLlmServiceManager() {
+  const sel = $("#llmService");
+  if (!sel) return;
+  const editor = $("#llmEditor");
+  editor.hidden = true;
+  editor.dataset.editing = "";
+  sel.querySelector("option[value='']")?.remove();
+  render();
+}
+
+function openLlmEditor(id) {
+  const adding = id === "";
+  const service = llmConfigs().find((s) => s.id === id);
+  const status = (state.info?.llm?.services || []).find((s) => s.id === id);
+  const editor = $("#llmEditor");
+  if (!service && !adding) {
+    editor.hidden = true;
+    editor.dataset.editing = "";
+    return;
+  }
+  editor.hidden = false;
+  editor.dataset.editing = service ? service.id : "";
+  $("#llmEditorTitle").textContent = service ? `Edit “${service.label}”` : "New service";
+  $("#llmServiceLabel").value = service?.label || "";
+  $("#llmServiceKind").value = !service ? "ollama"
+    : service.kind === "openai-compatible" ? "openai"
+    : LLM_KINDS[service.kind] ? service.kind : "openai";
+  $("#llmServiceUrl").value = service?.url || "";
+  $("#llmServiceModel").value = service?.model || "";
+  $("#llmServiceAuth").checked = !!service?.requiresKey;
+  $("#llmServiceKeyWrap").hidden = !service?.requiresKey;
+  $("#llmServiceKey").value = "";
+  $("#btnDeleteLlmService").hidden = !service;
+  $("#btnSaveLlmService").textContent = service ? "Save changes" : "Add service";
+  if (adding) $("#llmServiceUrl").value = LLM_KINDS.ollama.url;
+  paintLlmKindHelp();
+
+  // Where the key comes from — never the key itself.
+  const keyInput = $("#llmServiceKey");
+  const keyNote = $("#llmServiceKeyNote");
+  const envName = status?.keyEnv ? `$${status.keyEnv}` : "";
+  keyInput.placeholder = status?.keySource === "settings"
+    ? "A key is saved — paste a new one to replace it" : "Paste the API key";
+  keyNote.className = "field-note";
+  if (status?.keySource === "settings") {
+    keyNote.textContent = "Using the key saved on this Mac (server-config.json, readable only by you).";
+  } else if (status?.keySource === "env") {
+    keyNote.textContent = `Using ${envName} from the environment. A key saved here takes priority.`;
+  } else if (status?.keySource === "file") {
+    keyNote.textContent = "Using a plain-text apiKey from llm-services.json — saving it here is safer and takes priority.";
+    keyNote.className = "field-warn";
+  } else {
+    keyNote.textContent = envName ? `Paste a key, or set ${envName} before starting Storyboard.` : "";
+  }
+  if (adding) {
+    // Stand-in entry so the dropdown says what is being edited.
+    const sel = $("#llmService");
+    let draft = sel.querySelector("option[value='']");
+    if (!draft) { draft = el("option", null, "New service…"); draft.value = ""; sel.prepend(draft); }
+    sel.value = "";
+    $("#llmStatus").hidden = true;
+    $("#llmNote").textContent = "Fill in the details, then Add service.";
+    $("#llmNote").className = "field-note";
+    $("#llmServiceLabel").focus();
+  }
+}
+
+/* Speech engines use the same pattern as LLM services: the dropdown picks
+   this project's engine, "Edit" opens the chosen engine's definition from
+   tts-services.json, "+ Add" opens the same fields blank. Kept in step with
+   KNOWN_KINDS in server/tts/__init__.py. */
+const TTS_KINDS = {
+  "qwen3-clone": { url: "http://127.0.0.1:8790",
+    help: "Clones each character's voice from their reference clip, and can transcribe clips. Runs as a separate server — see vendor/README.md.",
+    urlHelp: "Start it with <code>vendor/start-qwen3-tts.sh</code>; it listens on port 8790. It binds 127.0.0.1, so for another machine start it with <code>--host 0.0.0.0</code> and use <code>http://&lt;that-machine&gt;:8790</code>, or tunnel with <code>ssh -L 8790:127.0.0.1:8790 &lt;host&gt;</code>." },
+  "plain-sherpa": { url: "http://127.0.0.1:3000",
+    help: "One fixed voice, no cloning — any server that answers <code>POST /api/tts</code> with a WAV, such as a sherpa-onnx VITS voice.",
+    urlHelp: "The server's base address; Storyboard calls <code>&lt;url&gt;/api/tts</code>." },
+  "vpipe-moss": { url: "",
+    help: "Runs MOSS-TTS 8B on this Mac through vpipe and clones each character's voice from their reference clip. No server needed — the model must be prepared in the vpipe workspace (setup/prepare-moss-tts.vpipeline)." },
+};
+
+function ttsConfigs() {
+  return (state.info?.tts?.configs || []).filter((s) => s.id !== "none");
+}
+
+function ttsAddingNew() {
+  const editor = $("#ttsEditor");
+  return !!editor && !editor.hidden && !editor.dataset.editing;
+}
+
+function paintTtsServiceManager() {
+  const sel = $("#ttsEngine");
+  if (!sel) return;
+  const editor = $("#ttsEditor");
+  editor.hidden = true;
+  editor.dataset.editing = "";
+  sel.querySelector("option[value='']")?.remove();
+  render();
+}
+
+function paintTtsKindHelp() {
+  const info = TTS_KINDS[$("#ttsServiceKind").value] || TTS_KINDS["qwen3-clone"];
+  $("#ttsServiceKindNote").innerHTML = info.help;
+  $("#ttsServiceUrlWrap").hidden = !info.url;
+  $("#ttsServiceUrl").placeholder = info.url;
+  $("#ttsServiceUrlNote").innerHTML = info.urlHelp || "";
+}
+
+// Switching type swaps in its usual URL unless you typed your own.
+function onTtsKindChange() {
+  const info = TTS_KINDS[$("#ttsServiceKind").value] || {};
+  const urlInput = $("#ttsServiceUrl");
+  const defaults = Object.values(TTS_KINDS).map((k) => k.url);
+  if (!urlInput.value.trim() || defaults.includes(urlInput.value.trim())) urlInput.value = info.url || "";
+  paintTtsKindHelp();
+}
+
+function openTtsEditor(id) {
+  const adding = id === "";
+  const service = ttsConfigs().find((s) => s.id === id);
+  const editor = $("#ttsEditor");
+  if (!service && !adding) {
+    editor.hidden = true;
+    editor.dataset.editing = "";
+    return;
+  }
+  editor.hidden = false;
+  editor.dataset.editing = service ? service.id : "";
+  $("#ttsEditorTitle").textContent = service ? `Edit “${service.label}”` : "New speech engine";
+  const kind = TTS_KINDS[service?.kind] ? service.kind : "qwen3-clone";
+  $("#ttsServiceLabel").value = service?.label || "";
+  $("#ttsServiceKind").value = kind;
+  $("#ttsServiceUrl").value = service ? service.url || "" : TTS_KINDS[kind].url;
+  $("#btnDeleteTtsService").hidden = !service;
+  $("#btnSaveTtsService").textContent = service ? "Save changes" : "Add engine";
+  paintTtsKindHelp();
+  if (adding) {
+    const sel = $("#ttsEngine");
+    let draft = sel.querySelector("option[value='']");
+    if (!draft) { draft = el("option", null, "New speech engine…"); draft.value = ""; sel.prepend(draft); }
+    sel.value = "";
+    $("#ttsStatus").hidden = true;
+    $("#ttsNote").textContent = "Fill in the details, then Add engine.";
+    $("#ttsNote").className = "field-note";
+    $("#ttsServiceLabel").focus();
+  }
+}
+
+async function applyTtsServices(entries) {
+  const result = await API.setTtsServices(entries);
+  state.info.tts.engines = result.engines;
+  state.info.tts.configs = result.configs;
+  state.tts = result.engines;
+  $("#ttsEngine").dataset.built = "";
+  return result;
+}
+
+async function saveTtsServiceFromForm() {
+  const button = $("#btnSaveTtsService");
+  const editing = $("#ttsEditor").dataset.editing || "";
+  const label = $("#ttsServiceLabel").value.trim();
+  const kind = $("#ttsServiceKind").value;
+  const url = TTS_KINDS[kind]?.url ? $("#ttsServiceUrl").value.trim() : "";
+  if (!label || (TTS_KINDS[kind]?.url && !url)) return toast("Enter a name and server URL.", "warn");
+  const others = ttsConfigs().filter((s) => s.id !== editing);
+  let id = editing;
+  if (!id) {
+    const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "engine";
+    id = base;
+    for (let n = 2; others.some((s) => s.id === id) || id === "none"; n++) id = `${base}-${n}`;
+  }
+  // An edited engine keeps its place in the list; a new one goes last.
+  const entry = { id, label, kind, url };
+  const entries = ttsConfigs().map((s) => (s.id === editing ? entry : { ...s }));
+  if (!editing) entries.push(entry);
+  button.disabled = true;
+  try {
+    await applyTtsServices(entries);
+    state.board.defaults.tts = id;
+    markDirty();
+    paintTtsServiceManager();
+    toast(editing ? "Speech engine updated." : "Speech engine added.");
+  } catch (err) { toast(err.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+async function deleteTtsService() {
+  const id = $("#ttsEditor").dataset.editing;
+  const service = ttsConfigs().find((s) => s.id === id);
+  if (!service || !confirm(`Delete the speech engine “${service.label}”?`)) return;
+  try {
+    await applyTtsServices(ttsConfigs().filter((s) => s.id !== id).map((s) => ({ ...s })));
+    if ((state.board.defaults.tts || "none") === id) {
+      state.board.defaults.tts = "none";
+      markDirty();
+    }
+    paintTtsServiceManager();
+    toast("Speech engine deleted.");
+  } catch (err) { toast(err.message, "error"); }
+}
+
+/* mflux still engines, same pattern again: the Engine dropdown picks this
+   project's still engine; "Edit" opens an mflux engine's definition from
+   mflux-engines.json (built-in vpipe engines have none, so Edit is off for
+   them); "+ Add" opens the same fields blank. Model names are mflux's own
+   aliases (`mflux-generate --help`); steps are typical values, not mflux
+   defaults — the CLI publishes none. */
+const MFLUX_PRESETS = {
+  "z-image-turbo": { label: "Z-Image Turbo", command: "mflux-generate-z-image-turbo", model: "z-image-turbo", steps: 8,
+    note: "Fast, distilled model — good previews in about 8 steps." },
+  "krea2": { label: "Krea-2 Turbo", command: "mflux-generate-krea2", model: "krea2", steps: 8,
+    note: "Fast, distilled model — good previews in about 8 steps." },
+  "flux2-klein-4b": { label: "FLUX.2 klein 4B", command: "mflux-generate-flux2", model: "flux2-klein-4b", steps: 4,
+    note: "Small, distilled FLUX.2 — quick in about 4 steps." },
+  "schnell": { label: "FLUX.1 schnell", command: "mflux-generate", model: "schnell", steps: 4,
+    note: "Distilled FLUX.1 — about 4 steps." },
+  "dev": { label: "FLUX.1 dev", command: "mflux-generate", model: "dev", steps: 20,
+    note: "Higher quality but slower (about 20 steps). Gated on Hugging Face: accept its licence there and set HF_TOKEN before starting Storyboard." },
+  "krea-dev": { label: "FLUX.1 Krea dev", command: "mflux-generate", model: "krea-dev", steps: 20,
+    note: "Photographic FLUX.1 variant, about 20 steps. Gated on Hugging Face: accept its licence there and set HF_TOKEN." },
+  "qwen-image": { label: "Qwen-Image", command: "mflux-generate-qwen", model: "qwen-image", steps: 20,
+    note: "Large 20B model — strong prompt following, needs lots of memory; about 20 steps." },
+  "qwen-image-edit": { label: "Qwen-Image Edit (uses references)", command: "mflux-generate-qwen-edit", model: "qwen-image-edit", steps: 20,
+    note: "Takes the Start Ref, character portraits and shot references as images, so cast look like their portraits. Large 20B model — slow, needs lots of memory." },
+  "custom": { label: "Custom…", note: "Any mflux generator and model — a Hugging Face repo or a local folder. Generators ending in -edit are given reference images; the rest use a Start Ref as a starting image." },
+};
+// --base-model choices for a checkpoint that isn't one of mflux's aliases.
+const MFLUX_FAMILIES = ["z-image-turbo", "z-image", "krea2", "schnell", "dev", "krea-dev",
+  "flux2-klein-4b", "flux2-klein-9b", "qwen", "fibo", "ernie-image-turbo", "ernie-image", "ideogram4"];
+
+// What an mflux engine is given, by its reference mode (MfluxEngine.references).
+function mfluxReferenceNote(mode) {
+  if (mode === "edit") {
+    return "Uses the shot's prompt, scene and cast descriptions, plus up to 3 reference " +
+      "images: the Start Ref, the selected characters' portraits, then the shot's Reference images.";
+  }
+  if (mode === "img2img") {
+    return "Uses the shot's prompt, scene and cast descriptions. A hand-picked Start Ref " +
+      "seeds the image; this model can't take character portraits, so cast are described in words.";
+  }
+  return "Uses the shot's prompt, scene and cast descriptions only — no reference images.";
+}
+
+function mfluxConfigs() {
+  return state.info?.mfluxConfigs || [];
+}
+
+function stillsAddingNew() {
+  const editor = $("#stillsEditor");
+  return !!editor && !editor.hidden && !editor.dataset.editing;
+}
+
+function paintStillsEngineManager() {
+  const sel = $("#stillsEngine");
+  if (!sel) return;
+  const editor = $("#stillsEditor");
+  editor.hidden = true;
+  editor.dataset.editing = "";
+  sel.querySelector("option[value='']")?.remove();
+  render();
+}
+
+function presetFor(command, model) {
+  return Object.keys(MFLUX_PRESETS).find((k) =>
+    MFLUX_PRESETS[k].command === command && MFLUX_PRESETS[k].model === model) || "custom";
+}
+
+function paintStillsEngineHelp() {
+  const preset = MFLUX_PRESETS[$("#stillsEngPreset").value] || MFLUX_PRESETS.custom;
+  $("#stillsEngPresetNote").textContent = preset.note || "";
+  const model = $("#stillsEngModel").value.trim();
+  const custom = model.includes("/");
+  $("#stillsEngBaseWrap").hidden = !custom;
+  $("#stillsEngModelNote").innerHTML =
+    "The command is one of mflux's generators (installed with <code>uv tool install mflux</code>; " +
+    "run <code>ls ~/.local/bin | grep mflux-generate</code> to list them). The model is an mflux name such as " +
+    "<code>z-image-turbo</code> or <code>schnell</code>, a Hugging Face repo (<code>org/name</code>), or a local " +
+    "folder. mflux downloads it the first time you create stills; downloaded copies then appear in the " +
+    "Model list below.";
+}
+
+function onStillsPresetChange() {
+  const preset = MFLUX_PRESETS[$("#stillsEngPreset").value];
+  if (preset && preset.command) {
+    $("#stillsEngCommand").value = preset.command;
+    $("#stillsEngModel").value = preset.model;
+    $("#stillsEngSteps").value = preset.steps;
+  }
+  // A name filled in from the previous preset follows the new one; a name
+  // you typed yourself is left alone.
+  const labelInput = $("#stillsEngLabel");
+  const current = labelInput.value.trim();
+  if (!current || current === labelInput.dataset.auto) {
+    labelInput.value = preset && preset.command ? `${preset.label} via mflux` : "";
+    labelInput.dataset.auto = labelInput.value;
+  }
+  paintStillsEngineHelp();
+}
+
+function openStillsEditor(id) {
+  const adding = id === "";
+  const engine = mfluxConfigs().find((e) => e.id === id);
+  const editor = $("#stillsEditor");
+  if (!engine && !adding) {
+    editor.hidden = true;
+    editor.dataset.editing = "";
+    return;
+  }
+  const presetSel = $("#stillsEngPreset");
+  if (!presetSel.options.length) {
+    Object.entries(MFLUX_PRESETS).forEach(([k, p]) => {
+      const o = el("option", null, p.label); o.value = k; presetSel.appendChild(o);
+    });
+    MFLUX_FAMILIES.forEach((f) => {
+      const o = el("option", null, f); o.value = f; $("#stillsEngBase").appendChild(o);
+    });
+  }
+  editor.hidden = false;
+  editor.dataset.editing = engine ? engine.id : "";
+  $("#stillsEditorTitle").textContent = engine ? `Edit “${engine.label}”` : "New mflux engine";
+  const start = engine || { ...MFLUX_PRESETS["z-image-turbo"], label: "", quantize: 8 };
+  $("#stillsEngLabel").value = engine ? engine.label || "" : "";
+  $("#stillsEngLabel").dataset.auto = "";
+  $("#stillsEngCommand").value = start.command || "";
+  $("#stillsEngModel").value = start.model || "";
+  $("#stillsEngSteps").value = start.steps || 8;
+  $("#stillsEngQuantize").value = start.quantize ? String(start.quantize) : "";
+  $("#stillsEngBase").value = engine?.baseModel || "z-image-turbo";
+  presetSel.value = presetFor(start.command, start.model);
+  $("#btnDeleteStillsEngine").hidden = !engine;
+  $("#btnSaveStillsEngine").textContent = engine ? "Save changes" : "Add engine";
+  paintStillsEngineHelp();
+  if (adding) {
+    const sel = $("#stillsEngine");
+    let draft = sel.querySelector("option[value='']");
+    if (!draft) { draft = el("option", null, "New mflux engine…"); draft.value = ""; sel.prepend(draft); }
+    sel.value = "";
+    $("#stillsStatus").hidden = true;
+    $("#stillsModelWrap").hidden = true;
+    $("#stillsEngineNote").textContent = "Pick a model family (or Custom), then Add engine.";
+    $("#stillsEngineNote").className = "field-note";
+    $("#stillsEngLabel").focus();
+  }
+}
+
+async function applyMfluxEngines(entries) {
+  const r = await API.setMfluxEngines(entries);
+  state.info.models = r.models;
+  state.models = r.models;
+  state.info.mflux = r.mflux;
+  state.info.mfluxConfigs = r.configs;
+  $("#stillsEngine").dataset.built = "";
+  return r;
+}
+
+async function saveStillsEngineFromForm() {
+  const button = $("#btnSaveStillsEngine");
+  const editing = $("#stillsEditor").dataset.editing || "";
+  const label = $("#stillsEngLabel").value.trim();
+  const command = $("#stillsEngCommand").value.trim();
+  const model = $("#stillsEngModel").value.trim();
+  const steps = Number($("#stillsEngSteps").value) || 8;
+  const quantize = $("#stillsEngQuantize").value;
+  if (!label || !command || !model) return toast("Enter a name, mflux command and model.", "warn");
+  const taken = new Set([...state.models.map((m) => m.id), "auto", "none"]);
+  let id = editing;
+  if (!id) {
+    const base = "mflux-" + (label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+      .replace(/^mflux-/, "").replace(/-via-mflux$/, "") || "engine");
+    id = base;
+    for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  }
+  const entry = { id, label, command, model, steps, quantize: quantize ? Number(quantize) : null,
+    baseModel: model.includes("/") ? $("#stillsEngBase").value : "" };
+  // An edited engine keeps its place in the list; a new one goes last.
+  const entries = mfluxConfigs().map((e) => (e.id === editing ? entry : { ...e }));
+  if (!editing) entries.push(entry);
+  button.disabled = true;
+  try {
+    await applyMfluxEngines(entries);
+    state.board.defaults.stillsEngine = id;
+    markDirty();
+    paintStillsEngineManager();
+    toast(editing ? "Still engine updated." : "Still engine added.");
+  } catch (err) { toast(err.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+async function deleteStillsEngine() {
+  const id = $("#stillsEditor").dataset.editing;
+  const engine = mfluxConfigs().find((e) => e.id === id);
+  if (!engine || !confirm(`Delete the still engine “${engine.label}”?`)) return;
+  try {
+    await applyMfluxEngines(mfluxConfigs().filter((e) => e.id !== id).map((e) => ({ ...e })));
+    if (state.board.defaults.stillsEngine === id) {
+      state.board.defaults.stillsEngine = "auto";
+      markDirty();
+    }
+    paintStillsEngineManager();
+    toast("Still engine deleted.");
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function applyLlmServices(entries) {
+  const result = await API.setLlmServices(entries);
+  state.info.llm.services = result.llm;
+  state.info.llm.configs = result.configs;
+  $("#llmService").dataset.built = "";
+  return result;
+}
+
+async function saveLlmServiceFromForm() {
+  const button = $("#btnSaveLlmService");
+  const editing = $("#llmEditor").dataset.editing || "";
+  const label = $("#llmServiceLabel").value.trim();
+  const kind = $("#llmServiceKind").value;
+  const url = $("#llmServiceUrl").value.trim();
+  const model = $("#llmServiceModel").value.trim();
+  const requiresKey = $("#llmServiceAuth").checked;
+  const key = $("#llmServiceKey").value.trim();
+  if (!label || !url || !model) return toast("Enter a name, server URL and model.", "warn");
+  const others = llmConfigs().filter((s) => s.id !== editing);
+  let id = editing;
+  if (!id) {
+    const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "service";
+    id = base;
+    for (let n = 2; others.some((s) => s.id === id) || id === "none"; n++) id = `${base}-${n}`;
+  }
+  // An edited service keeps its place in the list; a new one goes last.
+  const entry = { id, label, kind, url, model, requiresKey };
+  const entries = llmConfigs().map((s) => (s.id === editing ? entry : { ...s }));
+  if (!editing) entries.push(entry);
+  button.disabled = true;
+  try {
+    await applyLlmServices(entries);
+    if (requiresKey && key) {
+      const r = await API.setLlmKey(id, key);
+      if (r.llm) state.info.llm.services = r.llm;
+    } else if (!requiresKey) {
+      const r = await API.setLlmKey(id, "");
+      if (r.llm) state.info.llm.services = r.llm;
+    }
+    state.board.defaults.llm = id;
+    markDirty();
+    paintLlmServiceManager();
+    toast(editing ? "LLM service updated." : "LLM service added.");
+  } catch (err) { toast(err.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+async function deleteLlmService() {
+  const id = $("#llmEditor").dataset.editing;
+  const service = llmConfigs().find((s) => s.id === id);
+  if (!service || !confirm(`Delete the LLM service “${service.label}”?`)) return;
+  try {
+    await applyLlmServices(llmConfigs().filter((s) => s.id !== id).map((s) => ({ ...s })));
+    if ((state.board.defaults.llm || state.info.llm.default) === id) {
+      state.board.defaults.llm = "none";
+      markDirty();
+    }
+    paintLlmServiceManager();
+    toast("LLM service deleted.");
+  } catch (err) { toast(err.message, "error"); }
 }
 
 function paintDataDir() {
@@ -2091,42 +2708,10 @@ async function saveDataDirAndRestart() {
   }
 }
 
-async function saveLlmKey(key) {
-  const service = $("#llmService").value;
-  const removing = key === "";
-  const btn = removing ? $("#btnClearLlmKey") : $("#btnSaveLlmKey");
-  btn.disabled = true;
-  try {
-    const r = await API.setLlmKey(service, key);
-    $("#llmKeyInput").value = "";
-    if (r.llm && state.info && state.info.llm) {
-      state.info.llm.services = r.llm;
-      // Health (and so each option's "unavailable" label) may have changed.
-      const sel = $("#llmService");
-      sel.textContent = "";
-      sel.dataset.built = "";
-    }
-    const now = (r.llm || []).find((s) => s.id === service);
-    toast(
-      removing ? "Saved key removed." :
-        now && !now.healthy ? `Key saved, but: ${now.message}` : "Key saved.",
-      now && !now.healthy && !removing ? "warn" : "info"
-    );
-  } catch (err) {
-    toast(err.message, "error");
-  } finally {
-    btn.disabled = false;
-    render();
-  }
-}
-
 async function saveSearchUrl() {
   const url = $("#searchUrlInput").value.trim();
-  const btn = $("#btnSaveSearchUrl");
-  btn.disabled = true;
-  const was = btn.textContent;
+  if (url === ((state.info && state.info.search && state.info.search.url) || "")) return;
   try {
-    btn.textContent = "saving…";
     const r = await API.setSearchUrl(url);
     if (state.info) {
       state.info.search = { url: r.searchUrl, overridden: false };
@@ -2135,9 +2720,6 @@ async function saveSearchUrl() {
     toast(url ? "Web search enabled for the Storyboard AD." : "Web search disabled.");
   } catch (err) {
     toast(`Could not save the search URL: ${err.message}`, "error");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = was;
   }
 }
 
@@ -2191,7 +2773,7 @@ async function refreshStatus() {
       takeStale(res);
       state.board = res.board;
       toast(
-        s.stills.error ? `Stills failed: ${s.stills.error}` : "Stills ready.",
+        s.stills.error ? `Image failed: ${s.stills.error}` : "Image ready.",
         s.stills.error ? "error" : "info"
       );
     }
@@ -2259,7 +2841,6 @@ function paintLive() {
   $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
-  paintBatchBanner();
   paintMeta();
   paintRenderHint();
 
@@ -2267,12 +2848,6 @@ function paintLive() {
     const shot = view(raw);
     const pctOnly = `${Math.round(shot.progress || 0)}%`;
     const pct = `${pctOnly}${etaSuffix(shot)}`;
-
-    const row = document.querySelector(`.queue-row[data-id="${raw.id}"]`);
-    if (row) {
-      const q = row.querySelector(".queue-pct");
-      if (q) q.textContent = pct;
-    }
 
     const card = document.querySelector(`.shot-card[data-id="${raw.id}"]`);
     if (card) {
@@ -2380,32 +2955,12 @@ function render() {
   $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
-  paintBatchBanner();
 
   paintMeta();
   paintRenderHint();
   paintBladeContext();
   positionAssistantBlade();
   focusRestore(snap);
-}
-
-/* Shown whenever a multi-project batch is in flight, regardless of which
-   project happens to be open — that render may be on a project you are not
-   even looking at, so this is the one place its progress is always visible. */
-function paintBatchBanner() {
-  const pb = state.status && state.status.projectBatch;
-  const banner = $("#batchBanner");
-  if (!pb || !pb.active) {
-    banner.hidden = true;
-    return;
-  }
-  banner.hidden = false;
-  const doneCount = pb.done.length;
-  const totalCount = pb.total.length;
-  const current = state.boards.find((b) => b.slug === pb.current);
-  const currentName = current ? current.name : pb.current || "…";
-  $("#batchBannerText").textContent =
-    `Batch rendering — ${currentName} (${doneCount + 1} of ${totalCount})…`;
 }
 
 /* What "Render all" will actually do.
@@ -2663,86 +3218,104 @@ function renderRail() {
   const stillsEngineSel = $("#stillsEngine");
   const imageModels = state.models.filter((m) => m.kind === "image");
   if (stillsEngineSel.dataset.built !== "1") {
+    stillsEngineSel.textContent = "";
     const auto = el("option", null, "Automatic");
     auto.value = "auto";
     stillsEngineSel.appendChild(auto);
+    // Status is shown by the Ready/Unavailable chip beside the dropdown.
     imageModels.forEach((m) => {
-      const name = m.label.split("—")[0].trim();
-      const o = el("option", null, m.available ? name : `${name} — unavailable`);
+      const o = el("option", null, m.label.split("—")[0].trim());
       o.value = m.id;
       stillsEngineSel.appendChild(o);
     });
     stillsEngineSel.dataset.built = "1";
   }
   const stillsEngine = state.board.defaults.stillsEngine || "auto";
-  stillsEngineSel.value = stillsEngine;
-  const autoPick = imageModels.find((m) => m.available);
-  const engineCapStill = stillsEngine === "auto" ? autoPick : modelCap(stillsEngine);
-  const stillsEngineNote = $("#stillsEngineNote");
-  if (!engineCapStill) {
-    stillsEngineNote.textContent = "No still engine is ready — download Krea-2 into " +
-      "the vpipe workspace, or install mflux (uv tool install mflux).";
-    stillsEngineNote.className = "field-warn";
-  } else if (!engineCapStill.available) {
-    stillsEngineNote.textContent = engineCapStill.unavailableReason || "Not available.";
-    stillsEngineNote.className = "field-warn";
-  } else {
-    const name = engineCapStill.label.split("—")[0].trim();
-    stillsEngineNote.textContent = (stillsEngine === "auto" ? `Using ${name}. ` : "") +
-      (engineCapStill.engine === "mflux"
-        ? "Uses the shot's prompt, scene and cast descriptions; reference images " +
-          "are not used."
-        : "Uses the shot's prompt, scene and cast, plus its Start Ref or a cast " +
-          "portrait as an identity reference.");
-    stillsEngineNote.className = "field-note";
-  }
-
-  // mflux model: what this Mac already has downloaded, and only when there is
-  // nothing does it fall back to letting mflux download the default.
-  const mfx = engineCapStill && engineCapStill.available && engineCapStill.engine === "mflux"
-    ? ((state.info && state.info.mflux) || []).find((e) => e.id === engineCapStill.id)
-    : null;
-  $("#stillsModelWrap").hidden = !mfx;
-  if (mfx) {
-    const gb = (b) => `${(b / 1e9).toFixed(1)} GB`;
-    const modelSel = $("#stillsModel");
-    const sig = [mfx.id, mfx.chosen, mfx.resolved.source, ...mfx.cached.map((c) => c.model)].join("|");
-    if (modelSel.dataset.sig !== sig) {
-      modelSel.textContent = "";
-      const auto = el("option", null, mfx.cached.length
-        ? "Automatic — use a downloaded model"
-        : `Download ${mfx.defaultModel} on first use`);
-      auto.value = "";
-      modelSel.appendChild(auto);
-      mfx.cached.forEach((c) => {
-        const o = el("option", null, `${c.model} — ${gb(c.sizeBytes)}, ` +
-          (c.quantization ? `${c.quantization}-bit` : "full precision"));
-        o.value = c.model;
-        modelSel.appendChild(o);
-      });
-      // A chosen local folder is not in the cache list; a chosen repo that is
-      // no longer downloaded is simply not offered (resolve() ignores it too).
-      if (mfx.resolved.source === "selected" && !mfx.cached.some((c) => c.model === mfx.chosen)) {
-        const o = el("option", null, mfx.chosen);
-        o.value = mfx.chosen;
-        modelSel.appendChild(o);
-      }
-      modelSel.dataset.sig = sig;
-    }
-    modelSel.dataset.engine = mfx.id;
-    modelSel.value = mfx.resolved.source === "selected" ? mfx.chosen : "";
-    const r = mfx.resolved;
-    const modelNote = $("#stillsModelNote");
-    if (r.source === "download") {
-      modelNote.textContent = `Nothing downloaded for this engine yet — mflux will ` +
-        `download ${r.model} the first time you create stills.`;
-      modelNote.className = "field-warn";
+  const addingStills = stillsAddingNew();
+  if (!addingStills) stillsEngineSel.value = stillsEngine;
+  const editableStill = mfluxConfigs().some((c) => c.id === stillsEngineSel.value) ||
+    (stillsEngineSel.value && stillsEngineSel.value !== "auto" &&
+     modelCap(stillsEngineSel.value)?.engine === "mflux");
+  $("#btnEditStillsEngine").disabled = !editableStill;
+  $("#btnEditStillsEngine").title = editableStill ? ""
+    : stillsEngineSel.value === "auto" ? "Pick an mflux engine to edit it"
+    : "Built-in vpipe engine — not defined in mflux-engines.json";
+  // While "+ Add" is open, the dropdown shows the draft — leave it alone.
+  if (!addingStills) {
+    const autoPick = imageModels.find((m) => m.available);
+    const engineCapStill = stillsEngine === "auto" ? autoPick : modelCap(stillsEngine);
+    const stillsChip = $("#stillsStatus");
+    stillsChip.hidden = !engineCapStill;
+    stillsChip.dataset.status = engineCapStill?.available ? "ready" : "unavailable";
+    stillsChip.textContent = engineCapStill?.available ? "Ready" : "Unavailable";
+    stillsChip.title = engineCapStill && !engineCapStill.available ? engineCapStill.unavailableReason || "" : "";
+    const stillsEngineNote = $("#stillsEngineNote");
+    if (!engineCapStill) {
+      stillsEngineNote.textContent = "No still engine is ready — download Krea-2 into " +
+        "the vpipe workspace, or install mflux (uv tool install mflux).";
+      stillsEngineNote.className = "field-warn";
+    } else if (!engineCapStill.available) {
+      stillsEngineNote.textContent = engineCapStill.unavailableReason || "Not available.";
+      stillsEngineNote.className = "field-warn";
     } else {
-      modelNote.textContent = `Using ${r.model}` +
-        (r.quantization ? ` (already ${r.quantization}-bit)` : " (full precision)") +
-        " — already downloaded, nothing to fetch.";
-      modelNote.className = "field-note";
+      const name = engineCapStill.label.split("—")[0].trim();
+      stillsEngineNote.textContent = (stillsEngine === "auto" ? `Using ${name}. ` : "") +
+        (engineCapStill.engine === "mflux"
+          ? mfluxReferenceNote(((state.info && state.info.mflux) || [])
+              .find((e) => e.id === engineCapStill.id)?.references)
+          : "Uses the shot's prompt, scene and cast, plus its Start Ref or a cast " +
+            "portrait as an identity reference.");
+      stillsEngineNote.className = "field-note";
     }
+
+    // mflux model: what this Mac already has downloaded, and only when there is
+    // nothing does it fall back to letting mflux download the default.
+    const mfx = engineCapStill && engineCapStill.available && engineCapStill.engine === "mflux"
+      ? ((state.info && state.info.mflux) || []).find((e) => e.id === engineCapStill.id)
+      : null;
+    $("#stillsModelWrap").hidden = !mfx;
+    if (mfx) {
+      const gb = (b) => `${(b / 1e9).toFixed(1)} GB`;
+      const modelSel = $("#stillsModel");
+      const sig = [mfx.id, mfx.chosen, mfx.resolved.source, ...mfx.cached.map((c) => c.model)].join("|");
+      if (modelSel.dataset.sig !== sig) {
+        modelSel.textContent = "";
+        const auto = el("option", null, mfx.cached.length
+          ? "Automatic — use a downloaded model"
+          : `Download ${mfx.defaultModel} on first use`);
+        auto.value = "";
+        modelSel.appendChild(auto);
+        mfx.cached.forEach((c) => {
+          const o = el("option", null, `${c.model} — ${gb(c.sizeBytes)}, ` +
+            (c.quantization ? `${c.quantization}-bit` : "full precision"));
+          o.value = c.model;
+          modelSel.appendChild(o);
+        });
+        // A chosen local folder is not in the cache list; a chosen repo that is
+        // no longer downloaded is simply not offered (resolve() ignores it too).
+        if (mfx.resolved.source === "selected" && !mfx.cached.some((c) => c.model === mfx.chosen)) {
+          const o = el("option", null, mfx.chosen);
+          o.value = mfx.chosen;
+          modelSel.appendChild(o);
+        }
+        modelSel.dataset.sig = sig;
+      }
+      modelSel.dataset.engine = mfx.id;
+      modelSel.value = mfx.resolved.source === "selected" ? mfx.chosen : "";
+      const r = mfx.resolved;
+      const modelNote = $("#stillsModelNote");
+      if (r.source === "download") {
+        modelNote.textContent = `Nothing downloaded for this engine yet — mflux will ` +
+          `download ${r.model} the first time you create stills.`;
+        modelNote.className = "field-warn";
+      } else {
+        modelNote.textContent = `Using ${r.model}` +
+          (r.quantization ? ` (already ${r.quantization}-bit)` : " (full precision)") +
+          " — already downloaded, nothing to fetch.";
+        modelNote.className = "field-note";
+      }
+    }
+
   }
 
   // stills steps / seed — mirror orchestrator.still_params
@@ -2758,8 +3331,8 @@ function renderRail() {
     : `Automatic: ${largeStills ? 8 : 4} steps at this size (4 at Small, 8 at Large).`;
   const seedNote = $("#stillsSeedNote");
   seedNote.textContent = stillDefaults.stillsSeed
-    ? "Same seed every time, so the same prompt gives the same stills."
-    : "A new random seed each time you press Create Stills.";
+    ? "Same seed every time, so the same prompt gives the same image."
+    : "A new random seed each time you press Create Image.";
   const lastStills = (selectedShot() || {}).stills || {};
   const lastSeed = lastStills.start && lastStills.start.seed;
   if (lastSeed && lastSeed !== stillDefaults.stillsSeed) {
@@ -2771,86 +3344,80 @@ function renderRail() {
 
   const ttsSel = $("#ttsEngine");
   if (ttsSel.dataset.built !== "1") {
+    ttsSel.textContent = "";
+    // Status is shown by the Online/Offline chip beside the dropdown.
     state.tts.forEach((e) => {
-      const o = el("option", null, e.healthy ? e.label : `${e.label} — unavailable`);
+      const o = el("option", null, e.label);
       o.value = e.id;
       ttsSel.appendChild(o);
     });
     ttsSel.dataset.built = "1";
   }
-  const chosenTts = state.board.defaults.tts || "none";
-  ttsSel.value = chosenTts;
-  const eng = state.tts.find((e) => e.id === chosenTts);
-  const noteBox = $("#ttsNote");
-  const recordingLines = shots().filter((raw) =>
-    (raw.dialogue || "").trim() &&
-    (raw.dialogueSource || "auto") === "recording" &&
-    !raw.dialogueAudioUrl
-  ).length;
-  if (eng && !eng.healthy) {
-    noteBox.textContent = eng.message || "This speech engine is unavailable.";
-  } else if (recordingLines) {
-    noteBox.textContent =
-      `${recordingLines} dialogue shot${recordingLines === 1 ? "" : "s"} still need a generated recording. ` +
-      "Select this engine, then use Generate in each shot's Dialogue panel before rendering.";
-  } else {
-    noteBox.textContent = "";
+  // While "+ Add" is open, the dropdown shows the draft — leave it alone.
+  if (!ttsAddingNew()) {
+    const chosenTts = state.board.defaults.tts || "none";
+    ttsSel.value = chosenTts;
+    const eng = state.tts.find((e) => e.id === chosenTts);
+    const noteBox = $("#ttsNote");
+    const recordingLines = shots().filter((raw) =>
+      (raw.dialogue || "").trim() &&
+      (raw.dialogueSource || "auto") === "recording" &&
+      !raw.dialogueAudioUrl
+    ).length;
+    if (eng && !eng.healthy && eng.id !== "none") {
+      noteBox.textContent = eng.message || "This speech engine is unavailable.";
+    } else if (recordingLines) {
+      noteBox.textContent =
+        `${recordingLines} dialogue shot${recordingLines === 1 ? "" : "s"} still need a generated recording. ` +
+        "Select this engine, then use Generate in each shot's Dialogue panel before rendering.";
+    } else {
+      noteBox.textContent = eng && eng.id === "none" ? (eng.message || "") : "";
+    }
+    noteBox.className = eng && !eng.healthy && eng.id !== "none" || recordingLines ? "field-warn" : "field-note";
+    const chip = $("#ttsStatus");
+    chip.hidden = !eng || eng.id === "none";
+    chip.dataset.status = eng?.healthy ? "online" : "offline";
+    chip.textContent = eng?.healthy ? "Online" : "Offline";
+    chip.title = eng && !eng.healthy ? eng.message || "" : "";
   }
-  noteBox.className = eng && !eng.healthy || recordingLines ? "field-warn" : "field-note";
+  $("#btnEditTtsService").disabled = !ttsSel.value || ttsSel.value === "none";
 
   const llmSel = $("#llmService");
   const llmAll = (state.info.llm && state.info.llm.services) || [];
   if (llmSel.dataset.built !== "1" && llmAll.length) {
+    llmSel.textContent = "";
     llmAll.forEach((sv) => {
+      // Status is shown by the Online/Offline chip beside the dropdown.
       const o = el("option", null,
-        sv.id === "none" ? sv.label
-          : sv.healthy ? `${sv.label} · ${sv.model}`
-          : `${sv.label} — unavailable`);
+        sv.id === "none" || !sv.model ? sv.label : `${sv.label} · ${sv.model}`);
       o.value = sv.id;
       llmSel.appendChild(o);
     });
     llmSel.dataset.built = "1";
   }
-  const chosenLlm =
-    state.board.defaults.llm || (state.info.llm && state.info.llm.default) || "none";
-  llmSel.value = chosenLlm;
-  const sv = llmAll.find((x) => x.id === chosenLlm);
-  const llmNote = $("#llmNote");
-  llmNote.textContent = sv && !sv.healthy
-    ? sv.message
-    : sv && sv.id !== "none"
-    ? "Rewrites are shown for approval before they replace anything."
-    : "";
-  llmNote.className = sv && !sv.healthy ? "field-warn" : "field-note";
-
-  // API key for the selected service: shown only for services that can take
-  // one, and only ever as where the key comes from, never the key.
-  $("#llmKeyWrap").hidden = !(sv && sv.supportsKey);
-  if (sv && sv.supportsKey) {
-    const keyInput = $("#llmKeyInput");
-    keyInput.placeholder = sv.keySource === "settings"
-      ? "A key is saved — paste a new one to replace it"
-      : "Paste the API key";
-    $("#btnClearLlmKey").hidden = sv.keySource !== "settings";
-    const keyNote = $("#llmKeyNote");
-    const envName = sv.keyEnv ? `$${sv.keyEnv}` : "";
-    keyNote.className = "field-note";
-    if (sv.keySource === "settings") {
-      keyNote.textContent = "Using the key saved on this Mac (server-config.json, readable only by you).";
-    } else if (sv.keySource === "env") {
-      keyNote.textContent = `Using ${envName} from the environment. A key saved here takes priority.`;
-    } else if (sv.keySource === "file") {
-      keyNote.textContent = "Using the apiKey written in plain text in llm-services.json — " +
-        "saving the key here instead is safer (readable only by you), and takes priority.";
-      keyNote.className = "field-warn";
-    } else if (sv.needsKey) {
-      keyNote.textContent = "This service needs a key" +
-        (envName ? ` — save one here, or set ${envName} before starting Storyboard.` : ".");
-      keyNote.className = "field-warn";
-    } else {
-      keyNote.textContent = "Optional — leave blank if this service doesn't need one.";
-    }
+  // While "+ Add" is open, the dropdown shows the draft — leave it alone.
+  if (!llmAddingNew()) {
+    const chosenLlm =
+      state.board.defaults.llm || (state.info.llm && state.info.llm.default) || "none";
+    llmSel.value = chosenLlm;
+    const sv = llmAll.find((x) => x.id === chosenLlm);
+    const llmNote = $("#llmNote");
+    llmNote.textContent = sv && !sv.healthy
+      ? sv.message
+      : sv && sv.id !== "none"
+      ? "Rewrites are shown for approval before they replace anything."
+      : !llmConfigs().length
+      ? "No LLM services yet — click + Add to set one up."
+      : "";
+    llmNote.className = sv && !sv.healthy ? "field-warn" : "field-note";
+    const chip = $("#llmStatus");
+    chip.hidden = !sv || sv.id === "none";
+    chip.dataset.status = sv?.healthy ? "online" : "offline";
+    chip.textContent = sv?.healthy ? "Online" : "Offline";
+    chip.title = sv && !sv.healthy ? sv.message || "" : "";
   }
+  $("#btnEditLlmService").disabled = !llmSel.value || llmSel.value === "none";
+
 
   const stepsInput = $("#defSteps");
   if (document.activeElement !== stepsInput) {
@@ -2859,53 +3426,6 @@ function renderRail() {
 
   renderCast();
 
-  const queueShots = shots();
-  const queueBusy = !!(state.status && state.status.busy);
-  const running = queueShots.filter((raw) => view(raw).status === "running").length;
-  const queued = queueShots.filter((raw) => view(raw).status === "queued").length;
-  const changed = queueShots.filter((raw) => !!staleWhy(raw.id)).length;
-  const failed = queueShots.filter((raw) =>
-    ["failed", "blocked", "review", "interrupted"].includes(view(raw).status)
-  ).length;
-  const summary = [`${queueShots.length} shot(s)`];
-  if (running) summary.push(`${running} running`);
-  if (queued) summary.push(`${queued} queued`);
-  if (changed) summary.push(`${changed} changed`);
-  if (failed) summary.push(`${failed} need attention`);
-  $("#queueSummary").textContent = summary.join(" · ");
-  if (queueBusy || failed > 0) $("#queueBox").open = true;
-
-  const q = $("#queueList");
-  q.innerHTML = "";
-  wireDragList(q);
-  queueShots.forEach((raw, i) => {
-    const shot = view(raw);
-    const row = el("div", "queue-row");
-    row.dataset.id = raw.id;
-    row.draggable = true;
-    if (raw.id === state.selectedId) row.classList.add("selected");
-    row.appendChild(el("span", "queue-num", String(i + 1)));
-    const dot = el("span", "queue-dot");
-    dot.dataset.status = shot.status;
-    row.appendChild(dot);
-    row.appendChild(el("span", "queue-name", raw.title));
-    const why = staleWhy(raw.id);
-    if (why && shot.status !== "running") {
-      const m = el("span", "queue-stale", "●");
-      m.title = `Changed since it was rendered — ${why}. “Render all” will re-run it.`;
-      row.appendChild(m);
-    }
-    if (shot.status === "running") {
-      row.appendChild(el("span", "queue-pct", `${Math.round(shot.progress)}%${etaSuffix(shot)}`));
-    }
-    row.addEventListener("click", () => {
-      state.selectedId = raw.id;
-      state.followRender = false;
-      render();
-    });
-    wireDrag(row, raw, "y");
-    q.appendChild(row);
-  });
 
 }
 
@@ -3762,7 +4282,7 @@ function wireDragList(list) {
   list.dataset.dragListWired = "1";
   list.addEventListener("dragover", (e) => {
     if (!hasShotDrag(e)) return;
-    if (e.target.closest(".shot-card, .queue-row")) return;
+    if (e.target.closest(".shot-card")) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     list.classList.add("dropping");
@@ -3771,7 +4291,7 @@ function wireDragList(list) {
     if (!list.contains(e.relatedTarget)) list.classList.remove("dropping");
   });
   list.addEventListener("drop", (e) => {
-    if (e.target.closest(".shot-card, .queue-row")) return;
+    if (e.target.closest(".shot-card")) return;
     e.preventDefault();
     const id = draggedShotId(e);
     activeDragShotId = null;
@@ -3820,7 +4340,7 @@ function renderEditor() {
   const live = () => shotById(raw.id) || raw;
 
   const head = el("div", "editor-head");
-  const h = el("div", "section-label", `Shot ${idx + 1}`);
+  const h = cardHeading(`Shot ${idx + 1}`);
   h.style.margin = "0";
   head.append(h, chip(shot.status));
   const sp = el("div");
@@ -4024,8 +4544,8 @@ function renderEditor() {
   });
   head.appendChild(one);
 
-  const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Stills");
-  stillsBtn.title = "A fast preview of this shot's opening frame (engine: Settings → Create Stills)";
+  const stillsBtn = el("button", "btn btn-ghost btn-sm", "Create Image");
+  stillsBtn.title = "Creates a story board image from the scene prompt.";
   stillsBtn.disabled = !!(state.status && state.status.busy) || stillsBusy;
   stillsBtn.addEventListener("click", async () => {
     stillsBtn.disabled = true;
@@ -4373,8 +4893,8 @@ function renderEditor() {
       modelNow === "wan-i2v"
         ? "Wan 2.2 requires a Start frame; End frame is not sent"
         : modelNow === "ltx-2.5"
-        ? "Sent to LTX-2.5 as hard-pinned anchors, not ordered references — the frame IS that picture"
-        : "Sent to Ref2VA as ordered references, never hard-pinned frames"
+        ? "sent to LTX-2.5 as hard-pinned anchors, not ordered references — the frame IS that picture"
+        : "sent to Ref2VA as ordered references, never hard-pinned frames"
     ));
 
     const slots = el("div", "ref-slots");
@@ -4458,7 +4978,7 @@ function renderEditor() {
   // params
   const params = el("div", "panel");
   params.style.marginTop = "var(--sp-3)";
-  params.appendChild(el("div", "section-label", "Parameters"));
+  params.appendChild(cardHeading("Parameters"));
 
   const isImage = cap && cap.kind === "image";
   const row = el("div", "field-row");
@@ -4948,7 +5468,7 @@ function renderStillsPane(raw) {
   if (runningHere) {
     wrap.appendChild(el("div", "stills-status", "Generating still…"));
   } else if (failedHere) {
-    wrap.appendChild(el("div", "stills-status stills-error", `Stills failed: ${st.error}`));
+    wrap.appendChild(el("div", "stills-status stills-error", `Image failed: ${st.error}`));
   }
 
   // While a job for this shot is running (or just failed), the live
@@ -4961,8 +5481,8 @@ function renderStillsPane(raw) {
     if (!runningHere) {
       wrap.appendChild(
         el("div", "empty-state",
-           "No still yet — “Create Stills” renders a fast preview of " +
-           "this shot's opening frame.")
+           "No image yet — “Create Image” creates a storyboard image of " +
+           "this shot's opening frame from the scene prompt.")
       );
     }
     return wrap;
@@ -4993,6 +5513,22 @@ function renderStillsPane(raw) {
 
 /* --- preview ------------------------------------------------------------- */
 
+// Media URLs that failed to load, so a missing clip shows its placeholder at
+// once on the next repaint instead of retrying (and flashing) every poll. A
+// fresh render gets a new URL (its ?t= stamp changes), so it is tried again.
+const missingMedia = new Set();
+
+function stagePlaceholder(stage, icon, text) {
+  const ph = el("img", "preview-placeholder");
+  ph.src = "assets/shot-placeholder.png";
+  ph.alt = "";
+  stage.appendChild(ph);
+  const e = el("div", "preview-empty");
+  e.appendChild(el("span", "big", icon));
+  e.appendChild(el("span", null, text));
+  stage.appendChild(e);
+}
+
 function renderPreview() {
   const host = $("#preview");
 
@@ -5011,7 +5547,14 @@ function renderPreview() {
   if (!raw) return;
   const shot = view(raw);
 
-  host.appendChild(el("div", "section-label", "Output"));
+  // Two cards, like the rail and the shot column: the output itself (clip,
+  // final video or stills, plus what the render is doing), then its
+  // Details / Backend output.
+  const outputCard = el("div", "panel output-card");
+  const detailCard = el("div", "panel output-card");
+  host.append(outputCard, detailCard);
+
+  outputCard.appendChild(cardHeading("Output"));
 
   // Stills are a second view of the same output card, on equal footing with
   // the rendered clip — not a debug/detail tab, so this toggle lives right
@@ -5020,9 +5563,9 @@ function renderPreview() {
   mainTabs.classList.add("output-tabs");
   const activeMainTab = state.previewMainTab || "clip";
   [
-    { id: "clip", label: "Clip" },
+    { id: "stills", label: "Image" },
+    { id: "clip", label: "Scene Clip" },
     { id: "final", label: "Final Video" },
-    { id: "stills", label: "Stills" },
   ].forEach((t) => {
     const b = el("button", "tab");
     b.dataset.tab = t.id;
@@ -5039,12 +5582,12 @@ function renderPreview() {
   paintOutputMute(mute);
   mute.addEventListener("click", () => applyOutputMute(!outputMuted()));
   mainTabs.appendChild(mute);
-  host.appendChild(mainTabs);
+  outputCard.appendChild(mainTabs);
 
   if (activeMainTab === "stills") {
-    host.appendChild(renderStillsPane(raw));
+    outputCard.appendChild(renderStillsPane(raw));
   } else if (activeMainTab === "final") {
-    host.appendChild(renderFinalPane());
+    outputCard.appendChild(renderFinalPane());
   } else {
     const stage = el("div", "preview-stage");
     // A native H3 render already contains the cloned character voice.  A
@@ -5054,9 +5597,31 @@ function renderPreview() {
     const video = (raw.renderedDialogueSource !== "native" && raw.dubUrl) ||
       (shot.outputs || []).find((u) => hasExt(u, "mp4"));
     const image = (shot.outputs || []).find((u) => hasExt(u, "jpe?g|png|webp"));
-    if (video) {
-      stage.appendChild(
-        reuse(video, () => {
+    const rendering = shot.status === "running"
+      ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}${etaSuffix(shot)}`
+      : "";
+    // A clip or image the board points at but that won't load (deleted,
+    // moved with the data folder) shows the placeholder, not a broken player.
+    const showMissing = () => {
+      stage.textContent = "";
+      stagePlaceholder(stage, rendering ? "◐" : "▦", rendering || "Scene clip file is missing");
+      outputCard.querySelector(".preview-actions")?.remove();
+    };
+    const media = (url, make) => {
+      if (missingMedia.has(url)) return null;
+      const node = reuse(url, make);
+      // The element is carried across repaints, so watch it only once.
+      if (!node.dataset.watched) {
+        node.dataset.watched = "1";
+        node.addEventListener("error", () => {
+          missingMedia.add(url);
+          showMissing();
+        }, { once: true });
+      }
+      return node;
+    };
+    const shown = video
+      ? media(video, () => {
           const v = el("video");
           v.src = video;
           v.controls = true;
@@ -5064,62 +5629,47 @@ function renderPreview() {
           v.muted = outputMuted();
           return v;
         })
-      );
-    } else if (image) {
-      stage.appendChild(
-        reuse(image, () => {
+      : image
+      ? media(image, () => {
           const img = el("img");
           img.src = image;
           return img;
         })
-      );
-    } else if (raw.thumb) {
-      stage.appendChild(
-        reuse(raw.thumb, () => {
+      : raw.thumb
+      ? media(raw.thumb, () => {
           const img = el("img");
           img.src = raw.thumb;
           return img;
         })
-      );
+      : undefined;
+    if (shown) {
+      stage.appendChild(shown);
+    } else if (shown === null) {
+      stagePlaceholder(stage, rendering ? "◐" : "▦", rendering || "Scene clip file is missing");
     } else {
-      const ph = el("img", "preview-placeholder");
-      ph.src = "assets/shot-placeholder.png";
-      ph.alt = "";
-      stage.appendChild(ph);
-      const e = el("div", "preview-empty");
-      e.appendChild(el("span", "big", shot.status === "running" ? "◐" : "▦"));
-      e.appendChild(
-        el(
-          "span",
-          null,
-          shot.status === "running"
-            ? `Rendering — ${Math.round(shot.progress)}%${shot.phase ? ` (${shot.phase})` : ""}${etaSuffix(shot)}`
-            : "Not rendered yet"
-        )
-      );
-      stage.appendChild(e);
+      stagePlaceholder(stage, rendering ? "◐" : "▦", rendering || "Not rendered yet");
     }
-    host.appendChild(stage);
+    outputCard.appendChild(stage);
 
-    if (video) {
+    if (video && shown) {
       const actions = el("div", "preview-actions");
       const download = el("a", "btn btn-sm btn-primary", "Download clip");
       download.href = video;
       download.download = sceneClipDownloadName(raw, video);
       download.title = "Download this scene clip";
       actions.appendChild(download);
-      host.appendChild(actions);
+      outputCard.appendChild(actions);
     }
   }
 
   // A plain-language read of what the render is doing, always in view —
   // the technical log below is the detail view for whoever wants it.
-  host.appendChild(renderStageTiles(raw, shot));
+  outputCard.appendChild(renderStageTiles(raw, shot));
 
-  staleNotes(raw, shot.status).forEach((n) => host.appendChild(n));
+  staleNotes(raw, shot.status).forEach((n) => outputCard.appendChild(n));
 
   const diag = diagnostic(raw, shot);
-  if (diag) host.appendChild(diag);
+  if (diag) outputCard.appendChild(diag);
 
   // Details / Backend output share a small tab strip of their own — the raw
   // log is the least-needed-by-default part of this panel, so it is one
@@ -5144,7 +5694,7 @@ function renderPreview() {
     b.addEventListener("click", () => showDetailTab(t.id));
     detailTabs.appendChild(b);
   });
-  host.append(detailTabs, detailPanes);
+  detailCard.append(detailTabs, detailPanes);
 
   const detailsPane = el("div", "tab-pane");
   detailsPane.dataset.tab = "details";
@@ -5180,15 +5730,14 @@ function renderPreview() {
     stats.appendChild(el("dt", null, k));
     stats.appendChild(el("dd", null, v));
   });
-  const sp = el("div", "panel");
-  sp.style.marginBottom = "var(--sp-3)";
+  // Already inside the Details card, so no second panel border around it.
+  const sp = el("div", "details-stats");
   sp.appendChild(stats);
   detailsPane.appendChild(sp);
 
   const logPane = el("div", "tab-pane");
   logPane.dataset.tab = "log";
-  const lbl = el("div", "section-label", "Backend output");
-  lbl.appendChild(el("span", "hint", "— newest first; stills, the render, and any spoken line"));
+  const lbl = cardHeading("Backend output", "newest first; stills, the render, and any spoken line");
   logPane.appendChild(lbl);
 
   /* One window, two producers. They go into separate containers inside it so
@@ -5207,7 +5756,7 @@ function renderPreview() {
 
   // "Create Stills" runs outside the normal render queue, so its log lives
   // on state.status.stills rather than on this shot's own run — shown here,
-  // not just as a phase label in the Stills tab, so the same vpipe detail
+  // not just as a phase label in the Image tab, so the same vpipe detail
   // is one click away for a still as it is for a full render.
   const st = state.status && state.status.stills;
   if (st && st.shotId === raw.id && st.log && st.log.length) {
@@ -5386,18 +5935,6 @@ function paintStale() {
         have.remove();
       }
     }
-
-    const row = document.querySelector(`.queue-row[data-id="${raw.id}"]`);
-    if (row) {
-      const have = row.querySelector(".queue-stale");
-      if (why && !have) {
-        const m = el("span", "queue-stale", "●");
-        m.title = `Changed since it was rendered — ${why}. “Render all” will re-run it.`;
-        row.insertBefore(m, row.querySelector(".queue-pct"));
-      } else if (!why && have) {
-        have.remove();
-      }
-    }
   });
 
   const host = $("#preview");
@@ -5524,6 +6061,15 @@ function diagnostic(raw, shot) {
 
 /* --- prompt rewriting ---------------------------------------------------- */
 
+/* The one way to build a card heading in JS — see .card-heading in app.css.
+   Renders "HEADING — description"; the dash is added by CSS. */
+function cardHeading(title, description) {
+  const h = el("div", "card-heading");
+  h.appendChild(el("span", "card-heading-title", title));
+  if (description) h.appendChild(el("span", "card-heading-desc", description));
+  return h;
+}
+
 function paneHint(text, description) {
   if (description === undefined) {
     // Legacy single-line hint: plain small text, no heading styling.
@@ -5531,15 +6077,11 @@ function paneHint(text, description) {
     h.appendChild(el("span", "pane-hint", text));
     return h;
   }
-  // The heading and its description stay together in one column so an
-  // action button appended after (see dialogueHead) sits beside that
-  // column instead of wedging between the two lines. Pass `null` for
-  // description to get a bare, capitalised heading with no note line.
+  // A card heading ("HEADING — description") in a row, so an action button
+  // appended after (see dialogueHead) sits to its right. Pass `null` for
+  // description to get a bare heading.
   const h = el("div", "pane-head pane-head-with-note");
-  const col = el("div", "pane-head-text");
-  col.appendChild(el("div", "pane-label", text));
-  if (description) col.appendChild(el("div", "pane-note", "— " + description));
-  h.appendChild(col);
+  h.appendChild(cardHeading(text, description));
   return h;
 }
 

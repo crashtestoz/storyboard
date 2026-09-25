@@ -47,24 +47,13 @@
         title="Join the rendered clips into one video">⧉ Assemble</button>
     </header>
 
-    <!-- A quiet status strip, shown only while a multi-project batch is
-         active — the render itself may be on a project other than the one
-         currently open, so this is the one place progress is always
-         visible regardless of what's on screen. -->
-    <div class="batch-banner" id="batchBanner" hidden>
-      <span id="batchBannerText"></span>
-      <button class="btn btn-ghost btn-sm" id="batchBannerStop">Stop batch</button>
-    </div>
 
     <!-- ================= rail ================= -->
     <aside class="rail">
 
-      <section>
+      <section class="panel">
         <div class="pane-head pane-head-with-note">
-          <div class="pane-head-text">
-            <div class="pane-label">Scene description</div>
-            <div class="pane-note">— reused every shot</div>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Scene description</span><span class="card-heading-desc">reused every shot</span></div>
           <div class="header-spacer"></div>
           <span id="sceneWandSlot"></span>
         </div>
@@ -73,16 +62,13 @@
         <div class="proposal-slot" id="sceneProposalSlot"></div>
       </section>
 
-      <section>
+      <section class="panel">
         <div class="pane-head pane-head-with-note">
-          <div class="pane-head-text">
-            <div class="pane-label">Background sound</div>
-            <div class="pane-note">— reused every shot</div>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Background sound</span><span class="card-heading-desc">reused every shot</span></div>
           <div class="header-spacer"></div>
           <span id="soundscapeWandSlot"></span>
         </div>
-        <textarea id="soundscape" rows="4"
+        <textarea id="soundscape" rows="5"
           placeholder="The ambient bed under every clip — e.g. “Deep engine roar, rushing wind, the hiss of spray off the water.” Appended after each shot's own description, which is where H3 expects sound cues."></textarea>
         <div class="proposal-slot" id="soundscapeProposalSlot"></div>
         <label class="toggle rail-toggle">
@@ -92,35 +78,19 @@
         </label>
       </section>
 
-      <section>
-        <div class="section-label">
-          Cast
-          <span class="hint">— call them by name in a shot</span>
-        </div>
+      <section class="panel">
+        <div class="card-heading"><span class="card-heading-title">Cast</span><span class="card-heading-desc">call them by name in a shot</span></div>
         <div class="cast-list" id="castList"></div>
         <button class="btn btn-sm" id="addCharacter" style="margin-top:var(--sp-2)">
           + Add character
         </button>
       </section>
 
-      <section>
+      <section class="panel">
         <div class="pane-head pane-head-with-note">
-          <div class="pane-head-text">
-            <div class="pane-label">Style references</div>
-            <div class="pane-note">— a library; add one to a shot's Reference images to include it in that render</div>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Style references</span><span class="card-heading-desc">a library; add one to a shot's Reference images to include it in that render</span></div>
         </div>
         <div class="style-refs" id="styleRefs"></div>
-      </section>
-
-      <section>
-        <details class="queue-box" id="queueBox">
-          <summary>
-            <span class="pane-label">Queue</span>
-            <span class="queue-summary" id="queueSummary"></span>
-          </summary>
-          <div class="queue-list" id="queueList"></div>
-        </details>
       </section>
 
     </aside>
@@ -129,10 +99,7 @@
     <main class="main">
       <div class="strip-wrap">
         <div class="strip-head">
-          <div class="section-label" style="margin:0">
-            Storyboard
-            <span class="hint">— drag to reorder · scroll horizontally</span>
-          </div>
+          <div class="card-heading" style="margin:0"><span class="card-heading-title">Storyboard</span><span class="card-heading-desc">drag to reorder · scroll horizontally</span></div>
         </div>
         <div class="strip" id="strip"></div>
       </div>
@@ -255,29 +222,97 @@
         <div class="header-spacer"></div>
         <button class="btn btn-ghost btn-sm" id="settingsClose">Done</button>
       </div>
+      <nav class="settings-tabs" role="tablist" aria-label="Settings categories">
+        <button class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general">General</button>
+        <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="video">Video</button>
+        <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="audio">Audio</button>
+        <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="image">Image</button>
+      </nav>
       <div class="modal-body settings-body">
+        <div class="settings-pane active" data-settings-pane="general">
         <section>
-        <div class="section-label">
-          Project
-          <span class="hint">— the name and the folder move together</span>
-        </div>
+        <div class="card-heading"><span class="card-heading-title">Project</span><span class="card-heading-desc">the name and the folder move together</span></div>
         <div class="field">
           <label>Project name</label>
           <div class="rename-row">
             <input type="text" id="projName" autocomplete="off">
             <button class="btn btn-sm" id="btnRename" disabled>Rename</button>
+            <button class="btn btn-danger btn-sm" id="btnDeleteBoard" type="button" title="Delete this storyboard — asks you to confirm. Rendered videos and reference files are kept.">Delete</button>
           </div>
           <div class="field-note" id="projPath"></div>
         </div>
-        <button class="btn btn-danger btn-sm" id="btnDeleteBoard" type="button">Delete storyboard…</button>
-        <div class="field-note">Requires typing the storyboard name and confirming. Rendered videos and reference files are kept.</div>
         </section>
 
         <section>
-        <div class="section-label">
-          Clip settings
-          <span class="hint">— applies to every shot</span>
+        <div class="card-heading"><span class="card-heading-title">Storyboard data folder</span><span class="card-heading-desc">each project is stored directly inside this folder</span></div>
+        <div class="field">
+          <label>Folder path</label>
+          <input type="text" id="dataDirInput" autocomplete="off" spellcheck="false">
         </div>
+        <div class="field-note" id="dataDirWarn"></div>
+        <div class="field-note">
+          Example: choosing <code>/Volumes/Media/storyboard-projects</code>
+          stores a board under
+          <code>/Volumes/Media/storyboard-projects/my-board/</code>.
+          Changing this setting does not move existing folders.
+        </div>
+        <div class="rename-row" style="margin-top:var(--sp-2)">
+          <button class="btn btn-sm" id="btnSaveDataDir">Save &amp; restart server</button>
+        </div>
+        </section>
+
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Prompt rewriting</span><span class="card-heading-desc">the 🪄 button</span></div>
+        <div class="field">
+          <label for="llmService">LLM service <span class="hint-inline">used by this project · services are shared by every project on this Mac</span></label>
+          <div class="rename-row">
+            <select id="llmService"></select>
+            <span class="chip" id="llmStatus" hidden></span>
+            <button class="btn btn-sm" id="btnEditLlmService" type="button">Edit</button>
+            <button class="btn btn-sm" id="btnNewLlmService" type="button">+ Add</button>
+          </div>
+          <div class="field-note" id="llmNote"></div>
+        </div>
+        <div class="llm-editor" id="llmEditor" hidden>
+          <div class="llm-editor-title" id="llmEditorTitle">New service</div>
+          <div class="field-row">
+            <div class="field"><label for="llmServiceLabel">Name</label><input type="text" id="llmServiceLabel" placeholder="e.g. Local Llama" autocomplete="off"></div>
+            <div class="field"><label for="llmServiceKind">Type</label><select id="llmServiceKind">
+              <optgroup label="On your computer or network">
+                <option value="ollama">Ollama</option>
+                <option value="lmstudio">LM Studio</option>
+                <option value="openai">Other OpenAI-compatible server (llama.cpp, vLLM, MLX…)</option>
+              </optgroup>
+              <optgroup label="Cloud APIs (need an API key)">
+                <option value="openai-api">OpenAI</option>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="groq">Groq</option>
+                <option value="mistral">Mistral</option>
+              </optgroup>
+            </select></div>
+          </div>
+          <div class="field"><label for="llmServiceUrl">Server URL</label><input type="text" id="llmServiceUrl" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceUrlNote"></div></div>
+          <div class="field"><label for="llmServiceModel">Model</label><input type="text" id="llmServiceModel" placeholder="e.g. llama3.1:8b" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceModelNote"></div></div>
+          <label class="toggle"><input type="checkbox" id="llmServiceAuth"><span class="toggle-track"></span><span>Requires an API key</span></label>
+          <div class="field" id="llmServiceKeyWrap" hidden>
+            <label for="llmServiceKey">API key <span class="hint-inline">stored on this Mac only</span></label>
+            <input type="password" id="llmServiceKey" autocomplete="off" spellcheck="false">
+            <div class="field-note" id="llmServiceKeyNote"></div>
+            <div class="field-note" id="llmServiceKeyHelp"></div>
+          </div>
+          <div class="llm-editor-actions">
+            <button class="btn btn-primary btn-sm" id="btnSaveLlmService" type="button">Save</button>
+            <button class="btn btn-ghost btn-sm" id="btnCancelLlmService" type="button">Cancel</button>
+            <div class="header-spacer"></div>
+            <button class="btn btn-danger btn-sm" id="btnDeleteLlmService" type="button">Delete</button>
+          </div>
+        </div>
+        </section>
+
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Clip settings</span><span class="card-heading-desc">applies to every shot</span></div>
         <div class="field-row">
           <div class="field">
             <label>Aspect ratio</label>
@@ -302,32 +337,12 @@
           <label>Default steps <span class="hint-inline">8 draft · 16 good</span></label>
           <input type="number" id="defSteps" value="8">
         </div>
-        <div class="field">
-          <label>Speech engine <span class="hint-inline">for dialogue</span></label>
-          <select id="ttsEngine"></select>
-          <div class="field-note" id="ttsNote"></div>
-        </div>
-        <div class="field">
-          <label>Prompt rewriting <span class="hint-inline">the 🪄 button</span></label>
-          <select id="llmService"></select>
-          <div class="field-note" id="llmNote"></div>
-        </div>
-        <div class="field" id="llmKeyWrap" hidden>
-          <label>API key <span class="hint-inline">this Mac only</span></label>
-          <input type="password" id="llmKeyInput" autocomplete="off" spellcheck="false">
-          <div class="rename-row" style="margin-top:var(--sp-2)">
-            <button class="btn btn-sm" id="btnSaveLlmKey">Save key</button>
-            <button class="btn btn-ghost btn-sm" id="btnClearLlmKey">Remove saved key</button>
-          </div>
-          <div class="field-note" id="llmKeyNote"></div>
-        </div>
         </section>
 
-        <section>
-        <div class="section-label">
-          Draft mode
-          <span class="hint">— fast, rough, same motion</span>
         </div>
+        <div class="settings-pane" data-settings-pane="video">
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Draft mode</span><span class="card-heading-desc">fast, rough, same motion</span></div>
         <label class="toggle" id="draftToggleWrap">
           <input type="checkbox" id="draftToggle">
           <span class="toggle-track"></span>
@@ -341,12 +356,44 @@
         </label>
         <div class="cast-note" id="sketchNote" style="margin-top:var(--sp-2)"></div>
         </section>
-
-        <section>
-        <div class="section-label">
-          Create Stills
-          <span class="hint">— a one-image preview of the shot's opening frame</span>
         </div>
+        <div class="settings-pane" data-settings-pane="audio">
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Audio settings</span></div>
+        <div class="field">
+          <label for="ttsEngine">Speech engine <span class="hint-inline">for dialogue in this project · engines are shared by every project on this Mac</span></label>
+          <div class="rename-row">
+            <select id="ttsEngine"></select>
+            <span class="chip" id="ttsStatus" hidden></span>
+            <button class="btn btn-sm" id="btnEditTtsService" type="button">Edit</button>
+            <button class="btn btn-sm" id="btnNewTtsService" type="button">+ Add</button>
+          </div>
+          <div class="field-note" id="ttsNote"></div>
+        </div>
+        <div class="llm-editor" id="ttsEditor" hidden>
+          <div class="llm-editor-title" id="ttsEditorTitle">New speech engine</div>
+          <div class="field-row">
+            <div class="field"><label for="ttsServiceLabel">Name</label><input type="text" id="ttsServiceLabel" placeholder="e.g. Qwen3 voice clone" autocomplete="off"></div>
+            <div class="field"><label for="ttsServiceKind">Type</label><select id="ttsServiceKind">
+              <option value="qwen3-clone">Qwen3-TTS voice clone (server)</option>
+              <option value="plain-sherpa">Plain TTS server (sherpa-onnx, /api/tts)</option>
+              <option value="vpipe-moss">MOSS-TTS 8B via vpipe (this Mac)</option>
+            </select></div>
+          </div>
+          <div class="field-note" id="ttsServiceKindNote"></div>
+          <div class="field" id="ttsServiceUrlWrap"><label for="ttsServiceUrl">Server URL</label><input type="text" id="ttsServiceUrl" autocomplete="off" spellcheck="false"><div class="field-note" id="ttsServiceUrlNote"></div></div>
+          <div class="llm-editor-actions">
+            <button class="btn btn-primary btn-sm" id="btnSaveTtsService" type="button">Save</button>
+            <button class="btn btn-ghost btn-sm" id="btnCancelTtsService" type="button">Cancel</button>
+            <div class="header-spacer"></div>
+            <button class="btn btn-danger btn-sm" id="btnDeleteTtsService" type="button">Delete</button>
+          </div>
+        </div>
+        </section>
+        </div>
+        <div class="settings-pane" data-settings-pane="image">
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Create Image</span><span class="card-heading-desc">a storyboard image of the shot's opening frame, from the scene prompt</span></div>
         <div class="field">
           <label>Size</label>
           <select id="stillsSize">
@@ -356,10 +403,49 @@
         </div>
         <div class="field-note" id="stillsSizeNote"></div>
         <div class="field">
-          <label>Engine</label>
-          <select id="stillsEngine"></select>
+          <label for="stillsEngine">Engine <span class="hint-inline">for this project · mflux engines are shared by every project on this Mac</span></label>
+          <div class="rename-row">
+            <select id="stillsEngine"></select>
+            <span class="chip" id="stillsStatus" hidden></span>
+            <button class="btn btn-sm" id="btnEditStillsEngine" type="button">Edit</button>
+            <button class="btn btn-sm" id="btnNewStillsEngine" type="button">+ Add</button>
+          </div>
         </div>
         <div class="field-note" id="stillsEngineNote"></div>
+        <div class="llm-editor" id="stillsEditor" hidden>
+          <div class="llm-editor-title" id="stillsEditorTitle">New mflux engine</div>
+          <div class="field-row">
+            <div class="field"><label for="stillsEngLabel">Name</label><input type="text" id="stillsEngLabel" placeholder="e.g. Z-Image Turbo via mflux" autocomplete="off"></div>
+            <div class="field"><label for="stillsEngPreset">Model family</label><select id="stillsEngPreset"></select></div>
+          </div>
+          <div class="field-note" id="stillsEngPresetNote"></div>
+          <div class="field-row">
+            <div class="field"><label for="stillsEngCommand">mflux command</label><input type="text" id="stillsEngCommand" placeholder="mflux-generate-z-image-turbo" autocomplete="off" spellcheck="false"></div>
+            <div class="field"><label for="stillsEngModel">Model</label><input type="text" id="stillsEngModel" placeholder="z-image-turbo" autocomplete="off" spellcheck="false"></div>
+          </div>
+          <div class="field-note" id="stillsEngModelNote"></div>
+          <div class="field" id="stillsEngBaseWrap" hidden>
+            <label for="stillsEngBase">Base model <span class="hint-inline">which family this checkpoint belongs to</span></label>
+            <select id="stillsEngBase"></select>
+          </div>
+          <div class="field-row">
+            <div class="field"><label for="stillsEngQuantize">Quantize</label><select id="stillsEngQuantize">
+              <option value="8">8-bit (recommended)</option>
+              <option value="6">6-bit</option>
+              <option value="5">5-bit</option>
+              <option value="4">4-bit (smallest, some quality loss)</option>
+              <option value="3">3-bit</option>
+              <option value="">Full precision (most memory)</option>
+            </select></div>
+            <div class="field"><label for="stillsEngSteps">Default steps</label><input type="number" id="stillsEngSteps" min="1" max="100" step="1"></div>
+          </div>
+          <div class="llm-editor-actions">
+            <button class="btn btn-primary btn-sm" id="btnSaveStillsEngine" type="button">Save</button>
+            <button class="btn btn-ghost btn-sm" id="btnCancelStillsEngine" type="button">Cancel</button>
+            <div class="header-spacer"></div>
+            <button class="btn btn-danger btn-sm" id="btnDeleteStillsEngine" type="button">Delete</button>
+          </div>
+        </div>
         <div id="stillsModelWrap" hidden>
           <div class="field">
             <label>Model <span class="hint-inline">— this Mac only</span></label>
@@ -378,33 +464,10 @@
         </div>
         <div class="field-note" id="stillsSeedNote"></div>
         </section>
+        </div>
 
         <section>
-        <div class="section-label">
-          Storyboard data folder
-          <span class="hint">— each project is stored directly inside this folder</span>
-        </div>
-        <div class="field">
-          <label>Folder path</label>
-          <input type="text" id="dataDirInput" autocomplete="off" spellcheck="false">
-        </div>
-        <div class="field-note" id="dataDirWarn"></div>
-        <div class="field-note">
-          Example: choosing <code>/Volumes/Media/storyboard-projects</code>
-          stores a board under
-          <code>/Volumes/Media/storyboard-projects/my-board/</code>.
-          Changing this setting does not move existing folders.
-        </div>
-        <div class="rename-row" style="margin-top:var(--sp-2)">
-          <button class="btn btn-sm" id="btnSaveDataDir">Save &amp; restart server</button>
-        </div>
-        </section>
-
-        <section>
-        <div class="section-label">
-          Web search
-          <span class="hint">— optional; lets the Storyboard AD research things beyond this board</span>
-        </div>
+        <div class="card-heading"><span class="card-heading-title">Web search</span><span class="card-heading-desc">optional; lets the Storyboard AD research things beyond this board</span></div>
         <div class="field">
           <label>Search engine URL</label>
           <input type="text" id="searchUrlInput" autocomplete="off" spellcheck="false" placeholder="e.g. http://10.0.0.200:31808 (SearXNG)">
@@ -417,9 +480,6 @@
           <code>/search?q=...&amp;format=json</code> interface works. Leave
           blank to skip — the AD answers from the board and its own
           knowledge only, exactly as before.
-        </div>
-        <div class="rename-row" style="margin-top:var(--sp-2)">
-          <button class="btn btn-sm" id="btnSaveSearchUrl">Save</button>
         </div>
         </section>
 
@@ -495,10 +555,7 @@
       <div class="modal-body help-body" style="display:block">
 
         <section class="help-section">
-          <div class="section-label">
-            Camera level
-            <span class="hint">— how high the camera sits relative to the subject</span>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Camera level</span><span class="card-heading-desc">how high the camera sits relative to the subject</span></div>
           <svg class="help-diagram" viewBox="0 0 640 480" role="img"
                aria-label="A standing figure with six camera heights marked, from overhead down to ground level.">
             <circle class="help-fig" cx="460" cy="60" r="32"/>
@@ -558,10 +615,7 @@
         </section>
 
         <section class="help-section">
-          <div class="section-label">
-            Shot size
-            <span class="hint">— how much of the subject the frame holds, tightest to widest</span>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Shot size</span><span class="card-heading-desc">how much of the subject the frame holds, tightest to widest</span></div>
           <svg class="help-diagram" viewBox="0 0 640 480" role="img"
                aria-label="A standing figure with seven nested crop lines, from an extreme close-up on the head down to a full shot of the whole body.">
             <!-- The whole composition is drawn off-center (bunched toward
@@ -608,10 +662,7 @@
         </section>
 
         <section class="help-section">
-          <div class="section-label">
-            Camera movement
-            <span class="hint">— how the camera itself moves during the shot, not what it sees</span>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Camera movement</span><span class="card-heading-desc">how the camera itself moves during the shot, not what it sees</span></div>
           <svg class="help-diagram" viewBox="0 0 640 320" role="img"
                aria-label="Six camera moves: dolly, pedestal and truck move the camera itself through space; pan, tilt and roll rotate it in place.">
 
@@ -678,10 +729,7 @@
         </section>
 
         <section class="help-section help-prompt">
-          <div class="section-label">
-            Turn the idea into a prompt
-            <span class="hint">— describe where the camera starts, how it moves, and where it ends</span>
-          </div>
+          <div class="card-heading"><span class="card-heading-title">Turn the idea into a prompt</span><span class="card-heading-desc">describe where the camera starts, how it moves, and where it ends</span></div>
           <p class="help-intro">
             H3 responds more reliably when each part has one clear job. Use this
             order: <strong>starting position</strong> + <strong>movement and direction</strong>

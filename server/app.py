@@ -59,10 +59,16 @@ from .llm import (
     rewrite_prompt,
 )
 from .llm import load_services as load_llm_services
+from .llm import load_config as load_llm_config
+from .llm import KNOWN_KINDS as LLM_KINDS
+from .local_config import ensure_local_configs
 from .dubbing import speaker_for
 from .storyboard_chat import chat as storyboard_chat
 from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts import load_engines as load_tts_engines
+from .backends.mflux_backend import load_config as load_mflux_config
+from .tts import load_config as load_tts_config
+from .tts import KNOWN_KINDS as TTS_KINDS
 from .tts.base import TTSEngine
 from .web_search import format_results as format_search_results
 from .web_search import research_character
@@ -209,6 +215,23 @@ class Context:
         return engines.get(kind or self.default_tts) or engines.get("none")
 
 
+def tts_engines_json(ctx) -> list[dict[str, Any]]:
+    """Speech engines as the page lists them, health included."""
+    out = []
+    for sid, eng in ctx.tts_engines().items():
+        ok, msg = eng.health()
+        out.append({
+            "id": sid,
+            "label": eng.label,
+            "healthy": ok,
+            "message": msg,
+            "supportsCloning": eng.supports_cloning,
+            "supportsTranscription": eng.supports_transcription,
+            "voices": [v.to_json() for v in eng.voices()],
+        })
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "storyboard/0.2"
     ctx: Context  # injected below
@@ -339,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
         ctx = self.ctx
 
         if path == "/api/info":
+            # Page load: seed any missing per-machine config from its sample.
+            ensure_local_configs(ctx.ui_root)
             ok, msg = ctx.backend.health()
             from .hardware import describe_hardware
             return self._send_json(
@@ -356,24 +381,18 @@ class Handler(BaseHTTPRequestHandler):
                     "models": [c.to_json() for c in ctx.backend.capabilities()],
                     "mflux": (ctx.backend.mflux.describe()
                               if getattr(ctx.backend, "mflux", None) else []),
+                    "mfluxConfigs": (load_mflux_config(ctx.ui_root)
+                                     if getattr(ctx.backend, "mflux", None) else []),
                     "llm": {
                         "default": ctx.default_llm,
                         "services": [s.to_json() for s in ctx.llm_services().values()],
+                        "configs": [{k: v for k, v in e.items() if k != "apiKey"}
+                                    for e in load_llm_config(ctx.ui_root)],
                     },
                     "tts": {
                         "default": ctx.default_tts,
-                        "engines": [
-                            {
-                                "id": kind,
-                                "label": eng.label,
-                                "healthy": eng.health()[0],
-                                "message": eng.health()[1],
-                                "supportsCloning": eng.supports_cloning,
-                                "supportsTranscription": eng.supports_transcription,
-                                "voices": [v.to_json() for v in eng.voices()],
-                            }
-                            for kind, eng in ctx.tts_engines().items()
-                        ],
+                        "engines": tts_engines_json(ctx),
+                        "configs": load_tts_config(ctx.ui_root),
                     },
                 }
             )
@@ -911,6 +930,150 @@ class Handler(BaseHTTPRequestHandler):
                 # after the write: describe() reads the saved choice back
                 result["mflux"] = ctx.backend.mflux.describe()
             return self._send_json(result)
+
+        if path == "/api/llm-services":
+            payload = self._read_json() or {}
+            services = payload.get("services")
+            if not isinstance(services, list):
+                raise ValueError("services must be a list")
+            existing = {str(e.get("id")): e for e in load_llm_config(ctx.ui_root)
+                        if isinstance(e, dict)}
+            clean = []
+            ids = set()
+            for item in services:
+                if not isinstance(item, dict):
+                    raise ValueError("each service must be an object")
+                sid = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(item.get("id") or "").strip()).strip("-")
+                kind = str(item.get("kind") or "")
+                if not sid or sid == "none" or sid in ids:
+                    raise ValueError("service IDs must be unique and cannot be 'none'")
+                if kind not in LLM_KINDS:
+                    raise ValueError(f"unknown service type {kind!r}")
+                if not str(item.get("url") or "").startswith(("http://", "https://")):
+                    raise ValueError("service URL must start with http:// or https://")
+                ids.add(sid)
+                # Start from the saved entry so fields the form doesn't show
+                # (numCtx, apiKeyEnv, an inline apiKey) survive an edit.
+                entry = dict(existing.get(sid, {}))
+                entry.update({"id": sid, "label": str(item.get("label") or sid), "kind": kind,
+                              "url": str(item["url"]), "model": str(item.get("model") or "")})
+                entry["requiresKey"] = bool(item.get("requiresKey"))
+                clean.append(entry)
+            config = ctx.ui_root / "llm-services.json"
+            tmp = config.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"services": clean}, indent=2) + "\n")
+            os.chmod(tmp, 0o600)
+            tmp.replace(config)
+            # Keys remain in the existing gitignored, mode-0600 local config.
+            settings_path = ctx.ui_root / SERVER_CONFIG_NAME
+            try:
+                local = json.loads(settings_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                local = {}
+            keys = local.get("llmKeys") if isinstance(local.get("llmKeys"), dict) else {}
+            local["llmKeys"] = {k: v for k, v in keys.items() if k in ids}
+            settings_tmp = settings_path.with_suffix(".json.tmp")
+            settings_tmp.write_text(json.dumps(local, indent=2) + "\n")
+            os.chmod(settings_tmp, 0o600)
+            settings_tmp.replace(settings_path)
+            return self._send_json({"ok": True, "llm": [s.to_json() for s in ctx.llm_services().values()],
+                                    "configs": [{k: v for k, v in e.items() if k != "apiKey"}
+                                                for e in clean]})
+
+        if path == "/api/mflux-engines":
+            mflux = getattr(ctx.backend, "mflux", None)
+            if mflux is None:
+                raise ValueError("this backend has no mflux still engines")
+            payload = self._read_json() or {}
+            engines = payload.get("engines")
+            if not isinstance(engines, list):
+                raise ValueError("engines must be a list")
+            existing = {str(e.get("id")): e for e in load_mflux_config(ctx.ui_root)}
+            video_ids = {c.id for c in ctx.backend.inner.capabilities()}
+            clean = []
+            ids = set()
+            for item in engines:
+                if not isinstance(item, dict):
+                    raise ValueError("each engine must be an object")
+                sid = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(item.get("id") or "").strip()).strip("-")
+                if not sid or sid in ("auto", "none") or sid in ids or sid in video_ids:
+                    raise ValueError("engine IDs must be unique")
+                command = str(item.get("command") or "").strip()
+                model = str(item.get("model") or "").strip()
+                if not command or re.search(r"\s", command):
+                    raise ValueError("enter the mflux command, e.g. mflux-generate-z-image-turbo")
+                if not model:
+                    raise ValueError("enter a model")
+                quantize = item.get("quantize")
+                if quantize in ("", None):
+                    quantize = None
+                elif int(quantize) not in (3, 4, 5, 6, 8):
+                    raise ValueError("quantize must be 3, 4, 5, 6 or 8 bits")
+                steps = int(item.get("steps") or 8)
+                if not 1 <= steps <= 100:
+                    raise ValueError("steps must be between 1 and 100")
+                ids.add(sid)
+                # Keep fields the form doesn't show (extraArgs, match).
+                entry = dict(existing.get(sid, {}))
+                entry.update({"id": sid, "label": str(item.get("label") or sid),
+                              "command": command, "model": model, "steps": steps})
+                if quantize is None:
+                    entry.pop("quantize", None)
+                else:
+                    entry["quantize"] = int(quantize)
+                base = str(item.get("baseModel") or "").strip()
+                if base:
+                    entry["baseModel"] = base
+                else:
+                    entry.pop("baseModel", None)
+                clean.append(entry)
+            config = ctx.ui_root / "mflux-engines.json"
+            tmp = config.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"engines": clean}, indent=2) + "\n")
+            tmp.replace(config)
+            mflux.reload(ctx.ui_root)
+            return self._send_json({
+                "ok": True,
+                "models": [c.to_json() for c in ctx.backend.capabilities()],
+                "mflux": mflux.describe(),
+                "configs": clean,
+            })
+
+        if path == "/api/tts-services":
+            payload = self._read_json() or {}
+            services = payload.get("services")
+            if not isinstance(services, list):
+                raise ValueError("services must be a list")
+            existing = {str(e.get("id")): e for e in load_tts_config(ctx.ui_root)
+                        if isinstance(e, dict)}
+            clean = []
+            ids = set()
+            for item in services:
+                if not isinstance(item, dict):
+                    raise ValueError("each service must be an object")
+                sid = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(item.get("id") or "").strip()).strip("-")
+                kind = str(item.get("kind") or "")
+                if not sid or sid == "none" or sid in ids:
+                    raise ValueError("service IDs must be unique and cannot be 'none'")
+                if kind not in TTS_KINDS:
+                    raise ValueError(f"unknown speech engine type {kind!r}")
+                url = str(item.get("url") or "").strip()
+                if kind != "vpipe-moss" and not url.startswith(("http://", "https://")):
+                    raise ValueError("server URL must start with http:// or https://")
+                ids.add(sid)
+                entry = dict(existing.get(sid, {}))
+                entry.update({"id": sid, "label": str(item.get("label") or sid), "kind": kind})
+                if kind == "vpipe-moss":
+                    entry.pop("url", None)
+                else:
+                    entry["url"] = url
+                clean.append(entry)
+            config = ctx.ui_root / "tts-services.json"
+            tmp = config.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"services": clean}, indent=2) + "\n")
+            tmp.replace(config)
+            return self._send_json({"ok": True, "engines": tts_engines_json(ctx),
+                                    "configs": clean})
 
         if path == "/api/server-settings/restart":
             if ctx.orch.busy:

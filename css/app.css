@@ -100,16 +100,20 @@ button, input, textarea, select {
 .header-spacer { flex: 1; }
 
 /* --- rail ---------------------------------------------------------------- */
+/* Styled like the shot column: each rail section is its own .panel card on
+   the page background. */
 .rail {
   grid-area: rail;
-  background: var(--panel);
+  background: var(--bg);
   border-right: 1px solid var(--border);
   overflow-y: auto;
   padding: var(--sp-4);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5);
+  gap: var(--sp-3);
 }
+
+.rail > section.panel { flex: none; }
 
 /* --- main ---------------------------------------------------------------- */
 .main {
@@ -133,42 +137,59 @@ button, input, textarea, select {
   border-right: 1px solid var(--border);
 }
 
+/* Styled like the rail and the shot column: the output and its details are
+   each a .panel card on the page background (built in renderPreview). */
 #preview {
   grid-area: preview;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
+
+.output-card { flex: none; min-width: 0; }
+.output-card > :last-child,
+.output-card .tab-pane > :last-child { margin-bottom: 0; }
 
 /* ==========================================================================
    Generic bits
    ========================================================================== */
 
-.section-label {
+/* Card headings — the one definition for every card, panel, rail section
+   and dialog section:
+
+     HEADING — description that wraps under the heading when it is long
+
+   Markup: <div class="card-heading"><span class="card-heading-title">…</span>
+   <span class="card-heading-desc">…</span></div>, or cardHeading() in
+   app.js. The dash comes from CSS, so the markup holds only the words, and
+   the heading flows as text (not flex) so a long description wraps. */
+.card-heading {
   font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+  margin: 0 0 var(--sp-2);
+  min-width: 0;
+}
+
+.card-heading-title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: var(--text-faint);
-  font-weight: 600;
-  margin: 0 0 var(--sp-2);
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
 }
 
-.section-label .hint {
+.card-heading-desc {
+  font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
-  font-weight: 400;
   color: var(--text-faint);
-  opacity: 0.8;
+  opacity: 0.85;
 }
 
-/* The rail's scene and sound headings put their project-wide note on the
-   following line. Keep that note close to the heading without changing the
-   spacing of inline section-label hints elsewhere. */
-.section-label-with-note { margin-bottom: 0; }
-.section-label-with-note + .field-note {
-  margin-top: 0;
-  margin-bottom: var(--sp-2);
-}
+/* The dash is tied to the description's first word, so when the description
+   wraps the dash moves down with it instead of dangling after the heading. */
+.card-heading-title + .card-heading-desc::before { content: " —\00a0"; }
 
 .panel {
   background: var(--panel-raised);
@@ -297,6 +318,11 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .chip[data-status="blocked"]     { color: var(--warn);    background: var(--warn-ghost); }
 .chip[data-status="review"]      { color: var(--warn);    background: var(--warn-ghost); }
 .chip[data-status="interrupted"] { color: var(--warn);    background: var(--warn-ghost); }
+.chip[data-status="online"]      { color: var(--ok);      background: var(--ok-ghost); }
+.chip[data-status="offline"]     { color: var(--err);     background: var(--err-ghost); }
+.chip[data-status="ready"]       { color: var(--ok);      background: var(--ok-ghost); }
+.chip[data-status="unavailable"] { color: var(--err);     background: var(--err-ghost); }
+.chip[hidden] { display: none; }
 
 .chip[data-status="running"]::before { animation: pulse 1.1s ease-in-out infinite; }
 
@@ -731,106 +757,13 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .toggle.disabled { opacity: 0.5; cursor: default; }
 .toggle.disabled .toggle-track { cursor: default; }
 
-/* ==========================================================================
-   Queue list (rail)
-   ========================================================================== */
-
-.queue-box > summary {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--sp-2);
-  align-items: baseline;
-  cursor: pointer;
-  list-style: none;
-}
-
-.queue-box > summary::-webkit-details-marker { display: none; }
-
-.queue-box > summary::after {
-  content: "▸";
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: end;
-  color: var(--text-faint);
-  font-size: var(--fs-xs);
-}
-
-.queue-box[open] > summary::after { content: "▾"; }
-
-.queue-summary {
-  min-width: 0;
-  padding-right: 16px;
-  color: var(--text-faint);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.queue-list { display: flex; flex-direction: column; gap: 3px; }
-
-.queue-list.dropping {
-  outline: 1px dashed var(--accent);
-  outline-offset: 3px;
-}
-
-.queue-box[open] .queue-list { margin-top: var(--sp-2); }
-
-.queue-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 6px var(--sp-2);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.12s;
-}
-
-.queue-row:hover { background: var(--panel-hover); }
-.queue-row.selected { background: var(--accent-ghost); }
-.queue-row.dragging { opacity: 0.4; }
-.queue-row.drop-target { background: var(--panel-hover); }
-.queue-row.drop-before { box-shadow: 0 -3px 0 var(--accent); }
-.queue-row.drop-after { box-shadow: 0 3px 0 var(--accent); }
-
-.queue-num {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-  width: 15px;
-  flex: none;
-}
-
-.queue-name {
-  flex: 1;
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+/* Running-shot percentage, in each storyboard card's footer. */
 .queue-pct {
   font-size: var(--fs-xs);
   color: var(--running);
   font-variant-numeric: tabular-nums;
   flex: none;
 }
-
-.queue-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-}
-
-.queue-dot[data-status="draft"]       { background: var(--idle); }
-.queue-dot[data-status="queued"]      { background: var(--text-dim); }
-.queue-dot[data-status="running"]     { background: var(--running); animation: pulse 1.1s ease-in-out infinite; }
-.queue-dot[data-status="done"]        { background: var(--ok); }
-.queue-dot[data-status="failed"]      { background: var(--err); }
-.queue-dot[data-status="blocked"]     { background: var(--warn); }
-.queue-dot[data-status="review"]      { background: var(--warn); }
-.queue-dot[data-status="interrupted"] { background: var(--warn); }
 
 /* ==========================================================================
    Preview pane
@@ -1769,7 +1702,40 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   display: block;
 }
 
-.settings-body > section + section {
+.settings-tabs {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+.settings-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.settings-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.settings-pane { display: none; }
+.settings-pane.active { display: block; }
+#llmService, #ttsEngine, #stillsEngine { flex: 1; min-width: 0; }
+.llm-editor {
+  display: grid;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.llm-editor .field,
+.llm-editor .field-row { margin: 0; }
+.llm-editor-title { font-weight: 600; font-size: var(--fs-sm); }
+.llm-editor-actions { display: flex; gap: var(--sp-2); align-items: center; }
+.llm-editor[hidden], .llm-editor [hidden] { display: none !important; }
+
+.settings-body > section + section,
+.settings-pane > section + section {
   margin-top: var(--sp-5);
   padding-top: var(--sp-4);
   border-top: 1px solid var(--border);
@@ -2057,24 +2023,13 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   min-height: 26px;
 }
 
-.pane-label {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-faint);
-  font-weight: 600;
-}
-
-.pane-hint {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
-}
-
-/* Heading + description below it, mirroring .section-label-with-note +
-   .field-note in the rail. Kept in their own column (.pane-head-text) so
-   an action button appended after sits beside that column instead of
-   wedging between the heading and its description. */
-.pane-head-with-note { margin-top: var(--sp-2); margin-bottom: 0; min-height: 0; }
+/* A pane heading with actions beside it (Rewrite, Generate…): the heading
+   takes the free width and wraps within it, the buttons stay on the right. */
+.pane-head > .card-heading { flex: 1; margin: 0; }
+/* The heading already fills the free width; a spacer beside it would take
+   half and wrap the description early. */
+.pane-head > .card-heading ~ .header-spacer { display: none; }
+.pane-head-with-note { margin-top: var(--sp-2); min-height: 0; align-items: flex-start; }
 
 /* The rail already spaces its sections with a flex gap, and a .panel
    already has its own top padding, so the heading's own top margin would
@@ -2084,20 +2039,12 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .panel > .field:first-child > .pane-head-with-note:first-child,
 .final-box > .pane-head-with-note:first-child { margin-top: 0; }
 
-/* .final-box already gaps its flex children, so the note's own bottom
-   margin would stack a second gap in front of the content below it. */
-.final-box > .pane-head-with-note .pane-note { margin-bottom: 0; }
+/* .final-box already gaps its flex children. */
+.final-box > .pane-head-with-note { margin-bottom: 0; }
 
-.pane-head-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.pane-note {
+.pane-hint {
   font-size: var(--fs-xs);
   color: var(--text-faint);
-  margin: 0 0 var(--sp-2);
 }
 
 /* The point of the tabs: one field at a time, tall enough to write in. */
@@ -2340,17 +2287,6 @@ textarea.ta-compact {
   outline-offset: 3px;
 }
 
-.batch-banner {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-4);
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg-sunken));
-  border-bottom: 1px solid var(--border);
-  font-size: var(--fs-sm);
-}
-.batch-banner #batchBannerText { color: var(--text); }
 
 /* --- speak this line ------------------------------------------------------ */
 
@@ -2411,12 +2347,6 @@ textarea.ta-compact {
   border-radius: var(--radius-sm);
 }
 
-.queue-stale {
-  flex: none;
-  font-size: var(--fs-xs);
-  color: var(--warn);
-  line-height: 1;
-}
 
 .stale-note {
   border-radius: var(--radius);
@@ -2498,3 +2428,13 @@ textarea.ta-compact {
 .boundary-review video { width: 100%; min-width: 0; }
 .final-video-content details .field-note { display: block; margin: 8px 0; }
 .final-video-content details input[type="number"] { width: 80px; }
+
+.llm-editor .field-note a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.llm-editor .field-note a:hover { filter: brightness(1.15); }
+
+/* Settings sections that alternate a field with its own note (Create Stills)
+   otherwise run each note straight into the next label. */
+.settings-pane section > .field-note + .field,
+.settings-pane section > .field-note + div > .field:first-child,
+.settings-pane section > #stillsModelWrap + .field { margin-top: var(--sp-3); }
+.settings-pane .llm-editor { margin-bottom: var(--sp-3); }

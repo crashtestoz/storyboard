@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+qwen-tts
+torch
+soundfile
+numpy
+faster-whisper
+librosa
