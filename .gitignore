@@ -7,3 +7,8 @@ server.log
 server.pid
 server-config.json
 render-timings.json
+# Per-machine service/model config. Committed templates are *.example.json;
+# the first start copies each into place (server/local_config.py).
+llm-services.json
+tts-services.json
+mflux-engines.json

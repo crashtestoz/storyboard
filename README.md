@@ -273,7 +273,7 @@ back to the browser — or name an environment variable with `apiKeyEnv` in the
 service's entry. Add `"requiresKey": true` (implied by `apiKeyEnv`) so the
 service reports "needs an API key" up front instead of failing on first use.
 When several are set, the Settings key wins, then the environment variable,
-then an inline `apiKey` (avoid that one: the file is tracked in git).
+then an inline `apiKey` (plain text in `llm-services.json`, so the least safe).
 
 ```json
 { "id": "my-cloud-llm", "label": "Cloud LLM", "kind": "openai",
@@ -343,10 +343,12 @@ from outside the code — nothing here should ever need editing in a `.py` or
 | Default LLM/rewrite id | `--llm` | `SBV_LLM` | `llm-services.json` |
 | TTS/LLM service URLs, API keys | — | — | `tts-services.json`, `llm-services.json` — use `apiKeyEnv` in either to name an environment variable rather than checking a key in |
 
-`tts-services.json` and `llm-services.json` are tracked in git, so whatever
-they contain ships with the repo — the versions here use `127.0.0.1`
-placeholders on purpose. Point them at your own services after cloning
-rather than committing a real hostname or IP back into them.
+`llm-services.json`, `tts-services.json` and `mflux-engines.json` are yours
+to edit and are **not** tracked: git ignores them, so a `git pull` never
+overwrites your services. What the repo ships is `llm-services.example.json`,
+`tts-services.example.json` and `mflux-engines.example.json`; the first start
+copies each one into place if your own copy is missing. Change the
+`.example.json` files only to change what a new install starts with.
 `server-config.json` is created by the app and gitignored, so your data-dir
 choice, per-machine model choices and any API keys saved in Settings never
 get committed at all. `render-timings.json`, beside it and also gitignored,
@@ -617,8 +619,8 @@ Language models for prompt rewriting work the same way, in
 **configured model is actually pulled**, not merely that the port answers. A
 27B local model takes roughly a minute per rewrite, which is why the button
 shows progress and the result waits for approval. For a service needing a key,
-use `apiKeyEnv` to name an environment variable rather than putting the key in
-this tracked file.
+save it in Settings or use `apiKeyEnv` (see above) rather than putting it in
+this file.
 
 The **Storyboard AD** handle on the right edge opens a chat with that same selected
 prompt-rewriting model. It receives a compact authoring snapshot of the open
