@@ -165,4 +165,5 @@ const API = {
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept`, {}),
   stop: () => req("POST", "/api/stop"),
   status: () => req("GET", "/api/status"),
+  systemLoad: () => req("GET", "/api/system-load"),
 };
