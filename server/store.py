@@ -282,7 +282,6 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "dialogue": (shot.get("dialogue") or "").strip(),
         "soundNote": (shot.get("soundNote") or "").strip(),
         "scene": (board.get("sceneDescription") or "").strip(),
-        "renderStyle": (board.get("renderStyle") or "").strip(),
         "soundscape": (board.get("soundscape") or "").strip()
         if board.get("soundscapeInShots", True) else "",
         "soundscapeInShots": bool(board.get("soundscapeInShots", True)),
@@ -318,8 +317,11 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["effectiveModel"] == "ref2va":
         payload["ref2vaProfile"] = "ordered-reference-set-v4"
-    # Only present when on, so clips rendered before the option existed keep
-    # their fingerprint; turning it on changes the prompt, and says so.
+    # Both only present when set, so clips rendered before these options
+    # existed keep their fingerprint; setting one changes the prompt, and says so.
+    render_style = (board.get("renderStyle") or "").strip()
+    if render_style:
+        payload["renderStyle"] = render_style
     if no_music_in_shots(board):
         payload["noMusicInShots"] = True
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
