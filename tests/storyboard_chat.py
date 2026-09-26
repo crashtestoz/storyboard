@@ -344,7 +344,7 @@ class ConversationMemoryTests(unittest.TestCase):
 
     def test_chat_knows_the_h3_rules(self):
         self.assertIn("No negative prompt exists", CHAT_SYSTEM_PROMPT)
-        self.assertIn("Continuous background audio", CHAT_SYSTEM_PROMPT)
+        self.assertIn("Settings → Soundtrack", CHAT_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

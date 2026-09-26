@@ -137,6 +137,13 @@ class Settings(unittest.TestCase):
         self.assertEqual(render_fingerprint(shot, off), before)
         self.assertNotEqual(render_fingerprint(shot, on), before)
 
+    def test_an_empty_render_style_keeps_existing_fingerprints(self):
+        shot = dict(default_shot(), id="s1", prompt="A ship.")
+        base = {"shots": [shot], "defaults": {}, "characters": []}
+        before = render_fingerprint(shot, base)
+        self.assertEqual(render_fingerprint(shot, dict(base, renderStyle="")), before)
+        self.assertNotEqual(render_fingerprint(shot, dict(base, renderStyle="Pencil sketch.")), before)
+
 
 @unittest.skipUnless(FFMPEG and shutil.which("ffprobe"), "needs ffmpeg")
 class Generation(unittest.TestCase):
