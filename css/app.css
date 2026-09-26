@@ -934,6 +934,37 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .stat-grid dt { color: var(--text-faint); white-space: nowrap; }
 .stat-grid dd { margin: 0; font-variant-numeric: tabular-nums; }
 
+/* Details card: shot stats, then this machine's live load beside them. */
+.details-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-3) var(--sp-5);
+}
+.details-stats > .stat-grid:first-child { flex: 1 1 260px; min-width: 0; }
+.sys-load {
+  flex: 0 0 auto;
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--border);
+}
+.sys-load dd[data-level="mid"] { color: var(--warn); }
+.sys-load dd[data-level="high"] { color: var(--err); font-weight: 600; }
+
+/* Backend output: each line's server wall-clock time. */
+.log-line .log-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+/* Backend output: pinned "still running" line while the engine is quiet. */
+.log-heartbeat {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px var(--sp-2);
+  margin-bottom: 2px;
+  background: var(--running-ghost);
+  color: var(--running);
+  border-radius: var(--radius-sm);
+}
+
 .mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
 
 .empty-state {
@@ -1746,7 +1777,36 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 /* Same reasoning as .settings-body — this is prose and diagrams, not a grid. */
 .help-body { display: block; }
 
-.help-body > section + section {
+.help-tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin: calc(-1 * var(--sp-2)) 0 var(--sp-4);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.help-tab {
+  flex: 0 0 auto;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.help-tab:hover { color: var(--text); background: var(--bg-sunken); }
+.help-tab[aria-selected="true"] {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--panel-raised);
+}
+.help-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.help-panel[hidden] { display: none !important; }
+.help-panel > .help-section + .help-section {
   margin-top: var(--sp-5);
   padding-top: var(--sp-4);
   border-top: 1px solid var(--border);
@@ -1866,6 +1926,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   font: var(--fs-xs)/1.55 var(--font-mono);
   white-space: normal;
 }
+
+.help-copy { align-self: flex-start; margin-top: var(--sp-1); }
 
 .help-tip { color: var(--text-faint); }
 

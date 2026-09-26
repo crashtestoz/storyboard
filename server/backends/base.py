@@ -185,6 +185,11 @@ class ProgressEvent:
     # progress seen so far. None until there is enough of that phase's own
     # progress to extrapolate from.
     eta_seconds: float | None = None
+    # This phase's own percent, as the engine last reported it. vpipe only
+    # prints a line every 10% of a phase, so on a long denoise the log can sit
+    # still for many minutes; this lets the UI say where it last was and
+    # when the next report is due instead of looking stalled.
+    phase_percent: float | None = None
 
 
 @dataclass
@@ -193,6 +198,10 @@ class RunResult:
     started_at: float = 0.0
     ended_at: float = 0.0
     log: list[tuple[str, str]] = field(default_factory=list)  # (level, text)
+    # Wall-clock "HH:MM:SS" for each entry of log, when the backend records
+    # them (vpipe does). Kept parallel rather than widening the tuples, which
+    # half the codebase unpacks as (level, text).
+    log_times: list[str] = field(default_factory=list)
     cancelled: bool = False
     error: str = ""
 

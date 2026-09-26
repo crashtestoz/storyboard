@@ -1227,6 +1227,7 @@ class VpipeBackend(Backend):
                 level = m.group("lvl") if m else "INFO"
                 text = m.group("rest") if m else line
                 result.log.append((level, text))
+                result.log_times.append(time.strftime("%H:%M:%S"))
 
                 pm = PROGRESS_RE.search(line)
                 if pm:
@@ -1247,6 +1248,7 @@ class VpipeBackend(Backend):
                             log_line=text,
                             log_level=level,
                             eta_seconds=eta,
+                            phase_percent=phase_pct[phase],
                         )
                     )
                 else:

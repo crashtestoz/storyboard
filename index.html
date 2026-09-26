@@ -548,11 +548,19 @@
   <div id="helpDialog" class="modal" hidden>
     <div class="modal-card" style="width:min(920px,100%)">
       <div class="modal-head">
-        <span>Camera prompt guide</span>
+        <span>Storyboard prompt guide</span>
         <div class="header-spacer"></div>
         <button class="btn btn-ghost btn-sm" id="helpClose">Close</button>
       </div>
       <div class="modal-body help-body" style="display:block">
+        <div class="help-tabs" role="tablist" aria-label="Storyboard prompt guide topics">
+          <button class="help-tab" id="helpTabFraming" type="button" role="tab" aria-selected="true" aria-controls="helpPanelFraming" tabindex="0">Framing</button>
+          <button class="help-tab" id="helpTabMovement" type="button" role="tab" aria-selected="false" aria-controls="helpPanelMovement" tabindex="-1">Camera movement</button>
+          <button class="help-tab" id="helpTabPrompting" type="button" role="tab" aria-selected="false" aria-controls="helpPanelPrompting" tabindex="-1">Writing the prompt</button>
+          <button class="help-tab" id="helpTabDialogue" type="button" role="tab" aria-selected="false" aria-controls="helpPanelDialogue" tabindex="-1">Dialogue &amp; sound</button>
+        </div>
+
+        <div class="help-panel" id="helpPanelFraming" role="tabpanel" aria-labelledby="helpTabFraming" tabindex="0">
 
         <section class="help-section">
           <div class="card-heading"><span class="card-heading-title">Camera level</span><span class="card-heading-desc">how high the camera sits relative to the subject</span></div>
@@ -661,6 +669,10 @@
           </dl>
         </section>
 
+        </div>
+
+        <div class="help-panel" id="helpPanelMovement" role="tabpanel" aria-labelledby="helpTabMovement" tabindex="0" hidden>
+
         <section class="help-section">
           <div class="card-heading"><span class="card-heading-title">Camera movement</span><span class="card-heading-desc">how the camera itself moves during the shot, not what it sees</span></div>
           <svg class="help-diagram" viewBox="0 0 640 320" role="img"
@@ -728,63 +740,123 @@
           </dl>
         </section>
 
+        </div>
+
+        <div class="help-panel" id="helpPanelPrompting" role="tabpanel" aria-labelledby="helpTabPrompting" tabindex="0" hidden>
+
         <section class="help-section help-prompt">
-          <div class="card-heading"><span class="card-heading-title">Turn the idea into a prompt</span><span class="card-heading-desc">describe where the camera starts, how it moves, and where it ends</span></div>
+          <div class="card-heading"><span class="card-heading-title">Turn the idea into a prompt</span><span class="card-heading-desc">describe the opening composition, camera move, and how the shot develops</span></div>
           <p class="help-intro">
-            H3 responds more reliably when each part has one clear job. Use this
-            order: <strong>starting position</strong> + <strong>movement and direction</strong>
-            + <strong>angle or height</strong> + <strong>ending framing</strong> +
-            <strong>speed</strong>.
+            H3 responds more reliably to a clear opening composition followed by
+            one main camera move. Describe the move as an action in a sentence,
+            rather than as a list of camera terms. Copy any example below and
+            paste it into a shot prompt; replace the subject or scene details
+            to fit your shot.
           </p>
           <div class="help-recipe">
-            <div><strong>Starting position</strong><span>front, side, behind, or front three-quarter; say whose left or right when it matters.</span></div>
-            <div><strong>Camera height</strong><span>eye level, shoulder level, hip level, knee level, or ground level.</span></div>
-            <div><strong>Movement</strong><span>pan, tilt, dolly, truck, pedestal, orbit, or roll. Say the direction in plain language.</span></div>
-            <div><strong>Framing</strong><span>name the shot size at the start and/or end: close-up, medium shot, full shot.</span></div>
-            <div><strong>Timing</strong><span>slow, steady, or fast; add small, medium, or large amplitude when useful.</span></div>
+            <div><strong>Opening composition</strong><span>State the shot size, camera angle or height, subject position, and important background details.</span></div>
+            <div><strong>Motion type</strong><span>Choose the move that describes what changes: tracking, push in/pull out, pan, truck, tilt, pedestal, arc, static, or shake.</span></div>
+            <div><strong>Direction and target</strong><span>Say which way the camera moves and what it follows or points toward. Keep the subject's movement distinct from the camera's.</span></div>
+            <div><strong>Amplitude</strong><span>Describe the range when it matters: small amplitude for a subtle change, large amplitude for a pronounced change. Medium is usually understood.</span></div>
+            <div><strong>Speed</strong><span>Specify slow or fast when important. Normal speed is usually understood.</span></div>
+            <div><strong>Result</strong><span>Describe the ending framing or what new part of the scene becomes visible, if the shot needs a specific endpoint.</span></div>
           </div>
           <div class="help-callout">
-            <strong>Important direction choice:</strong>
-            “Counterclockwise” is clearest for an <em>orbit</em> around a subject
-            or a <em>roll</em> of the horizon. For a horizontal pan, say
-            “from screen left to screen right” or “from screen right to screen
-            left.” “Zoom out” changes the lens; “dolly out” moves the camera
-            physically away.
+            <strong>Keep similar moves distinct:</strong>
+            a <em>zoom</em> changes focal length from a fixed camera position;
+            a <em>push in/pull out</em> moves the camera forward or back. A
+            <em>pan</em> turns the camera in place; a <em>truck</em> moves it
+            sideways. Use “counterclockwise” for an orbit or roll; for a pan,
+            specify screen left or right. Add amplitude and speed only when
+            they help describe the intended movement.
           </div>
           <div class="help-examples">
             <div class="help-example">
+              <strong>Slow tracking shot</strong>
+              <code>Begin in a medium rear view with the subject centered. The camera tracks behind them at slow speed, keeping the same distance and framing as they walk down the corridor.</code>
+              <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+            </div>
+            <div class="help-example">
               <strong>Pan with a framing change</strong>
-              <code>Eye-level front three-quarter medium shot from the subject's left. The camera pans from screen left to screen right with medium amplitude at slow speed, ending in a medium close-up.</code>
+              <code>Begin in an eye-level medium shot. The camera pans from screen left to screen right with large amplitude at slow speed, ending in a medium close-up.</code>
+              <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
             </div>
             <div class="help-example">
-              <strong>Counterclockwise orbit and zoom out</strong>
-              <code>Begin at eye level in a medium shot with the subject centered. The camera slowly orbits counterclockwise around the subject while zooming out, ending in a full shot that reveals more of the surroundings.</code>
+              <strong>Push in</strong>
+              <code>Begin in a knee-level full shot with the subject centered. The camera pushes in with small amplitude at slow speed toward the subject, ending in a medium shot.</code>
+              <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
             </div>
             <div class="help-example">
-              <strong>Low angle and dolly in</strong>
-              <code>Start at knee level in a low-angle full shot behind the subject. Dolly forward with medium amplitude at steady speed, keeping the subject centered and ending in a medium shot.</code>
+              <strong>Truck sideways</strong>
+              <code>Begin in a side-on medium shot. The camera trucks right with small amplitude at slow speed, keeping the subject in view as the background shifts with lateral parallax.</code>
+              <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
             </div>
             <div class="help-example">
-              <strong>Side movement and tilt</strong>
-              <code>Start at hip level in a side-on medium shot. Truck from left to right as the camera tilts upward slowly, ending on a medium close-up of the subject's face.</code>
-            </div>
-            <div class="help-example">
-              <strong>Rotation of the horizon</strong>
-              <code>Hold a close-up at eye level, then roll the camera counterclockwise slowly with small amplitude while the subject remains still.</code>
+              <strong>Static shot</strong>
+              <code>The camera holds a static eye-level medium shot as the subject walks out of frame; the camera position and lens remain still.</code>
+              <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
             </div>
           </div>
           <p class="help-tip">
-            Avoid combining “counterclockwise pan” with “zoom to medium shot.”
-            Choose <em>pan left/right</em>, <em>orbit counterclockwise</em>, or
-            <em>roll counterclockwise</em>, then state whether the framing gets
-            tighter or wider.
+            A complete movement can specify <em>type + amplitude + speed</em>,
+            for example, “The camera trucks right with small amplitude at slow
+            speed.” Omit amplitude or speed when they add no useful direction.
+            Describe the opening composition first so H3 knows what the shot
+            begins on.
           </p>
         </section>
 
+        </div>
+
+        <div class="help-panel" id="helpPanelDialogue" role="tabpanel" aria-labelledby="helpTabDialogue" tabindex="0" hidden>
+          <section class="help-section help-prompt">
+            <div class="card-heading"><span class="card-heading-title">Speaking, voice direction &amp; sound accents</span><span class="card-heading-desc">copy a line into a shot prompt and replace the bracketed parts</span></div>
+            <p class="help-intro">
+              Keep the exact spoken words in quotation marks. Identify who speaks,
+              how the voice sounds, and the delivery. Put brief sound effects next
+              to the action that causes them so they land at the right moment.
+            </p>
+            <div class="help-examples">
+              <div class="help-example">
+                <strong>Dialogue with voice direction</strong>
+                <code>[Character] says, "[Exact dialogue]." Voice: [low/high] [rough/clear/breathy] tone, [slow/measured/quick] pace, [calm/urgent/warm] delivery.</code>
+                <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+              </div>
+              <div class="help-example">
+                <strong>Accent and vocal consistency</strong>
+                <code>[Character] speaks in a [specific regional] accent with a [pitch] [timbre] voice and [pace] rhythm. Keep the same accent and voice throughout the shot.</code>
+                <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+              </div>
+              <div class="help-example">
+                <strong>Pause and emphasis</strong>
+                <code>[Character] says, "[First phrase]... [Second phrase]." They pause briefly after the first phrase, then stress "[emphasized word]" in a [emotion] voice.</code>
+                <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+              </div>
+              <div class="help-example">
+                <strong>Timed sound accents</strong>
+                <code>As [action happens], a sharp [sound] lands with the movement, followed by [short reverberation / rattling / fading ring]. Keep the accent brief and distinct over the continuing ambience.</code>
+                <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+              </div>
+              <div class="help-example">
+                <strong>Dialogue with an action sound</strong>
+                <code>[Character] says, "[Exact dialogue]," in a [voice and delivery]. On the final word, [object/action] makes a crisp [sound accent], then the room tone continues.</code>
+                <button class="btn btn-secondary btn-sm help-copy" type="button">Copy direction</button>
+              </div>
+            </div>
+            <div class="help-callout">
+              <strong>Make each cue specific:</strong>
+              name the speaker, preserve the exact line, and use a few audible voice
+              qualities instead of broad labels alone. For sound accents, describe
+              the source, timing, texture, and short decay. Keep environmental
+              ambience separate from a one-time impact or cue.
+            </div>
+          </section>
+        </div>
+
       </div>
       <div class="modal-foot">
-        Copy the pattern into a shot prompt: starting position → movement and
-        direction → camera height/angle → ending shot size → speed.
+        Copy a direction, paste it into the shot prompt, then replace the
+        bracketed details or adapt the example to your scene.
       </div>
     </div>
   </div>

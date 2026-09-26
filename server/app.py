@@ -449,6 +449,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             return self._send_json(ctx.orch.status())
 
+        if path == "/api/system-load":
+            from .hardware import system_load
+            return self._send_json(system_load())
+
         return self._err(404, "unknown endpoint")
 
     # -- API: POST ------------------------------------------------------- #

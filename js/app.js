@@ -569,6 +569,11 @@ function view(shot) {
     outputs: run.outputs && run.outputs.length ? run.outputs : shot.outputs,
     log: run.log || null,
     summary: run.summary || "",
+    heartbeat: {
+      lastOutputAt: run.lastOutputAt, serverTime: run.serverTime,
+      phaseStartedAt: run.phaseStartedAt, phaseReportedAt: run.phaseReportedAt,
+      phasePercent: run.phasePercent,
+    },
   };
 }
 
@@ -1381,12 +1386,51 @@ function wireChrome() {
   // else in the UI — there is no other place in the app to look this up.
   $("#btnHelp").addEventListener("click", () => {
     $("#helpDialog").hidden = false;
+    $("#helpTabFraming").focus();
   });
   $("#btnHelp").addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       $("#helpDialog").hidden = false;
+      $("#helpTabFraming").focus();
     }
+  });
+  const helpTabs = [...document.querySelectorAll(".help-tab")];
+  function activateHelpTab(tab) {
+    helpTabs.forEach((item) => {
+      const selected = item === tab;
+      item.setAttribute("aria-selected", String(selected));
+      item.tabIndex = selected ? 0 : -1;
+      document.getElementById(item.getAttribute("aria-controls")).hidden = !selected;
+    });
+    tab.focus();
+  }
+  helpTabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => activateHelpTab(tab));
+    tab.addEventListener("keydown", (event) => {
+      let nextIndex;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % helpTabs.length;
+      else if (event.key === "ArrowLeft") nextIndex = (index - 1 + helpTabs.length) % helpTabs.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = helpTabs.length - 1;
+      else return;
+      event.preventDefault();
+      activateHelpTab(helpTabs[nextIndex]);
+    });
+  });
+  document.querySelectorAll(".help-copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const direction = button.closest(".help-example")?.querySelector("code")?.textContent?.trim();
+      if (!direction) return;
+      try {
+        await navigator.clipboard.writeText(direction);
+        button.textContent = "Copied";
+        window.setTimeout(() => { button.textContent = "Copy direction"; }, 1600);
+      } catch {
+        button.textContent = "Clipboard unavailable";
+        window.setTimeout(() => { button.textContent = "Copy direction"; }, 2000);
+      }
+    });
   });
   $("#helpClose").addEventListener("click", () => {
     $("#helpDialog").hidden = true;
@@ -2724,6 +2768,72 @@ async function saveSearchUrl() {
 }
 
 /* ==========================================================================
+   System load (Details card)
+   ========================================================================== */
+
+// CPU / GPU / memory %, as a second column beside the shot's own stats.
+// Polled on its own slow timer, only while a Details column is on screen and
+// the tab is visible, and written into the existing cells in place — the
+// render poll rebuilds this panel, and a rebuild must not wait on a fetch.
+const SYSTEM_LOAD_MS = 2000;
+const SYSTEM_LOAD_ROWS = [
+  ["cpu", "CPU"],
+  ["gpu", "GPU"],
+  ["memory", "Memory"],
+  ["powerW", "Power (1-min avg)"],
+];
+
+function systemLoadText(key, load) {
+  const v = load && load[key];
+  if (v == null) return "—";
+  if (key === "powerW") return `${Math.round(v)} W`;
+  const pct = `${Math.round(v)}%`;
+  return key === "memory" && load.memoryTotalGB
+    ? `${pct} (${load.memoryUsedGB} / ${load.memoryTotalGB} GB)`
+    : pct;
+}
+
+function paintSystemLoad() {
+  document.querySelectorAll(".sys-load dd[data-load]").forEach((dd) => {
+    const key = dd.dataset.load;
+    dd.textContent = systemLoadText(key, state.systemLoad);
+    const v = state.systemLoad && state.systemLoad[key];
+    // Watts have no fixed ceiling to colour against; only percentages do.
+    dd.dataset.level = v == null || key === "powerW" ? "" : v >= 90 ? "high" : v >= 70 ? "mid" : "";
+  });
+}
+
+function systemLoadGrid() {
+  const grid = el("dl", "stat-grid sys-load");
+  grid.title = "This machine, updated every 2 seconds. Power is the whole machine's draw at the wall: macOS refreshes it about once a minute, so it is that minute's average.";
+  SYSTEM_LOAD_ROWS.forEach(([key, label]) => {
+    grid.appendChild(el("dt", null, label));
+    const dd = el("dd", null, systemLoadText(key, state.systemLoad));
+    dd.dataset.load = key;
+    grid.appendChild(dd);
+  });
+  if (!state.systemLoadTimer) {
+    state.systemLoadTimer = setInterval(refreshSystemLoad, SYSTEM_LOAD_MS);
+    setTimeout(refreshSystemLoad, 0);
+  }
+  return grid;
+}
+
+async function refreshSystemLoad() {
+  if (document.hidden || !document.querySelector(".sys-load")) return;
+  if (state.systemLoadBusy) return;
+  state.systemLoadBusy = true;
+  try {
+    state.systemLoad = await API.systemLoad();
+  } catch {
+    state.systemLoad = null;  // shown as "—"; the next tick tries again
+  } finally {
+    state.systemLoadBusy = false;
+  }
+  paintSystemLoad();
+}
+
+/* ==========================================================================
    Polling
    ========================================================================== */
 
@@ -2874,10 +2984,54 @@ function paintLive() {
   });
 }
 
+// vpipe prints a progress line only every 10% of a phase, so a long denoise
+// can leave the log still for ten minutes or more while the GPU is flat out.
+// While the engine is quiet, a pinned line at the top of Backend output says
+// where it last was, an estimate of where it is now, and when the next line
+// is due — so a quiet log reads as "working", not "stuck".
+const HEARTBEAT_QUIET_S = 30;
+
+function heartbeatText(shot) {
+  const hb = shot.heartbeat;
+  if (shot.status !== "running" || !hb || !hb.serverTime || !hb.lastOutputAt) return "";
+  const quiet = hb.serverTime - hb.lastOutputAt;
+  if (quiet < HEARTBEAT_QUIET_S) return "";
+  const phase = shot.phase || "render";
+  const parts = [`${phase} still running — no engine output for ${dur(quiet)}`];
+  const pct = hb.phasePercent;
+  if (pct != null && hb.phaseReportedAt) {
+    const since = hb.serverTime - hb.phaseReportedAt;
+    parts.push(`last reported ${Math.round(pct)}% ${dur(since)} ago`);
+    const elapsed = hb.phaseReportedAt - (hb.phaseStartedAt || hb.phaseReportedAt);
+    if (pct > 0 && pct < 100 && elapsed > 0) {
+      const perPct = elapsed / pct;
+      const nextIn = perPct * (Math.floor(pct / 10) * 10 + 10 - pct) - since;
+      const now = Math.min(pct + since / perPct, Math.floor(pct / 10) * 10 + 9.9);
+      parts.push(`~${Math.round(now)}% now`);
+      parts.push(nextIn > 0 ? `next report in ~${dur(nextIn)}` : "next report due any moment");
+    }
+  }
+  const gpu = state.systemLoad && state.systemLoad.gpu;
+  if (gpu != null) parts.push(`GPU ${Math.round(gpu)}%`);
+  return `⏳ ${parts.join(" · ")} (the engine reports every 10%)`;
+}
+
+function paintHeartbeat(box, shot) {
+  let hb = box.querySelector(".log-heartbeat");
+  const text = heartbeatText(shot);
+  if (!text) { if (hb) hb.remove(); return; }
+  if (!hb) {
+    hb = el("div", "log-heartbeat");
+    box.insertBefore(hb, box.firstChild);
+  }
+  if (hb.textContent !== text) hb.textContent = text;
+}
+
 function paintLog(shot) {
   const box = $("#preview .log");
   const lines = shot.log;
   if (!box || !lines) return;
+  paintHeartbeat(box, shot);
   // Appends into the render container, not the whole window: the same window
   // also holds the spoken line's log, and counting those lines as its own
   // would make it skip real output.
@@ -5732,7 +5886,7 @@ function renderPreview() {
   });
   // Already inside the Details card, so no second panel border around it.
   const sp = el("div", "details-stats");
-  sp.appendChild(stats);
+  sp.append(stats, systemLoadGrid());
   detailsPane.appendChild(sp);
 
   const logPane = el("div", "tab-pane");
@@ -5834,9 +5988,11 @@ function renderPreview() {
 function logLine(entry) {
   let level = "INFO";
   let text = "";
+  let time = "";
   if (entry && typeof entry === "object") {
     level = entry.level || "INFO";
     text = entry.text || "";
+    time = entry.time || "";
   } else {
     const raw = String(entry);
     // A saved log's "# ..." header is metadata, not a log line at INFO; it was
@@ -5847,12 +6003,15 @@ function logLine(entry) {
       line.appendChild(el("span", null, raw.replace(/^#\s*/, "")));
       return line;
     }
-    const m = raw.match(/^\[([A-Z]+)\]\s*(.*)$/);
-    level = m ? m[1] : "INFO";
-    text = m ? m[2] : raw;
+    // A saved run.log line: "HH:MM:SS [LEVEL] text" (older logs have no time).
+    const m = raw.match(/^(?:(\d{2}:\d{2}:\d{2}) )?\[([A-Z]+)\]\s*(.*)$/);
+    time = m && m[1] ? m[1] : "";
+    level = m ? m[2] : "INFO";
+    text = m ? m[3] : raw;
   }
   const line = el("div", "log-line");
   line.dataset.lvl = level;
+  if (time) line.appendChild(el("span", "log-time", `${time} `));
   line.appendChild(el("span", "lvl", `[${level}] `));
   line.appendChild(el("span", null, text));
   return line;

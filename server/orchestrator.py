@@ -46,6 +46,17 @@ RERUNNABLE = {"draft", "failed", "blocked", "review", "interrupted"}
 MAX_LOG_LINES = 400
 
 
+class _StampedLog(list):
+    """A run's live log that stamps each entry with the server's wall clock
+    as it is appended, so every one of the many call sites that add a line
+    gets a time without each having to remember to."""
+
+    def append(self, entry):  # type: ignore[override]
+        if isinstance(entry, dict) and "time" not in entry:
+            entry = {**entry, "time": time.strftime("%H:%M:%S")}
+        super().append(entry)
+
+
 @dataclass
 class ShotRun:
     """Live state for one shot in the current batch."""
@@ -55,7 +66,13 @@ class ShotRun:
     progress: float = 0.0
     phase: str = ""
     eta_seconds: float | None = None
-    log: list[dict[str, str]] = field(default_factory=list)
+    # When the engine last said anything, and where the current phase stood
+    # at its last progress report (see ProgressEvent.phase_percent).
+    last_output_at: float | None = None
+    phase_started_at: float | None = None
+    phase_reported_at: float | None = None
+    phase_percent: float | None = None
+    log: list[dict[str, str]] = field(default_factory=_StampedLog)
     started_at: float | None = None
     ended_at: float | None = None
     validation: dict[str, Any] | None = None
@@ -73,6 +90,13 @@ class ShotRun:
                 round(self.eta_seconds) if self.eta_seconds is not None else None
             ),
             "log": self.log[-MAX_LOG_LINES:],
+            "lastOutputAt": self.last_output_at,
+            "phaseStartedAt": self.phase_started_at,
+            "phaseReportedAt": self.phase_reported_at,
+            "phasePercent": self.phase_percent,
+            # The server's clock, so the browser (often another machine)
+            # measures "how long ago" against the same clock as the above.
+            "serverTime": time.time(),
             "startedAt": self.started_at,
             "endedAt": self.ended_at,
             "runtimeSeconds": (
@@ -130,7 +154,7 @@ class Orchestrator:
         self._stills_phase: str = ""
         self._stills_progress: float = 0.0
         self._stills_error: str = ""
-        self._stills_log: list[dict[str, str]] = []
+        self._stills_log: list[dict[str, str]] = _StampedLog()
         # Filled in as the still finishes, before the job wraps up.
         self._stills_results: dict[str, Any] = {}
 
@@ -493,7 +517,7 @@ class Orchestrator:
             self._stills_phase = "starting"
             self._stills_progress = 0.0
             self._stills_error = ""
-            self._stills_log = []
+            self._stills_log = _StampedLog()
             self._stills_results = {}
 
         self._stills_thread = threading.Thread(
@@ -774,11 +798,18 @@ class Orchestrator:
         def on_event(ev: ProgressEvent) -> None:
             if ev.percent:
                 run.progress = max(run.progress, ev.percent)
+            now = time.time()
+            if ev.phase and ev.phase_percent is not None:
+                if ev.phase != run.phase or run.phase_started_at is None:
+                    run.phase_started_at = now
+                run.phase_reported_at = now
+                run.phase_percent = ev.phase_percent
             if ev.phase:
                 run.phase = ev.phase
             if ev.eta_seconds is not None:
                 run.eta_seconds = ev.eta_seconds
             if ev.log_line:
+                run.last_output_at = now
                 run.log.append({"level": ev.log_level, "text": ev.log_line})
                 if len(run.log) > MAX_LOG_LINES * 2:
                     del run.log[:-MAX_LOG_LINES]
@@ -1124,7 +1155,11 @@ class Orchestrator:
                    else "unknown (no render of this model timed here yet)"),
                 "",
             ]
-            body = [f"[{lvl}] {text}" for lvl, text in result.log]
+            times = getattr(result, "log_times", None) or []
+            if len(times) == len(result.log):
+                body = [f"{t} [{lvl}] {text}" for t, (lvl, text) in zip(times, result.log)]
+            else:
+                body = [f"[{lvl}] {text}" for lvl, text in result.log]
             dest.write_text("\n".join(head + body) + "\n")
             return self._as_url(dest)
         except OSError:

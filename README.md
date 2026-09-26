@@ -83,7 +83,7 @@ Minimum versions:
 | Dependency | Required for | Notes |
 | --- | --- | --- |
 | Python 3.10+ | The storyboard web server | `start.sh` prefers Homebrew Python 3.14, 3.13, 3.12, 3.11, then 3.10. |
-| vpipe CLI | Rendering MiniMax H3 / Ref2VA / Krea-2 pipelines | Pass with `--vpipe PATH` or set `SBV_VPIPE`. Must support prompt-only Ref2VA — see the note in [§2](#2-install-or-point-to-vpipe). |
+| vpipe **v0.1.74+** CLI | Rendering MiniMax H3 / Ref2VA / Krea-2 pipelines | Pass with `--vpipe PATH` or set `SBV_VPIPE`. v0.1.74 is the first release with prompt-only Ref2VA and macOS 27 support — see [§2](#2-install-or-point-to-vpipe). |
 | vpipe workspace with `models/` | Model discovery and render runtime | Pass with `--workspace DIR` or set `SBV_WORKSPACE`. |
 | ffmpeg | Final video assembly and dialogue muxing | Without it, individual renders can still run, but final joining/dubbing is limited. |
 | lsof | `./start.sh --restart` | Used to find the process listening on the selected port. |
@@ -97,63 +97,54 @@ There is deliberately no `pip install -r requirements.txt` and no
 
 ### 2. Install or point to vpipe
 
-Build or install vpipe separately, then make sure the storyboard app can find
-the CLI binary and the workspace where vpipe keeps its `models/` directory.
-Pass those paths explicitly if your checkout is not in the default location:
+Storyboard needs **vpipe v0.1.74 or newer**: the first release that renders a
+Ref2VA request with an explicitly empty reference list (a shot with no
+Start/End frame, cast portraits or voice clip —
+[tgo-app-dev/vpipe#37](https://github.com/tgo-app-dev/vpipe/issues/37)), and
+whose GPU kernels build and run on macOS 27. Either install works:
+
+**The app (easiest).** Install **Vpipe Manager** from vpipe's
+[latest release](https://github.com/tgo-app-dev/vpipe/releases/latest) — the
+`-with-ffmpeg` .dmg if you don't already have FFmpeg. Its command-line tool,
+which is what Storyboard runs, is inside the app:
 
 ```sh
+./start.sh --workspace /path/to/vpipe-workspace \
+  --vpipe "/Applications/Vpipe Manager.app/Contents/Helpers/vpipe"
+```
+
+**From source.**
+
+```sh
+git clone --recursive https://github.com/tgo-app-dev/vpipe.git
+cd vpipe && cmake -S . -B build && cmake --build build -j
 ./start.sh --workspace /path/to/vpipe-workspace \
   --vpipe /path/to/vpipe/build/apps/vpipe/vpipe
 ```
 
-Use flags or environment variables if your paths differ:
+The configure step prints `vpipe Metal kernels: build-time metallib mode`
+when the Xcode Metal toolchain is installed, which compiles the GPU kernels
+into the binary. In runtime-compile mode they are compiled on each machine
+at first use instead, so a build copied to another Mac depends on that Mac's
+own Metal compiler; configure with `-DVPIPE_METAL_RUNTIME_COMPILE=OFF` when
+you intend to hand a build to someone else.
+
+Use environment variables instead of flags if you prefer:
 
 ```sh
 export SBV_WORKSPACE=/path/to/vpipe-workspace
-export SBV_VPIPE=/path/to/vpipe/build/apps/vpipe/vpipe
+export SBV_VPIPE="/Applications/Vpipe Manager.app/Contents/Helpers/vpipe"
 ```
 
 The workspace is vpipe's runtime root. It is where vpipe resolves `models/`
 and its model registry from, so it must be the same workspace used when the
 models were prepared.
 
-**Required vpipe capability: prompt-only Ref2VA.** Every video shot now
-routes through Ref2VA automatically (there is no more automatic FL2VA
-routing — see `server/backends/vpipe_backend.py::_effective_video_model`),
-and native H3 dialogue with no assigned character or no reference voice clip
-is a supported, non-blocking case: H3 is asked to speak the line in a voice
-it judges fits the scene rather than being refused. Combined, a shot with no
-Start/End frame, no cast portraits, and no voice reference to clone now
-legitimately sends Ref2VA an **empty reference list** — something the
-mainline vpipe engine, as of this writing, refuses outright at several
-layers with errors like `a ref2va request needs at least one reference`.
-
-If your vpipe checkout refuses shots like that (dialogue-only, or a bare
-prompt with no cast/reference images at all) while shots with at least one
-reference render fine, your vpipe build predates this capability. The
-affected functions, if you need to patch or check for it yourself:
-
-- `generative-models/minimax-h3/minimax-h3-layout.cc`/`.h` —
-  `build_ref2va_packed_sequence` must accept an empty `references` list.
-- `generative-models/minimax-h3/minimax-h3-reference-encoder.cc`/`.h` —
-  `validate_reference_request` must not fail on an empty list (the
-  audio-alone rule should still apply only when the list is non-empty).
-- `generative-models/minimax-h3/minimax-h3-text-encoder.cc` —
-  `build_presentation` must not refuse an empty reference list.
-- `stages/video-ref-encoder-stage.cc` — `process()` must not skip on an
-  empty combined reference list, and must emit correctly-shaped video/audio
-  tensors (from the VAE configs) rather than a placeholder width when there
-  are zero video or zero audio rows.
-- `stages/generate-video-stage.cc`/`.h` — must not warn-and-refuse a Ref2VA
-  request with nothing wired to the reference ports; an explicitly empty
-  `references` array should still count as a Ref2VA request, not silently
-  fall back to `t2va`/`fl2va` framing.
-
-This capability is not yet in the public `tgo-app-dev/vpipe` repository —
-it exists only as local patches on the machine this app was developed on.
-If you're setting Storyboard up somewhere new, get this patch from whoever
-manages your vpipe checkout, or confirm your build already accepts
-prompt-only Ref2VA before relying on cast-less or reference-less shots.
+Why v0.1.74: every video shot routes through Ref2VA (see
+`server/backends/vpipe_backend.py::_effective_video_model`), so a shot with
+nothing attached sends Ref2VA `"references": []`. Older vpipe refuses that
+with `a ref2va request needs at least one reference`; if you see it, or shots
+with references render but bare-prompt shots don't, upgrade vpipe.
 
 ### 3. Prepare vpipe models
 
@@ -162,18 +153,22 @@ use:
 
 ```sh
 cd "$SBV_WORKSPACE"
-"$SBV_VPIPE" --launch setup/prepare-minimax-h3-8bit.vpipeline
 "$SBV_VPIPE" --launch setup/prepare-minimax-h3-ref2va-8bit.vpipeline
 "$SBV_VPIPE" --launch setup/prepare-krea-2.vpipeline
 ```
 
-Those are the render models currently exposed by the UI:
+| Model | Used for | On disk |
+| --- | --- | --- |
+| MiniMax H3 Ref2VA 8-bit | Every video shot, with or without references | ~65 GB, plus the ~115 GB full-precision download it is converted from |
+| Krea-2 Turbo | Create Stills previews (optional — mflux can do stills instead) | ~33 GB |
 
-| Model | UI mode |
-| --- | --- |
-| MiniMax H3 8-bit | Text-to-video with generated sound |
-| MiniMax H3 Ref2VA 8-bit | Reference images / voice clips to video |
-| Krea-2 Turbo | Still-image prompt preview |
+The Ref2VA pipeline downloads the full-precision checkpoint from Hugging Face
+and converts it to 8-bit on the machine, which takes a while; leave room for
+both. You don't need `prepare-minimax-h3-8bit.vpipeline` (FL2VA): Storyboard
+no longer routes shots to it. `prepare-krea-2.vpipeline` fetches from
+ModelScope; if that times out from your network, change its `"source"` to
+`"huggingface"`, accept the model's terms at huggingface.co/krea/Krea-2-Turbo,
+and export `HF_TOKEN` before launching it.
 
 If your vpipe workspace keeps setup files elsewhere, run the equivalent
 prepare pipelines from that workspace. The server startup banner reports which
@@ -208,7 +203,21 @@ overridden. Select the folder that directly contains the project folders. For
 example, selecting `/Volumes/Media/storyboard-projects` stores a board at
 `/Volumes/Media/storyboard-projects/<board-slug>/`.
 
-### 5. Fetch speech models, if using local MOSS
+### 5. Speech engines (optional)
+
+**Qwen3-TTS voice clone** (the lighter option, ~2.5 GB) runs as its own small
+server. Start it in a separate Terminal tab and leave it running:
+
+```sh
+vendor/start-qwen3-tts.sh
+```
+
+The first run sets up `vendor/.venv` and installs its Python packages; the
+first launch downloads the model. Then pick **Qwen3-TTS voice clone** under
+Settings → Speech engine. Details in [`vendor/README.md`](vendor/README.md).
+
+**MOSS-TTS through vpipe** (~22 GB) needs no separate server, only its models:
+
 
 `vpipe-moss` needs two models in the workspace. Once:
 
