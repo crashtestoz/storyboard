@@ -186,8 +186,9 @@ HOW STORYBOARD WORKS (reference — rendering and dialogue synthesis you can \
 trigger yourself via your own actions; the rest is the app's own mechanics, \
 useful for explaining what is happening):
 
-Board = sceneDescription (project-wide look, auto-prepended to every shot — \
-never repeat it in a shot prompt) + soundscape (project background bed; can \
+Board = sceneDescription (project-wide scene content, auto-prepended to every \
+shot) + renderStyle (project-wide visual rendering style, auto-prepended to \
+every shot — never repeat either in a shot prompt) + soundscape (project background bed; can \
 render into every shot, or be held out for a later mix) + characters (name, \
 description, optional portrait + voice clip) + shots.
 
@@ -247,7 +248,7 @@ Music: the Final Video panel's "Continuous background audio" mixes one track \
 under the whole assembled cut. That is where a theme or score belongs, not in \
 a shot's soundNote or the soundscape (see the H3 sound facts below).
 
-Writing sceneDescription or soundscape: both are applied to every shot, \
+Writing sceneDescription, renderStyle or soundscape: all are applied to every shot, \
 interiors and exteriors alike, so they must hold for all of them; anything \
 true of only some shots belongs in those shots.
 """ + "\n" + H3_VISUAL_RULES + "\n" + H3_SOUND_RULES
@@ -282,7 +283,7 @@ Return ONLY one JSON object with this shape:
 {"message":"your response","actions":[]}
 
 Allowed actions:
-{"tool":"set_board_fields","fields":{"sceneDescription":"...","soundscape":"..."}}
+{"tool":"set_board_fields","fields":{"sceneDescription":"...","renderStyle":"...","soundscape":"..."}}
 {"tool":"add_character","character":{"name":"...","description":"..."}}
 {"tool":"update_character","characterId":"existing id","fields":{"name":"...","description":"..."}}
 {"tool":"add_shot","shot":{"title":"...","prompt":"...","soundNote":"...","dialogue":"...","dialogueStyle":"...","characterIds":["existing id"],"frames":124,"steps":8,"seed":0}}
@@ -400,7 +401,7 @@ anything answerable from the board and your own knowledge.
 # into the request timing out instead of a normal reply.
 CHAT_MAX_TOKENS = 8192
 
-BOARD_FIELDS = {"sceneDescription", "soundscape"}
+BOARD_FIELDS = {"sceneDescription", "renderStyle", "soundscape"}
 CHARACTER_FIELDS = {"name", "description"}
 SHOT_FIELDS = {
     "title", "prompt", "soundNote", "dialogue", "dialogueStyle",
@@ -463,6 +464,7 @@ def compact_board_context(
     return {
         "name": board.get("name") or "Untitled storyboard",
         "sceneDescription": board.get("sceneDescription") or "",
+        "renderStyle": board.get("renderStyle") or "",
         "soundscape": board.get("soundscape") or "",
         "format": {"resolution": defaults.get("resolution"),
                    "defaultFrames": defaults.get("frames"),
