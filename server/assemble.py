@@ -127,7 +127,7 @@ def final_stale_reason(board: dict[str, Any], project_dir: Path) -> str:
         return "not built yet" if _any_clip(board, project_dir) else ""
 
     if record.get("settingsFingerprint", assembly_fingerprint({})) != assembly_fingerprint(board):
-        return "cut settings, trims or background audio changed"
+        return "cut settings, trims or soundtrack changed"
     built = out.stat().st_mtime
     for i, shot in enumerate(board.get("shots") or []):
         if shot.get("dubUrl") and shot.get("renderedDialogueSource") != "native" and shot.get("dubAppliedMode") != shot.get("dubMode", "mix"):
@@ -206,24 +206,182 @@ def assembly_fingerprint(board: dict) -> str:
     settings = board.get("assembly") or {}
     trims = [[s.get("id"), s.get("trimIn", 0), s.get("trimOut", 0)]
              for s in board.get("shots", []) if s.get("trimIn") or s.get("trimOut")]
-    return hashlib.sha256(json.dumps([settings, trims], sort_keys=True).encode()).hexdigest()[:16]
+    payload: list[Any] = [settings, trims]
+    # Only boards that have opened the Soundtrack settings carry the key, so
+    # every cut assembled before it existed keeps its fingerprint.
+    if "soundtrack" in board:
+        payload.append([board.get("soundtrack"),
+                        (board.get("soundtrackRender") or {}).get("key")])
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def board_options(board: dict, project_dir: Path, data_dir: Path) -> dict:
-    options = dict(board.get("assembly") or {})
-    options["fingerprint"] = assembly_fingerprint(board)
-    options["trims"] = {}
+def board_parts(board: dict, project_dir: Path) -> list[tuple[str, Path | None]]:
+    """(label, clip or None) for every shot, in cut order."""
+    parts = []
+    for i, shot in enumerate(board.get("shots") or []):
+        label = shot.get("title") or f"shot {i + 1}"
+        parts.append((f"{i + 1:02d} {label}",
+                      shot_clip(project_dir / "shots" / f"{i + 1:02d}", shot)))
+    return parts
+
+
+def clip_trims(board: dict, project_dir: Path) -> dict[str, list[float]]:
+    trims = {}
     for i, shot in enumerate(board.get("shots", []), 1):
         clip = shot_clip(project_dir / "shots" / f"{i:02d}", shot)
         if clip:
-            options["trims"][str(clip)] = [shot.get("trimIn", 0), shot.get("trimOut", 0)]
+            trims[str(clip)] = [shot.get("trimIn", 0), shot.get("trimOut", 0)]
+    return trims
+
+
+def board_options(board: dict, project_dir: Path, data_dir: Path) -> dict:
+    from .soundtrack.board import settings as soundtrack_settings, usable_render
+
+    options = dict(board.get("assembly") or {})
+    options["fingerprint"] = assembly_fingerprint(board)
+    options["trims"] = clip_trims(board, project_dir)
     ref = options.pop("backgroundAudio", None)
-    if ref:
+    music = soundtrack_settings(board)
+    if music["enabled"] and music["source"] == "upload" and ref:
         path = (data_dir / ref["path"]).resolve()
         if not path.is_relative_to(data_dir.resolve()) or not path.is_file():
-            raise ValueError("Background audio is missing or outside the projects folder")
+            raise ValueError("Soundtrack audio is missing or outside the projects folder")
         options["backgroundPath"] = str(path)
+    elif music["enabled"] and music["source"] == "generate":
+        path = usable_render(board, project_dir, data_dir)
+        if path:
+            options["backgroundPath"] = str(path)
+    if options.get("backgroundPath") and music["duck"]:
+        options["duck"] = {
+            "db": music["duckDb"], "attack": music["duckAttack"],
+            "release": music["duckRelease"], "keys": duck_keys(board, project_dir),
+        }
     return options
+
+
+def duck_keys(board: dict, project_dir: Path) -> dict[str, dict[str, Any]]:
+    """Where each clip's dialogue is, for ducking the soundtrack under it.
+
+    By the time a clip reaches the cut its line is already mixed into its
+    audio together with H3's sound effects, so that audio cannot tell the
+    two apart. The recorded take can: a dubbed clip's ``dialogue.wav`` starts
+    at the clip's first frame (see ``dubbing.mux_speech``), so its speech is
+    exactly where the line is. A native-dialogue clip has no separate take —
+    H3 spoke the line itself — so its whole length is treated as dialogue:
+    ducking too much music is recoverable, losing a line is not.
+    """
+    keys: dict[str, dict[str, Any]] = {}
+    for i, shot in enumerate(board.get("shots") or [], 1):
+        if not (shot.get("dialogue") or "").strip():
+            continue
+        shot_dir = project_dir / "shots" / f"{i:02d}"
+        clip = shot_clip(shot_dir, shot)
+        if clip is None:
+            continue
+        if shot.get("renderedDialogueSource") == "native":
+            keys[str(clip)] = {"whole": True}
+        elif clip.name == "clip-dubbed.mp4" and (shot_dir / "dialogue.wav").is_file():
+            keys[str(clip)] = {"speech": str(shot_dir / "dialogue.wav")}
+    return keys
+
+
+def cut_timings(clips: list[Path], options: dict) -> tuple[list[tuple[float, float]], float]:
+    """(trim start, kept duration) per clip and the cut's total length.
+
+    The one place the cut's length is worked out, so the soundtrack generated
+    ahead of assembly is exactly as long as the video it goes under.
+    """
+    transition = _seconds(options.get("transitionSeconds"), "Transition")
+    if transition > 2:
+        raise ValueError("Transition must be between 0 and 2")
+    timings = []
+    for clip in clips:
+        start, tail = (options.get("trims") or {}).get(str(clip), [0, 0])
+        start, tail = _seconds(start, "Trim start"), _seconds(tail, "Trim end")
+        duration = _duration(clip) - start - tail
+        if duration <= 0 or (transition and duration <= 2 * transition):
+            raise ValueError(f"{clip.parent.name}: trims leave too little video for this transition")
+        timings.append((start, duration))
+    total = sum(d for _, d in timings)
+    if transition and len(clips) > 1:
+        total -= transition * (len(clips) - 1)
+    return timings, total
+
+
+def clip_offsets(timings: list[tuple[float, float]], transition: float) -> list[float]:
+    """Where each clip starts in the cut; a crossfade overlaps neighbours."""
+    offsets, at = [], 0.0
+    overlap = transition if len(timings) > 1 else 0.0
+    for _, duration in timings:
+        offsets.append(at)
+        at += duration - overlap
+    return offsets
+
+
+def speech_intervals(speech: Path, start: float, duration: float) -> list[tuple[float, float]]:
+    """Spans of *speech* that are voiced, in the clip's trimmed time."""
+    ffmpeg = shutil.which("ffmpeg")
+    length = _duration(speech)
+    if not ffmpeg or length <= 0:
+        return [(0.0, duration)]    # cannot see inside it: assume it all speaks
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostats", "-i", str(speech),
+             "-af", "silencedetect=noise=-35dB:d=0.3", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return [(0.0, duration)]
+    silences, opened = [], None
+    for line in (proc.stderr or "").splitlines():
+        if "silence_start:" in line:
+            opened = float(line.split("silence_start:")[1].split()[0])
+        elif "silence_end:" in line and opened is not None:
+            silences.append((opened, float(line.split("silence_end:")[1].split()[0])))
+            opened = None
+    if opened is not None:
+        silences.append((opened, length))
+    voiced, at = [], 0.0
+    for s, e in silences:
+        if s > at:
+            voiced.append((at, s))
+        at = max(at, e)
+    if at < length:
+        voiced.append((at, length))
+    out = []
+    for s, e in voiced:
+        s, e = max(0.0, s - start), min(duration, e - start)
+        if e > s:
+            out.append((s, e))
+    return out
+
+
+def duck_expression(intervals: list[tuple[float, float]], db: float,
+                    attack: float, release: float) -> str:
+    """An ffmpeg ``volume`` expression that dips by *db* over each interval.
+
+    The dialogue's timing is known before the mix, so the dip can start
+    *attack* seconds ahead of the first word instead of reacting to it the
+    way a sidechain compressor must, and recovers over *release* after the
+    last. Spans closer together than a dip and a recovery are merged, so the
+    music does not pump between sentences. Each span contributes a 0..1
+    trapezoid; merged spans never overlap, so their sum stays within 0..1.
+    """
+    attack, release = max(attack, 0.01), max(release, 0.01)
+    merged: list[list[float]] = []
+    for s, e in sorted(intervals):
+        if merged and s - merged[-1][1] < attack + release:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    if not merged or db <= 0:
+        return "1"
+    depth = 1 - 10 ** (-db / 20)
+    ramps = "+".join(
+        f"max(0,min(1,min((t-{s - attack:.3f})/{attack:.3f},({e + release:.3f}-t)/{release:.3f})))"
+        for s, e in merged
+    )
+    return f"1-{depth:.4f}*({ramps})"
 
 
 def _seconds(value, label):
@@ -266,14 +424,7 @@ def assemble(
         gain = _seconds(options.get("backgroundVolume", 0.15), "Background volume")
         if transition > 2 or fade > 2 or gain > 2:
             raise ValueError("Transition, fade and background volume must be between 0 and 2")
-        timings = []
-        for _, clip in clips:
-            start, tail = (options.get("trims") or {}).get(str(clip), [0, 0])
-            start, tail = _seconds(start, "Trim start"), _seconds(tail, "Trim end")
-            duration = _duration(clip) - start - tail
-            if duration <= 0 or (transition and duration <= 2 * transition):
-                raise ValueError(f"{clip.parent.name}: trims leave too little video for this transition")
-            timings.append((start, duration))
+        timings, _ = cut_timings([clip for _, clip in clips], options)
     except (ValueError, TypeError) as exc:
         res.error = str(exc)
         return res
@@ -330,8 +481,27 @@ def assemble(
         pairs = "".join(f"[v{i}][a{i}]" for i in range(len(clips)))
         filters.append(pairs + f"concat=n={len(clips)}:v=1:a=1[v][baseaudio]")
     if background:
+        duck = ""
+        if options.get("duck"):
+            spec = options["duck"]
+            offsets = clip_offsets(timings, transition if crossfading else 0.0)
+            spans = []
+            for (_, clip), (start, duration), at in zip(clips, timings, offsets):
+                key = (spec.get("keys") or {}).get(str(clip))
+                if not key:
+                    continue
+                local = ([(0.0, duration)] if key.get("whole")
+                         else speech_intervals(Path(key["speech"]), start, duration))
+                spans += [(at + s, at + e) for s, e in local]
+            expression = duck_expression(spans, float(spec.get("db") or 0),
+                                         float(spec.get("attack") or 0),
+                                         float(spec.get("release") or 0))
+            if expression != "1":
+                duck = f",volume='{expression}':eval=frame"
+                res.log.append(f"[INFO] soundtrack ducked {spec.get('db')} dB under "
+                               f"{len(spans)} dialogue span(s)")
         filters.append(f"[{len(clips)}:a]aresample={SAMPLE_RATE},asetpts=PTS-STARTPTS,"
-                       f"atrim=duration={total},volume={gain},afade=t=in:d=0.1,"
+                       f"atrim=duration={total},volume={gain}{duck},afade=t=in:d=0.1,"
                        f"afade=t=out:st={max(0, total-0.1)}:d=0.1[bed]")
         filters.append("[baseaudio][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:latency=1[a]")
     else:
@@ -367,7 +537,7 @@ def assemble(
         f"[INFO] joined {len(clips)} clip(s) into {out.name} "
         f"({out.stat().st_size // 1024} KB, {res.seconds:.1f}s) "
         f"in {time.time() - started:.1f}s"
-    ]
+    ] + res.log
     if res.missing:
         res.log.append(
             "[WARN] left out, not rendered: " + ", ".join(res.missing)

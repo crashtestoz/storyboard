@@ -155,6 +155,13 @@ const API = {
   // re-rendering and only the cut is out of date.
   assemble: (slug) => req("POST", "/api/assemble", { slug }),
 
+  // Where the board's soundtrack stands (waiting for scenes, ready, current,
+  // stale…), and generating it now instead of waiting for assembly.
+  soundtrackStatus: (slug) =>
+    req("GET", `/api/boards/${encodeURIComponent(slug)}/soundtrack`),
+  generateSoundtrack: (slug) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/soundtrack`, {}),
+
   // "This clip really is a render of what the board says now" — an assertion
   // the user is entitled to make, and the only alternative to paying for a
   // re-render to prove it.

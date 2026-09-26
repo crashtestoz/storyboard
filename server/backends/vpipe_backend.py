@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..dubbing import speaker_for
+from ..soundtrack.board import no_music_in_shots
 from .base import (
     Backend,
     Check,
@@ -1755,6 +1756,10 @@ def _resolved_prompt(
         if project.get("soundscapeInShots", True):
             parts.append((project.get("soundscape") or "").strip())
         parts.append((shot.get("soundNote") or "").strip())
+        if no_music_in_shots(project):
+            # The cut gets one continuous soundtrack laid over it afterwards;
+            # music H3 improvises per shot would clash with it at every cut.
+            parts.append("No music: sound effects and ambience only, the score is added separately.")
         if line and not speaks_aloud:
             parts.append(
                 "Generated audio contains ambient sound only: no spoken words, "

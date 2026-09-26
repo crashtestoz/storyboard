@@ -2500,3 +2500,16 @@ textarea.ta-compact {
 .settings-pane section > .field-note + div > .field:first-child,
 .settings-pane section > #stillsModelWrap + .field { margin-top: var(--sp-3); }
 .settings-pane .llm-editor { margin-bottom: var(--sp-3); }
+
+/* Settings → Soundtrack */
+.soundtrack-status {
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 6px);
+}
+.soundtrack-status audio { width: 100%; margin-top: var(--sp-2); }
+.soundtrack-subhead { display: block; margin: var(--sp-4) 0 var(--sp-2); }
+#soundtrackSettings .toggle { margin-top: var(--sp-3); }
+#soundtrackSettings > .field-note { margin-bottom: var(--sp-2); }
+#soundtrackSettings input[type="range"] { width: 100%; }

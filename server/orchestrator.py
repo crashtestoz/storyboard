@@ -116,6 +116,9 @@ class Orchestrator:
                  data_dir: Path | None = None,
                  timings: RenderTimings | None = None):
         self.prepare_dialogue = None
+        # Set by the app: (slug) -> note. Generates the soundtrack before the
+        # cut is joined, once every shot has its clip.
+        self.prepare_soundtrack = None
         # This machine's measured render times -- the only source of an
         # expected duration (see render_timings.py).
         self.timings = timings
@@ -1004,6 +1007,11 @@ class Orchestrator:
             (board.get("defaults") or {}).get("resolution")
         )
         project_dir = self.store.project_dir(slug)
+        music = None
+        if self.prepare_soundtrack:
+            self._set_assembly("running", "generating the soundtrack")
+            music = self.prepare_soundtrack(slug)
+            board = self.store.load(slug)
         self._set_assembly("running", f"joining {len(shots)} shot(s)")
 
         result = assembly.assemble(
@@ -1021,6 +1029,8 @@ class Orchestrator:
         # while the clips were being joined.
         fresh_board = self.store.load(slug)
         fresh_board["finalVideo"] = result.to_json(url)
+        if music:
+            fresh_board["finalVideo"]["soundtrack"] = music
         self.store.save(slug, fresh_board)
 
         message = (
@@ -1028,6 +1038,11 @@ class Orchestrator:
             + (
                 " — incomplete, missing: " + ", ".join(result.missing)
                 if result.missing
+                else ""
+            )
+            + (
+                f" — no soundtrack: {music['message']}"
+                if music and music.get("state") in ("failed", "skipped")
                 else ""
             )
         )
