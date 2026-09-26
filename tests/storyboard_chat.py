@@ -16,6 +16,7 @@ from server.storyboard_chat import (  # noqa: E402
     validate_actions,
 )
 from server.backends.vpipe_backend import estimate_render_seconds  # noqa: E402
+from server import ad_memory  # noqa: E402
 from server.render_timings import RenderTimings  # noqa: E402
 from server.store import (  # noqa: E402
     default_board, default_character, default_shot, render_fingerprint,
@@ -249,6 +250,101 @@ class StoryboardChatTests(unittest.TestCase):
         fake_search.assert_called_once()
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(result["message"], "Still not sure.")
+
+
+class ConversationMemoryTests(unittest.TestCase):
+    """Older turns fold into a cached summary; recent ones stay verbatim."""
+
+    class Summariser:
+        label, model = "Test model", "test-1"
+
+        def __init__(self):
+            self.calls = []
+
+        def health(self):
+            return True, ""
+
+        def complete(self, system, user, *, timeout=120.0, max_tokens=None):
+            self.calls.append((system, user))
+            if system == ad_memory.MEMORY_SYSTEM_PROMPT:
+                return f"- summary {len(self.calls)}"
+            return json.dumps({"message": "ok", "actions": []})
+
+    @staticmethod
+    def turns(n, start=0):
+        return [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+                for i in range(start, start + n)]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / ad_memory.MEMORY_FILE
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_short_history_is_sent_verbatim_without_a_summary_call(self):
+        model = self.Summariser()
+        summary, recent = ad_memory.condense(model, self.turns(10), self.path)
+        self.assertEqual(summary, "")
+        self.assertEqual(len(recent), 10)
+        self.assertEqual(model.calls, [])
+
+    def test_older_turns_are_summarised_once_and_reused(self):
+        model = self.Summariser()
+        history = self.turns(ad_memory.KEEP + ad_memory.BATCH)
+        summary, recent = ad_memory.condense(model, history, self.path)
+        self.assertEqual(summary, "- summary 1")
+        self.assertEqual([t["content"] for t in recent],
+                         [t["content"] for t in history[-ad_memory.KEEP:]])
+        self.assertTrue(self.path.exists())
+        # Two more turns: under a batch, so no new call, and the two turns
+        # that rolled out of the verbatim window are still sent verbatim.
+        more = history + self.turns(2, start=len(history))
+        summary, recent = ad_memory.condense(model, more, self.path)
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(summary, "- summary 1")
+        self.assertEqual(len(recent), ad_memory.KEEP + 2)
+
+    def test_cleared_chat_starts_the_memory_over(self):
+        model = self.Summariser()
+        ad_memory.condense(model, self.turns(ad_memory.KEEP + ad_memory.BATCH), self.path)
+        summary, recent = ad_memory.condense(model, self.turns(2, start=100), self.path)
+        self.assertEqual(summary, "")
+        self.assertEqual(len(recent), 2)
+
+    def test_chat_puts_memory_and_conversation_before_the_board(self):
+        board = default_board("Crossing")
+        board["shots"] = [default_shot(board["defaults"])]
+        model = self.Summariser()
+        chat(model, board, "Next?", history=self.turns(ad_memory.KEEP + ad_memory.BATCH),
+             memory_path=self.path)
+        user = model.calls[-1][1]
+        self.assertIn("CONVERSATION MEMORY", user)
+        self.assertLess(user.index("RECENT CONVERSATION"), user.index("CURRENT STORYBOARD"))
+        self.assertLess(user.index("CURRENT STORYBOARD"), user.index("USER:\nNext?"))
+
+    def test_context_drops_empty_fields_and_lists_reference_tags(self):
+        board = default_board("Crossing")
+        shot = default_shot(board["defaults"])
+        shot["referenceImages"] = [{"tag": "DeLorean", "label": "DeLorean.png"}]
+        board["shots"] = [shot]
+        ctx = compact_board_context(board)["shots"][0]
+        self.assertEqual(ctx["refs"], ["@DeLorean"])
+        self.assertNotIn("dialogue", ctx)
+        self.assertNotIn("hasStartFrame", ctx)
+        self.assertIn("needsRender", ctx)
+
+    def test_chat_reads_the_in_app_prompt_guide(self):
+        self.assertIn("STORYBOARD PROMPT GUIDE", CHAT_SYSTEM_PROMPT)
+        self.assertIn("- Medium close-up (MCU):", CHAT_SYSTEM_PROMPT)
+        # A copyable example survives as "Label: `text`", whatever its wording.
+        self.assertRegex(CHAT_SYSTEM_PROMPT, r"\n[A-Z][^\n:`]+: `[^`\n]{20,}`")
+        self.assertNotIn("<svg", CHAT_SYSTEM_PROMPT)
+        self.assertNotIn("helpClose", CHAT_SYSTEM_PROMPT)
+
+    def test_chat_knows_the_h3_rules(self):
+        self.assertIn("No negative prompt exists", CHAT_SYSTEM_PROMPT)
+        self.assertIn("Continuous background audio", CHAT_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

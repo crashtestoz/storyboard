@@ -13,7 +13,11 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server.llm import OpenAICompatLLM, rewrite_dialogue  # noqa: E402
+from server.llm import (  # noqa: E402
+    SCENE_SYSTEM_PROMPT, SOUND_ACCENT_SYSTEM_PROMPT, SOUNDSCAPE_SYSTEM_PROMPT,
+    SYSTEM_PROMPT, OpenAICompatLLM, board_outline, build_user_message,
+    rewrite_dialogue,
+)
 
 
 class _Response:
@@ -98,6 +102,62 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertIn("SELECTED SPEAKER: Han Solo", service.user)
         self.assertIn("terse, sarcastic", service.user)
         self.assertIn("SHOT DURATION: 4.00 seconds", service.user)
+
+
+class H3AwareRewriteTests(unittest.TestCase):
+    def test_h3_rules_reach_the_matching_system_prompts(self):
+        for prompt in (SYSTEM_PROMPT, SCENE_SYSTEM_PROMPT):
+            self.assertIn("No negative prompt exists", prompt)
+            self.assertIn("frame terms", prompt)
+        for prompt in (SOUNDSCAPE_SYSTEM_PROMPT, SOUND_ACCENT_SYSTEM_PROMPT):
+            self.assertIn("No score, soundtrack or theme music", prompt)
+            self.assertNotIn("frame terms", prompt)  # only the sound half
+        self.assertNotIn("music or drone", SOUNDSCAPE_SYSTEM_PROMPT)
+
+    def test_shot_rewrite_sees_its_dialogue_length_and_sound(self):
+        text = build_user_message(
+            "Doc by the car.", dialogue="Doc: Better, Marty.",
+            duration_seconds=124 / 24, shot_sound="Rain on the roof.",
+        )
+        self.assertIn("Duration: 5.2 seconds.", text)
+        self.assertIn("Doc: Better, Marty.", text)
+        self.assertIn("Sound: Rain on the roof.", text)
+        self.assertTrue(text.rstrip().endswith("Doc by the car."))
+
+    def test_silent_shot_adds_no_facts_block(self):
+        self.assertNotIn("length, dialogue and sound", build_user_message("A wide shot."))
+
+    def test_board_outline_is_one_short_line_per_shot(self):
+        board = {
+            "characters": [{"id": "c1", "name": "Doc"}],
+            "shots": [
+                {"title": "Fly In", "prompt": "Camera Direction & Framing: " + "word " * 40},
+                {"title": "Garage", "characterIds": ["c1"],
+                 "prompt": "Camera Direction & Framing: Wide.\n\nPose / Action: Doc waits."},
+            ],
+        }
+        lines = board_outline(board).splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("1. Fly In: word"))
+        self.assertTrue(lines[0].endswith("…"))
+        self.assertLessEqual(len(lines[0].split()), 20)
+        self.assertEqual(lines[1], "2. Garage [Doc]: Wide. Doc waits.")
+        self.assertIn("Every shot in this board", build_user_message(
+            "Scene.", outline="\n".join(lines)))
+
+    def test_dialogue_rewrite_sees_surrounding_lines(self):
+        class FakeService:
+            label = "Fake"
+            def health(self):
+                return True, ""
+            def complete(self, system, user, *, timeout=300.0, max_tokens=None):
+                self.user = user
+                return "Better."
+        service = FakeService()
+        rewrite_dialogue(service, "It is better.", speaker={"name": "Doc"},
+                         neighbor_lines=["Before — Marty: Is that what I think it is?"])
+        self.assertIn("SURROUNDING DIALOGUE", service.user)
+        self.assertIn("Marty: Is that what I think it is?", service.user)
 
 
 if __name__ == "__main__":

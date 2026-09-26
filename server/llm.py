@@ -47,6 +47,47 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
 # What the model is told
 # --------------------------------------------------------------------------- #
 
+# MiniMax H3's rendering behaviour, distilled from vpipe's docs/MINIMAX-H3.md
+# and from what this workspace's renders actually did. Sent in the *system*
+# prompt of every rewrite (and the Storyboard AD) rather than as the source
+# document: ~300 tokens instead of ~15k, and identical on every call, so a
+# backend with prefix caching pays for it once. Split into what matters for
+# picture and what matters for sound, so each rewrite carries only its half.
+H3_VISUAL_RULES = """\
+MiniMax H3 facts (apply them silently; never mention them in the output):
+- No negative prompt exists: every word conditions the clip, negated ones \
+included ("no windows" adds windows). Describe only what IS there; turn any \
+"no X" / "without X" the writer wrote into what occupies that space instead.
+- Reference images condition the whole clip, not its first frame; nothing \
+pins an opening frame. State the opening composition in words, and never ask \
+to start from or copy a reference as the first frame. A reference's own \
+camera angle tends to win, so keep the framing compatible with it or say \
+plainly how it differs.
+- Place people and objects in frame terms (frame left/right, foreground/\
+background, facing or away from camera, what fills each edge). Object-\
+relative directions ("driver's side", "his right") are unreliable on their \
+own; pair them with frame terms.
+- Give each character one eye line and one ordered action; never contradict \
+it later in the prompt.
+- The model sees only this text: never mention "the previous shot", a \
+transition or the edit; describe what is on screen. No ALL-CAPS emphasis.
+"""
+
+H3_SOUND_RULES = """\
+MiniMax H3 facts (apply them silently; never mention them in the output):
+- Picture and sound are generated together from one text, so every sound \
+named also steers the image: wind, ocean or rain in an interior shot can open \
+a window onto the outside. Name only sounds consistent with what is on \
+screen in every shot the text applies to.
+- No score, soundtrack or theme music: each clip would compose its own, jump \
+at every cut and mask dialogue; music is mixed over the finished cut \
+separately. Drop any the writer asked for and keep the sound effects. Music \
+from a source visible on screen (a radio, a band) is fine.
+- No negative prompt exists: describe what is heard, not what is absent. A \
+closing "Sound effects only." is the one allowed exception.
+- Spoken dialogue is a separate field; never describe speech.
+"""
+
 # The house style: a fixed three-label breakdown (camera, then appearance
 # when a character is on screen, then action) rather than a single flowing
 # paragraph. Chosen over the old free-paragraph style because it's what
@@ -107,11 +148,17 @@ Do not include filenames or paths in the final prompt.
 dashes within a section.
 - Do not mention aspect ratio, resolution, frame count, steps, seeds or file \
 formats. Those are set elsewhere.
+- If this shot's dialogue, duration or sound are given as context, keep the \
+picture consistent with them (the speaker is on screen and speaking; visible \
+sources for named sounds; action simple enough to play out while the line is \
+spoken within the duration), but never write dialogue or sound into the \
+prompt: both are appended separately.
 - Keep each section to one or two sentences; aim for 70 to 130 words total. \
 Longer prompts dilute the conditioning.
 - Write only the three-section prompt itself. Your entire reply is used \
 verbatim as the prompt.
-"""
+
+""" + H3_VISUAL_RULES
 
 STILL_SYSTEM_PROMPT = """\
 You rewrite shot descriptions into prompts for a text-to-image model.
@@ -141,6 +188,8 @@ cues to the rewritten prompt. Do not include filenames or paths in the final \
 prompt.
 - Refer to named characters by exactly the name the writer used.
 - Describe no sound at all: this is a still image.
+- Describe only what is visible. Turn any "no X" / "without X" the writer \
+wrote into what occupies that space instead; negated words still render.
 - One paragraph. No headings, no bullets, no preamble, no explanation.
 - Aim for 50 to 90 words.
 - Write only the prompt itself. Your entire reply is used verbatim.
@@ -174,12 +223,17 @@ register, rather than toning it down.
 constraints on the environment. Add a compact natural-language summary of \
 their relevant visual cues. Do not include filenames or paths in the \
 final text.
+- It is prepended to every shot in the board outline given as context, \
+interiors and exteriors alike. Keep it true for all of them: a detail that \
+fits only some shots (daylight outside, weather seen through a window, a \
+view of the ocean) belongs in those shots' own prompts, not here.
 - One paragraph. No headings, no bullet points, no preamble, no \
 explanation, no quotation marks around the whole thing.
 - Aim for 40 to 90 words.
 - Write only the scene description itself. Your entire reply is used \
 verbatim.
-"""
+
+""" + H3_VISUAL_RULES
 
 SOUNDSCAPE_SYSTEM_PROMPT = """\
 You rewrite a storyboard's project-wide background sound — the ambient \
@@ -196,7 +250,10 @@ desert scene implies wind, shifting sand, the heat-tick of metal. Name \
 what is actually heard, grounded in that environment, rather than \
 describing how it feels.
 - Describe only what is heard: ambience, room tone, weather, distant \
-activity, machinery, music or drone — layered and separated by commas.
+activity, machinery or drone — layered and separated by commas.
+- It is rendered into every shot in the board outline given as context, \
+interiors and exteriors alike: keep only sounds plausible in all of them, \
+and leave sounds specific to some shots to those shots' own sound accents.
 - Do not describe anything visual: no camera moves, no actions, no \
 lighting, no characters' appearance.
 - Do not describe spoken dialogue or intelligible words — this is an \
@@ -213,7 +270,8 @@ whole thing.
 - Aim for 15 to 45 words.
 - Write only the background sound description itself. Your entire reply \
 is used verbatim.
-"""
+
+""" + H3_SOUND_RULES
 
 SOUND_ACCENT_SYSTEM_PROMPT = """\
 You rewrite a single shot's scene-background sound accents — additional, \
@@ -248,10 +306,12 @@ it in the same register, rather than toning it down.
 - One paragraph, or a short comma-separated phrase. No headings, no bullet \
 points, no preamble, no explanation, no quotation marks around the whole \
 thing.
+- If the shot has dialogue, keep the accents low enough to sit under it.
 - Aim for 10 to 35 words.
 - Write only the sound accents themselves. Your entire reply is used \
 verbatim.
-"""
+
+""" + H3_SOUND_RULES
 
 DIALOGUE_SYSTEM_PROMPT = """\
 You rewrite one spoken line for a storyboard character. Preserve the line's \
@@ -270,7 +330,10 @@ plot facts, actions, relationships, names, or backstory.
 - Preserve the meaning of the writer's line unless changing its wording is \
 necessary to express the same intent in character.
 - Keep it short enough for the supplied shot duration. Natural dialogue is \
-roughly two to three words per second.
+roughly two to three words per second, and any pauses the delivery \
+direction asks for count against the same duration.
+- If surrounding dialogue is supplied, make the line follow on from what was \
+just said and lead into what comes next, without repeating either.
 - Return only the words to be spoken: no speaker name, quotation marks, stage \
 directions, delivery notes, explanation, headings, or alternatives.
 """
@@ -362,6 +425,10 @@ def build_user_message(
     next_shot: dict[str, str] | None = None,
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
+    outline: str = "",
+    dialogue: str = "",
+    duration_seconds: float | None = None,
+    shot_sound: str = "",
     instruction: str = "Rewrite this shot description:",
 ) -> str:
     """The text to rewrite, plus the context it has to stay consistent with.
@@ -384,8 +451,23 @@ def build_user_message(
     side. They are continuity references only, same spirit as *scene*: shown
     so the rewrite doesn't contradict where the sequence just was or is about
     to go, never material to fold in or restate.
+
+    *outline* is board_outline()'s one line per shot, for the project-wide
+    fields: a scene description or background sound is applied to every
+    shot, so it has to be written knowing what all of them are.
+
+    *dialogue*, *duration_seconds* and *shot_sound* are this shot's own
+    spoken line, length and sound (bed plus accents) — for a shot rewrite,
+    so the picture leaves room for the line and doesn't contradict the
+    soundtrack H3 generates from the same text.
     """
     blocks = []
+    if outline.strip():
+        blocks.append(
+            "Every shot in this board, in order — what the text below is "
+            "applied to. Context only; do not describe individual shots:\n"
+            + outline.strip()
+        )
     if scene.strip():
         blocks.append(
             "The project's scene description, already applied to every shot. "
@@ -448,8 +530,45 @@ def build_user_message(
             "shot prompt. Do not mention filenames or paths in the rewritten "
             "prompt:\n" + "\n".join(lines)
         )
+    shot_facts = []
+    if duration_seconds:
+        shot_facts.append(f"Duration: {duration_seconds:.1f} seconds.")
+    if dialogue.strip():
+        shot_facts.append("Dialogue, spoken during this shot: " + dialogue.strip())
+    if shot_sound.strip():
+        shot_facts.append("Sound: " + shot_sound.strip())
+    if shot_facts:
+        blocks.append(
+            "This shot's length, dialogue and sound, appended to the prompt "
+            "separately. Keep the picture consistent with them; do not repeat "
+            "them:\n" + "\n".join(shot_facts)
+        )
     blocks.append(instruction + "\n" + text.strip())
     return "\n\n".join(blocks)
+
+
+_PROMPT_LABEL_RE = re.compile(
+    r"(Camera Direction & Framing|Clothing / Appearance|Pose / Action)[^:]*:\s*", re.I
+)
+
+
+def board_outline(board: dict[str, Any], *, words: int = 16) -> str:
+    """One short line per shot: number, title, and the opening words of its
+    prompt with the section labels stripped. Enough to tell an interior from
+    an exterior, or a dialogue scene from an action beat, for a few tokens a
+    shot rather than the whole board."""
+    names = {c.get("id"): c.get("name") for c in board.get("characters") or []}
+    lines = []
+    for i, shot in enumerate(board.get("shots") or [], 1):
+        gist = _PROMPT_LABEL_RE.sub("", shot.get("prompt") or "").split()
+        line = f"{i}. {(shot.get('title') or 'Untitled').strip()}"
+        cast = [names[c] for c in shot.get("characterIds") or [] if names.get(c)]
+        if cast:
+            line += f" [{', '.join(cast)}]"
+        if gist:
+            line += ": " + " ".join(gist[:words]) + ("…" if len(gist) > words else "")
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -1145,6 +1264,10 @@ def rewrite_prompt(
     characters: list[dict[str, Any]] | None = None,
     reference_images: list[dict[str, str]] | None = None,
     reference_files: list[Path] | None = None,
+    outline: str = "",
+    dialogue: str = "",
+    duration_seconds: float | None = None,
+    shot_sound: str = "",
     kind: str = "shot",
 ) -> str:
     """Ask *service* to restyle *text*. Returns the proposal, never applies it.
@@ -1178,6 +1301,10 @@ def rewrite_prompt(
             next_shot=next_shot,
             characters=characters,
             reference_images=reference_images,
+            outline=outline,
+            dialogue=dialogue,
+            duration_seconds=duration_seconds,
+            shot_sound=shot_sound,
             instruction=spec["instruction"],
         ),
         images=reference_files,
@@ -1201,8 +1328,14 @@ def rewrite_dialogue(
     dialogue_style: str = "",
     duration_seconds: float | None = None,
     research: str = "",
+    neighbor_lines: list[str] | None = None,
 ) -> str:
-    """Rewrite one line in its selected speaker's voice, as a proposal."""
+    """Rewrite one line in its selected speaker's voice, as a proposal.
+
+    *neighbor_lines* are the lines spoken in the shots either side, already
+    labelled ("Before — Doc: ..."), so the rewrite answers what was just said
+    and sets up what comes next instead of reading as a line on its own.
+    """
     text = (text or "").strip()
     if not text:
         raise ValueError("There is nothing in the dialogue to rewrite yet.")
@@ -1228,6 +1361,9 @@ def rewrite_dialogue(
         blocks.append("DELIVERY DIRECTION:\n" + dialogue_style.strip())
     if duration_seconds:
         blocks.append(f"SHOT DURATION: {duration_seconds:.2f} seconds")
+    if neighbor_lines:
+        blocks.append("SURROUNDING DIALOGUE (context only; do not repeat):\n"
+                      + "\n".join(neighbor_lines))
     blocks.append(
         "WEB RESEARCH RESULTS:\n" + (
             research.strip()

@@ -5,12 +5,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from .backends.vpipe_backend import estimate_render_seconds
 from .hardware import describe_hardware
-from .llm import LLMService
+from . import ad_memory
+from .llm import H3_SOUND_RULES, H3_VISUAL_RULES, LLMService
 from .store import stale_reason
 from .web_search import format_results as format_search_results
 from .web_search import search as web_search
@@ -53,6 +55,109 @@ def _mcp_reference() -> str:
         "native-dialogue shot, or what a render actually does behind the "
         "Render button):\n"
         + "\n".join(lines)
+    )
+
+
+class _GuideText(HTMLParser):
+    """Plain text of index.html's #helpDialog: headings, term/definition
+    lists, paragraphs and the copyable examples. Diagrams and buttons are
+    skipped — they carry nothing a text model can use."""
+
+    SKIP = {"svg", "button", "script", "style"}
+    BREAK = {"p", "dt", "section", "li"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+        self.buf: list[str] = []
+        self.inside = False
+        self.depth = 0
+        self.skip = 0
+        self.heading = ""
+
+    def _flush(self) -> None:
+        text = re.sub(r"\s+", " ", "".join(self.buf)).strip()
+        self.buf = []
+        if text:
+            self.lines.append(text)
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if a.get("id") == "helpDialog":
+            self.inside = True
+        if not self.inside:
+            return
+        if tag == "div":
+            self.depth += 1
+        if tag in self.SKIP:
+            self.skip += 1
+        if self.skip:
+            return
+        cls = a.get("class") or ""
+        if tag in self.BREAK or "card-heading-title" in cls or "help-panel" in cls:
+            self._flush()
+        if "card-heading-title" in cls:
+            self.buf.append("## ")
+        elif "card-heading-desc" in cls:
+            self.buf.append(" — ")
+        elif tag == "dt":
+            self.buf.append("- ")
+        elif tag == "code":
+            self.buf.append(" `")
+
+    def handle_endtag(self, tag):
+        if not self.inside:
+            return
+        if tag in self.SKIP:
+            self.skip -= 1
+            return
+        if self.skip:
+            return
+        if tag in ("dt", "strong"):
+            self.buf.append(": ")
+        elif tag == "code":
+            self.buf.append("`")
+            self._flush()
+        elif tag == "dd":
+            self._flush()
+        elif tag == "div":
+            self.depth -= 1
+            if self.depth == 0:
+                self._flush()
+                self.inside = False
+
+    def handle_data(self, data):
+        if self.inside and not self.skip:
+            self.buf.append(data)
+
+
+def _prompt_guide() -> str:
+    """The in-app "Storyboard prompt guide", read from index.html itself.
+
+    Same reasoning as the MCP catalogue above: the dialog is the one copy the
+    user reads, so the AD reads the same one rather than a hand-kept summary
+    that drifts from it. ~1.5k tokens, and it sits in the system prompt, so a
+    backend with prefix caching pays for it once per conversation.
+    """
+    path = Path(__file__).resolve().parent.parent / "index.html"
+    try:
+        parser = _GuideText()
+        parser.feed(path.read_text(encoding="utf-8"))
+        parser._flush()
+    except (OSError, ValueError):
+        return ""
+    lines = [re.sub(r":\s*:", ":", line).replace(" : ", ": ") for line in parser.lines
+             if line not in ("Storyboard prompt guide", "Camera prompt guide")]
+    if not lines:
+        return ""
+    return (
+        "STORYBOARD PROMPT GUIDE (the app's own ? guide, which the user also "
+        "reads — use its vocabulary and templates, and point the user to it "
+        "when helpful). In this app the spoken words go in a shot's dialogue "
+        "field and the voice direction in dialogueStyle; both are appended to "
+        "the prompt automatically, so use the dialogue templates for those "
+        "fields rather than pasting the line into the prompt. Timed sound "
+        "accents go in soundNote.\n" + "\n".join(lines)
     )
 
 
@@ -135,8 +240,17 @@ is the shot's needsRender flag in context. assemble joins rendered clips \
 (the dubbed version wins while current) into final.mp4, in shot order.
 
 Draft mode renders small and fast (capped resolution, 4 steps, no generated \
-audio) for blocking iteration before a full-quality pass.
-"""
+audio) for blocking iteration before a full-quality pass. Steps: 8 is draft \
+quality, 16 is the final-quality setting.
+
+Music: the Final Video panel's "Continuous background audio" mixes one track \
+under the whole assembled cut. That is where a theme or score belongs, not in \
+a shot's soundNote or the soundscape (see the H3 sound facts below).
+
+Writing sceneDescription or soundscape: both are applied to every shot, \
+interiors and exteriors alike, so they must hold for all of them; anything \
+true of only some shots belongs in those shots.
+""" + "\n" + H3_VISUAL_RULES + "\n" + H3_SOUND_RULES
 
 CHAT_SYSTEM_PROMPT = """\
 You are the Storyboard AD, the user's assistant director. Help the user review, plan, and edit
@@ -144,7 +258,11 @@ the storyboard currently open in the app. Be concise, concrete, and candid
 about continuity, camera direction, pacing, visual consistency, and sound.
 
 The CURRENT STORYBOARD context below is the full board: every shot's actual
-prompt, soundNote, dialogue and title text, not a summary of it. Read the
+prompt, soundNote, dialogue and title text, not a summary of it. A field
+missing from a shot is empty (no dialogue, no start frame, and so on); refs
+lists the shot's reference images by @tag. CONVERSATION MEMORY, when present,
+summarises the earlier part of this conversation: honour the decisions and
+preferences it records. Read the
 wording of each shot's prompt, not just its topic, when asked to review,
 critique or check something — a continuity or pacing problem is often in the
 specific words a shot uses (a camera move, a pose, a detail) clashing with
@@ -256,6 +374,7 @@ Rules:
 
 CHAT_SYSTEM_PROMPT = (
     CHAT_SYSTEM_PROMPT + "\n" + STORYBOARD_KNOWLEDGE + "\n"
+    + _prompt_guide() + "\n\n"
     + _hardware_reference() + "\n\n" + _mcp_reference()
 )
 
@@ -325,12 +444,22 @@ def compact_board_context(
             "seed": shot.get("seed", 0),
             "hasStartFrame": bool(shot.get("startRef")),
             "hasEndFrame": bool(shot.get("endRef")),
-            "referenceImageCount": len(shot.get("referenceImages") or []),
+            "refs": [
+                "@" + r["tag"] if r.get("tag") else (r.get("label") or "image")
+                for r in shot.get("referenceImages") or [] if isinstance(r, dict)
+            ],
             "needsRender": needs_render,
             "estimatedRenderSeconds": (
                 round(estimated_seconds) if estimated_seconds is not None else None
             ),
         })
+    # Empty text and false has-flags carry no information but cost tokens on
+    # every shot of every turn; the prompt says an absent field means empty.
+    shots = [
+        {k: v for k, v in shot.items()
+         if not (v in ("", []) or (v is False and k.startswith("has")))}
+        for shot in shots
+    ]
     return {
         "name": board.get("name") or "Untitled storyboard",
         "sceneDescription": board.get("sceneDescription") or "",
@@ -530,6 +659,7 @@ def chat(
     search_url: str = "",
     data_dir: Path | None = None,
     timings=None,
+    memory_path: Path | None = None,
 ) -> dict[str, Any]:
     message = (message or "").strip()
     if not message:
@@ -537,12 +667,13 @@ def chat(
     ok, why = service.health()
     if not ok:
         raise RuntimeError(why)
-    recent = []
-    for turn in (history or [])[-12:]:
+    cleaned = []
+    for turn in history or []:
         role = turn.get("role") if isinstance(turn, dict) else None
         content = turn.get("content") if isinstance(turn, dict) else None
         if role in ("user", "assistant") and isinstance(content, str):
-            recent.append({"role": role, "content": content[:4000]})
+            cleaned.append({"role": role, "content": content})
+    summary, recent = ad_memory.condense(service, cleaned, memory_path)
     images, image_labels = _chat_reference_images(board, selected_id, data_dir)
     visual_context = ""
     if image_labels:
@@ -552,12 +683,19 @@ def chat(
                 f"- Image {i}: {label}" for i, label in enumerate(image_labels, 1)
             )
         )
+    # Conversation first, board second: the conversation only ever grows at
+    # its end, so a backend that reuses a cached prompt prefix (Ollama,
+    # llama.cpp, vLLM) keeps it warm from turn to turn, while the board —
+    # which changes whenever an edit is applied — sits after it and costs
+    # only its own re-read.
     user = (
-        "CURRENT STORYBOARD (compact JSON):\n"
+        ("CONVERSATION MEMORY (earlier turns, summarised):\n" + summary + "\n\n"
+         if summary else "")
+        + "RECENT CONVERSATION:\n"
+        + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
+        + "\n\nCURRENT STORYBOARD (compact JSON):\n"
         + json.dumps(compact_board_context(board, selected_id, timings), ensure_ascii=False, separators=(",", ":"))
         + visual_context
-        + "\n\nRECENT CONVERSATION:\n"
-        + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
         + "\n\nUSER:\n" + message
     )
     search_url = (search_url or "").strip()

@@ -58,11 +58,13 @@ from .llm import (
     LLMService, describe_character, describe_still_phases, rewrite_dialogue,
     rewrite_prompt,
 )
+from .llm import board_outline
 from .llm import load_services as load_llm_services
 from .llm import load_config as load_llm_config
 from .llm import KNOWN_KINDS as LLM_KINDS
 from .local_config import ensure_local_configs
 from .dubbing import speaker_for
+from .ad_memory import MEMORY_FILE as AD_MEMORY_FILE
 from .storyboard_chat import chat as storyboard_chat
 from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts import load_engines as load_tts_engines
@@ -600,6 +602,14 @@ class Handler(BaseHTTPRequestHandler):
                     "personality mannerisms"
                 ) if name else ""
                 results = research_character(search_url, name, limit=5) if query else []
+                idx = board["shots"].index(shot)
+                neighbor_lines = []
+                for label, other in (("Before", board["shots"][idx - 1] if idx else None),
+                                     ("After", board["shots"][idx + 1] if idx + 1 < len(board["shots"]) else None)):
+                    line = ((other or {}).get("dialogue") or "").strip()
+                    if line:
+                        who = (speaker_for(other, board) or {}).get("name") or "Someone"
+                        neighbor_lines.append(f"{label} — {who}: {line}")
                 proposal = rewrite_dialogue(
                     service,
                     text,
@@ -609,6 +619,7 @@ class Handler(BaseHTTPRequestHandler):
                     dialogue_style=shot.get("dialogueStyle") or "",
                     duration_seconds=(shot.get("frames") or 0) / 24,
                     research=format_search_results(results) if query else "",
+                    neighbor_lines=neighbor_lines,
                 )
                 research_meta = {
                     "attempted": True,
@@ -640,6 +651,8 @@ class Handler(BaseHTTPRequestHandler):
                         "background sounds, but do not repeat the prompt or turn "
                         "foreground action into sound effects:"
                     ),
+                    dialogue=_dialogue_context(shot, board),
+                    duration_seconds=(shot.get("frames") or 0) / 24 or None,
                     kind="soundNote",
                 )
             elif shot_id:
@@ -661,6 +674,7 @@ class Handler(BaseHTTPRequestHandler):
                     (c for c in ctx.backend.capabilities() if c.id == shot.get("model")),
                     None,
                 )
+                still = bool(cap and cap.kind == "image")
                 wanted = set(shot.get("characterIds") or [])
                 cast = [c for c in (board.get("characters") or []) if c.get("id") in wanted]
 
@@ -689,7 +703,15 @@ class Handler(BaseHTTPRequestHandler):
                             shot, cast, board.get("styleRefs")
                         ),
                     ),
-                    kind="still" if (cap and cap.kind == "image") else "shot",
+                    # A still has no length or soundtrack to stay consistent with.
+                    dialogue="" if still else _dialogue_context(shot, board),
+                    duration_seconds=None if still else (shot.get("frames") or 0) / 24 or None,
+                    shot_sound="" if still else " ".join(filter(None, (
+                        (board.get("soundscape") or "").strip()
+                        if board.get("soundscapeInShots", True) else "",
+                        (shot.get("soundNote") or "").strip(),
+                    ))),
+                    kind="still" if still else "shot",
                 )
             elif field == "sceneDescription":
                 # No cast context here: the scene description is the
@@ -712,6 +734,7 @@ class Handler(BaseHTTPRequestHandler):
                             None, [], board.get("styleRefs")
                         ),
                     ),
+                    outline=board_outline(board),
                     kind="scene",
                 )
             else:  # field == "soundscape"
@@ -723,6 +746,7 @@ class Handler(BaseHTTPRequestHandler):
                     service,
                     text,
                     scene=board.get("sceneDescription") or "",
+                    outline=board_outline(board),
                     kind="soundscape",
                 )
 
@@ -751,6 +775,7 @@ class Handler(BaseHTTPRequestHandler):
                 search_url=ctx.search_url(),
                 data_dir=ctx.data_dir,
                 timings=ctx.orch.timings,
+                memory_path=ctx.store.project_dir(slug) / AD_MEMORY_FILE,
             ))
 
         if path == "/api/describe-character":
@@ -1364,6 +1389,15 @@ class Handler(BaseHTTPRequestHandler):
         with target.open("rb") as fh:
             while chunk := fh.read(64 * 1024):
                 self.wfile.write(chunk)
+
+
+def _dialogue_context(shot: dict, board: dict) -> str:
+    """"Speaker: line" for a rewrite's context, or "" when the shot is silent."""
+    line = (shot.get("dialogue") or "").strip()
+    if not line:
+        return ""
+    name = ((speaker_for(shot, board) or {}).get("name") or "").strip()
+    return f"{name}: {line}" if name else line
 
 
 def _rewrite_reference_images(
