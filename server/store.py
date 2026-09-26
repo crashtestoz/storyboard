@@ -30,6 +30,8 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
+from .soundtrack.board import no_music_in_shots
+
 BOARD_FILE = "storyboard.json"
 SCHEMA = 1
 
@@ -161,7 +163,8 @@ def _collect_media_usages(board: dict[str, Any]) -> dict[str, list[str]]:
         if c.get("id")
     }
 
-    _add_usage(usages, (board.get("assembly") or {}).get("backgroundAudio"), "Continuous background audio")
+    _add_usage(usages, (board.get("assembly") or {}).get("backgroundAudio"), "Soundtrack audio file")
+    _add_usage(usages, (board.get("soundtrack") or {}).get("reference"), "Soundtrack reference")
     for i, ref in enumerate(board.get("styleRefs") or [], start=1):
         _add_usage(usages, ref, f"Style reference {i}")
 
@@ -307,6 +310,10 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["effectiveModel"] == "ref2va":
         payload["ref2vaProfile"] = "ordered-reference-set-v4"
+    # Only present when on, so clips rendered before the option existed keep
+    # their fingerprint; turning it on changes the prompt, and says so.
+    if no_music_in_shots(board):
+        payload["noMusicInShots"] = True
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
