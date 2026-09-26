@@ -72,6 +72,9 @@ from .backends.mflux_backend import load_config as load_mflux_config
 from .tts import load_config as load_tts_config
 from .tts import KNOWN_KINDS as TTS_KINDS
 from .tts.base import TTSEngine
+from .soundtrack import load_engines as load_soundtrack_engines
+from .soundtrack import load_config as load_soundtrack_config
+from .soundtrack import board as soundtrack_board
 from .web_search import format_results as format_search_results
 from .web_search import research_character
 
@@ -146,6 +149,7 @@ class Context:
         self.default_llm = default_llm
         from .speech import prepare_recording
         self.orch.prepare_dialogue = lambda slug, sid: prepare_recording(self, slug, sid)
+        self.orch.prepare_soundtrack = lambda slug: soundtrack_board.prepare(self, slug)
         # Set by the /restart endpoint; main() checks this after the server
         # loop exits to decide whether to exec a fresh process or just stop.
         self.restart_requested = False
@@ -166,6 +170,9 @@ class Context:
 
     def llm_services(self) -> dict[str, LLMService]:
         return load_llm_services(self.ui_root)
+
+    def soundtrack_engines(self):
+        return load_soundtrack_engines(self.ui_root)
 
     def llm(self, sid: str | None) -> LLMService:
         services = self.llm_services()
@@ -307,7 +314,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             board = self._read_json()
             # A stale browser tab must not recreate a deleted storyboard.
-            self.ctx.store.load(m.group(1))
+            current = self.ctx.store.load(m.group(1))
+            # Only the server writes the generated soundtrack's record, and it
+            # does so while the page keeps autosaving its own copy of the board.
+            board["soundtrackRender"] = current.get("soundtrackRender")
             saved = self.ctx.store.save(m.group(1), board)
             return self._send_json(
                 {
@@ -396,6 +406,10 @@ class Handler(BaseHTTPRequestHandler):
                         "engines": tts_engines_json(ctx),
                         "configs": load_tts_config(ctx.ui_root),
                     },
+                    "soundtrack": {
+                        "engines": [e.to_json() for e in ctx.soundtrack_engines().values()],
+                        "configs": load_soundtrack_config(ctx.ui_root),
+                    },
                 }
             )
 
@@ -415,6 +429,10 @@ class Handler(BaseHTTPRequestHandler):
                     "stale": self._staleness(m.group(1), board),
                 }
             )
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/soundtrack", path)
+        if m:
+            return self._send_json(self._soundtrack_status(m.group(1)))
 
         m = re.fullmatch(r"/api/boards/([^/]+)/export", path)
         if m:
@@ -512,6 +530,9 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._dub(m.group(1), m.group(2))
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/soundtrack", path)
+        if m:
+            return self._generate_soundtrack(m.group(1))
         m = re.fullmatch(r"/api/boards/([^/]+)/speak", path)
         if m:
             return self._speak_ad(m.group(1))
@@ -567,9 +588,10 @@ class Handler(BaseHTTPRequestHandler):
             field = payload.get("field")
             if not slug:
                 raise ValueError("slug is required")
-            if not shot_id and field not in ("sceneDescription", "soundscape"):
+            if not shot_id and field not in ("sceneDescription", "soundscape", "soundtrackPrompt"):
                 raise ValueError(
-                    "shotId, or field ('sceneDescription' or 'soundscape'), is required"
+                    "shotId, or field ('sceneDescription', 'soundscape' or "
+                    "'soundtrackPrompt'), is required"
                 )
 
             board = ctx.store.load(slug)
@@ -641,7 +663,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = shot.get("soundNote") or ""
 
                 # Give the model both scene layers. Sound accents are additional
-                # local background sounds, so the shared Background Sound is an
+                # local background sounds, so the shared Background sound effects are an
                 # explicit exclusion list rather than something to rewrite.
                 proposal = rewrite_prompt(
                     service,
@@ -740,6 +762,17 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     outline=board_outline(board),
                     kind="scene",
+                )
+            elif field == "soundtrackPrompt":
+                text = payload.get("text")
+                if text is None:
+                    text = (board.get("soundtrack") or {}).get("prompt") or ""
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    scene=board.get("sceneDescription") or "",
+                    outline=board_outline(board),
+                    kind="soundtrack",
                 )
             else:  # field == "soundscape"
                 text = payload.get("text")
@@ -1199,6 +1232,7 @@ class Handler(BaseHTTPRequestHandler):
         for i, shot in enumerate(board.get("shots", []), 1):
             if (ctx.store.project_dir(slug) / "shots" / f"{i:02d}" / "clip.mp4").exists():
                 prepare_recording(ctx, slug, shot["id"], generate_missing=False)
+        music = soundtrack_board.prepare(ctx, slug)
         board = ctx.store.load(slug)
         shots = board.get("shots") or []
         parts: list[tuple[str, Path | None]] = []
@@ -1225,6 +1259,7 @@ class Handler(BaseHTTPRequestHandler):
             result.path.relative_to(ctx.data_dir)
         ).replace("\\", "/")
         board["finalVideo"] = result.to_json(url)
+        board["finalVideo"]["soundtrack"] = music
         ctx.store.save(slug, board)
         return self._send_json(
             {
@@ -1233,6 +1268,21 @@ class Handler(BaseHTTPRequestHandler):
                 "stale": self._staleness(slug, board),
             }
         )
+
+    def _soundtrack_status(self, slug: str) -> dict[str, Any]:
+        ctx = self.ctx
+        board = ctx.store.load(slug)
+        return soundtrack_board.status(board, ctx.store.project_dir(slug), ctx.data_dir,
+                                       ctx.soundtrack_engines(), slug)
+
+    def _generate_soundtrack(self, slug: str) -> None:
+        # The music model shares unified memory with the video models, the
+        # same reason a manual dub take waits for a render to finish.
+        if self.ctx.orch.busy or self.ctx.orch.stills_busy:
+            return self._err(409, "Wait for the render to finish before generating the soundtrack")
+        note = soundtrack_board.prepare(self.ctx, slug)
+        body = {"note": note, "status": self._soundtrack_status(slug)}
+        return self._send_json(body, 409 if note["state"] in ("failed", "skipped") else 200)
 
     def _transcribe(self) -> None:
         """Transcribe a reference clip so the transcript can be reviewed.

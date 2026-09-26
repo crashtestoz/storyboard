@@ -1,7 +1,8 @@
 """User-editable config files: a gitignored per-machine copy, seeded from a
 committed template.
 
-llm-services.json, tts-services.json and mflux-engines.json describe the
+llm-services.json, tts-services.json, mflux-engines.json and
+soundtrack-services.json describe the
 services and models on *this* machine, so each install edits its own copy
 and a `git pull` never overwrites it. What is committed is
 ``<name>-sample.json``; each page load copies it into place if missing.
@@ -15,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 
-CONFIG_NAMES = ("llm-services.json", "tts-services.json", "mflux-engines.json")
+CONFIG_NAMES = ("llm-services.json", "tts-services.json", "mflux-engines.json",
+                "soundtrack-services.json")
 
 
 def sample_path(path: Path) -> Path:

@@ -12,5 +12,6 @@ render-timings.json
 llm-services.json
 tts-services.json
 mflux-engines.json
+soundtrack-services.json
 # Qwen3-TTS server environment, created by vendor/start-qwen3-tts.sh
 vendor/.venv/
