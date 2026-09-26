@@ -565,10 +565,16 @@ class Orchestrator:
             large = ((board.get("defaults") or {}).get("stillsSize") or "small") == "large"
             still_project = dict(board)
             still_style = ((board.get("defaults") or {}).get("stillsStyle") or "global")
-            if still_style == "colored-pencil":
+            if still_style in ("colored-pencil", "pencil"):
                 # This override is local to the synthetic still project; the
                 # saved board style continues to drive all video renders.
                 still_project["renderStyle"] = (
+                    "Black-and-white pencil storyboard sketch on lightly textured "
+                    "white paper. Visible graphite pencil strokes, hand-drawn "
+                    "contours, loose readable linework, and soft graphite shading. "
+                    "Monochrome only, with no colour. Clearly illustrated, not a "
+                    "photograph or photorealistic render."
+                    if still_style == "pencil" else
                     "Coloured-pencil storyboard illustration on lightly textured "
                     "off-white paper. Visible layered coloured-pencil strokes, "
                     "hand-drawn graphite contours, loose readable linework, and "
