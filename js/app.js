@@ -761,7 +761,7 @@ function proposalDetailFields(action) {
 }
 
 function proposalSummary(action) {
-  if (action.tool === "set_board_fields") return "Update project scene or sound";
+  if (action.tool === "set_board_fields") return "Update project scene, render style or sound";
   if (action.tool === "add_character") return `Add cast member “${action.character.name}”`;
   if (action.tool === "update_character") {
     const c = (state.board.characters || []).find((x) => x.id === action.characterId);
@@ -1489,6 +1489,12 @@ function wireChrome() {
     updateResolvedPreview();
   });
 
+  $("#renderStyle").addEventListener("input", (e) => {
+    state.board.renderStyle = e.target.value;
+    markDirty();
+    updateResolvedPreview();
+  });
+
   $("#soundscape").addEventListener("input", (e) => {
     state.board.soundscape = e.target.value;
     markDirty();
@@ -1558,6 +1564,11 @@ function wireChrome() {
     state.board.defaults.stillsSize = e.target.value;
     markDirty();
     render();
+  });
+
+  $("#stillsStyle").addEventListener("change", (e) => {
+    state.board.defaults.stillsStyle = e.target.value;
+    markDirty();
   });
 
   $("#stillsEngine").addEventListener("change", (e) => {
@@ -3179,6 +3190,8 @@ function paintMeta() {
 function renderRail() {
   const sd = $("#sceneDescription");
   if (document.activeElement !== sd) sd.value = state.board.sceneDescription || "";
+  const renderStyle = $("#renderStyle");
+  if (document.activeElement !== renderStyle) renderStyle.value = state.board.renderStyle || "";
   const snd = $("#soundscape");
   if (document.activeElement !== snd) snd.value = state.board.soundscape || "";
   ensureSceneWand();
@@ -3364,6 +3377,7 @@ function renderRail() {
   // stills size — independent of draft/sketch, only "Create Stills" reads it
   const stillsSizeSel = $("#stillsSize");
   stillsSizeSel.value = state.board.defaults.stillsSize || "small";
+  $("#stillsStyle").value = state.board.defaults.stillsStyle || "global";
   const largeStills = stillsSizeSel.value === "large";
   $("#stillsSizeNote").textContent = largeStills
     ? `Renders at this project's real resolution and step count — big enough ` +
@@ -5632,6 +5646,7 @@ function resolvedParts(raw) {
   };
 
   push("scene", state.board.sceneDescription);
+  push("render style", state.board.renderStyle);
 
   // Only the cast this shot actually uses. A character in the board's cast who
   // is not cast in this shot contributes nothing.

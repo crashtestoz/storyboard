@@ -64,6 +64,13 @@ def slugify(name: str) -> str:
     return s[:60] or "untitled"
 
 
+def artifact_filename(board_name: str, scene_number: int, kind: str, suffix: str) -> str:
+    """Readable, filesystem-safe filename for a generated scene artifact."""
+    label = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", (board_name or "storyboard").strip())
+    label = re.sub(r"\s+", " ", label).strip(" .-_")[:100] or "storyboard"
+    return f"{label} - scene {scene_number:02d} - {kind}{suffix}"
+
+
 def _rewrite_slug(node: Any, old: str, new: str) -> Any:
     """Repoint every stored path from one project slug to another.
 
@@ -275,6 +282,7 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "dialogue": (shot.get("dialogue") or "").strip(),
         "soundNote": (shot.get("soundNote") or "").strip(),
         "scene": (board.get("sceneDescription") or "").strip(),
+        "renderStyle": (board.get("renderStyle") or "").strip(),
         "soundscape": (board.get("soundscape") or "").strip()
         if board.get("soundscapeInShots", True) else "",
         "soundscapeInShots": bool(board.get("soundscapeInShots", True)),
@@ -418,6 +426,7 @@ def default_board(name: str) -> dict[str, Any]:
         "schema": SCHEMA,
         "name": name or "Untitled storyboard",
         "sceneDescription": "",
+        "renderStyle": "",
         "soundscape": "",
         "characters": [],
         "styleRefs": [],
@@ -429,6 +438,7 @@ def default_board(name: str) -> dict[str, Any]:
             "draft": False,
             "sketch": False,
             "stillsSize": "small",
+            "stillsStyle": "global",
             "stillsEngine": "auto",
             "stillsSteps": 0,
             "stillsSeed": 0,
@@ -977,6 +987,7 @@ class Store:
         board.setdefault("schema", SCHEMA)
         board.setdefault("name", "Untitled storyboard")
         board.setdefault("sceneDescription", "")
+        board.setdefault("renderStyle", "")
         board.setdefault("soundscape", "")
         board.setdefault("soundscapeInShots", True)
         board.setdefault("characters", [])
@@ -1004,6 +1015,7 @@ class Store:
         defaults.setdefault("draft", False)
         defaults.setdefault("sketch", False)
         defaults.setdefault("stillsSize", "small")
+        defaults.setdefault("stillsStyle", "global")
         defaults.setdefault("stillsEngine", "auto")
         defaults.setdefault("stillsSteps", 0)
         defaults.setdefault("stillsSeed", 0)

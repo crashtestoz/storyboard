@@ -39,7 +39,9 @@ from . import assemble as assembly
 from .backends.base import Backend, ProgressEvent, ShotPaths
 from .dubbing import mux_speech
 from .render_timings import RenderTimings
-from .store import Store, last_saved_frame, render_fingerprint, stale_reason
+from .store import (
+    Store, artifact_filename, last_saved_frame, render_fingerprint, stale_reason,
+)
 
 # statuses that a "render all" should pick up
 RERUNNABLE = {"draft", "failed", "blocked", "review", "interrupted"}
@@ -558,10 +560,21 @@ class Orchestrator:
             # this board's own draft toggle — fast, and fine for judging
             # composition. "Large" renders at the project's real resolution
             # and step count instead, slower but big enough to feed back in
-            # as a reference image. Sketch's line-art styling is a separate,
-            # opt-in concern this button does not imply either way.
+            # as a reference image. Create Image's style follows the global
+            # Render Style unless its still-only style override is selected.
             large = ((board.get("defaults") or {}).get("stillsSize") or "small") == "large"
             still_project = dict(board)
+            still_style = ((board.get("defaults") or {}).get("stillsStyle") or "global")
+            if still_style == "colored-pencil":
+                # This override is local to the synthetic still project; the
+                # saved board style continues to drive all video renders.
+                still_project["renderStyle"] = (
+                    "Coloured-pencil storyboard illustration on lightly textured "
+                    "off-white paper. Visible layered coloured-pencil strokes, "
+                    "hand-drawn graphite contours, loose readable linework, and "
+                    "soft coloured-pencil shading. Clearly illustrated, not a "
+                    "photograph or photorealistic render."
+                )
             still_project["defaults"] = {
                 **(board.get("defaults") or {}), "draft": not large, "sketch": False,
             }
@@ -624,7 +637,15 @@ class Orchestrator:
                 out = next((p for p in spec.expected_outputs if p.exists()), None)
                 if out is None:
                     raise RuntimeError(f"{key} still did not produce an image")
-                results[key] = {"url": self._as_url(out), "seed": seed, "steps": steps}
+                try:
+                    named_out = self._publish_named_artifact(out, board, idx + 1)
+                except OSError as exc:
+                    named_out = out
+                    with self._lock:
+                        self._stills_log.append({
+                            "level": "WARN", "text": f"could not create named still file: {exc}"
+                        })
+                results[key] = {"url": self._as_url(named_out), "seed": seed, "steps": steps}
 
                 # Save and publish the result as soon as it exists, so a
                 # cancel or crash afterwards still leaves it in place.
@@ -853,6 +874,14 @@ class Orchestrator:
         log_url = self._write_log(paths.abs_dir, run, spec, result)
 
         outputs = [p for p in spec.expected_outputs if p.exists()]
+        published_outputs = []
+        for output in outputs:
+            try:
+                published_outputs.append(self._publish_named_artifact(output, board, idx + 1))
+            except OSError as exc:
+                published_outputs.append(output)
+                run.log.append({"level": "WARN", "text": f"could not create named output file: {exc}"})
+        outputs = published_outputs
         run.outputs = [self._as_url(p) for p in outputs]
 
         # Computed from *this run's own* board and shot — the snapshot it was
@@ -1238,6 +1267,22 @@ class Orchestrator:
         except OSError:
             pass
         return url
+
+    @staticmethod
+    def _publish_named_artifact(source: Path, board: dict[str, Any], scene_number: int) -> Path:
+        """Copy a generated still or clip to a readable scene-named sibling."""
+        if source.suffix.lower() in (".jpeg", ".jpg", ".png", ".webp"):
+            kind = "still"
+        elif source.suffix.lower() == ".mp4":
+            kind = "clip"
+        else:
+            return source
+        named = source.with_name(
+            artifact_filename(board.get("name") or "storyboard", scene_number, kind, source.suffix)
+        )
+        if named != source:
+            shutil.copy2(source, named)
+        return named
 
     def _mark_remaining_cancelled(self) -> None:
         board = self.store.load(self._slug) if self._slug else None

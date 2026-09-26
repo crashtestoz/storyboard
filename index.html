@@ -58,8 +58,17 @@
           <span id="sceneWandSlot"></span>
         </div>
         <textarea id="sceneDescription" rows="7"
-          placeholder="Subject appearance and overall style — what should stay true across every shot."></textarea>
+          placeholder="Subject appearance and scene details that should stay true across every shot."></textarea>
         <div class="proposal-slot" id="sceneProposalSlot"></div>
+      </section>
+
+      <section class="panel">
+        <div class="pane-head pane-head-with-note">
+          <div class="card-heading"><span class="card-heading-title">Render style</span><span class="card-heading-desc">reused in every shot</span></div>
+        </div>
+        <textarea id="renderStyle" rows="3"
+          placeholder="e.g. Photorealistic cinematic live action, natural textures and lighting."></textarea>
+        <div class="field-note">Applied to video generation together with the Scene description. Create Image follows this style unless its image setting overrides it.</div>
       </section>
 
       <section class="panel">
@@ -401,6 +410,14 @@
         <div class="settings-pane" data-settings-pane="image">
         <section>
         <div class="card-heading"><span class="card-heading-title">Create Image</span><span class="card-heading-desc">a storyboard image of the shot's opening frame, from the scene prompt</span></div>
+        <div class="field">
+          <label for="stillsStyle">Render style</label>
+          <select id="stillsStyle">
+            <option value="global">Follow project Render Style</option>
+            <option value="colored-pencil">Coloured pencil sketch</option>
+          </select>
+          <div class="field-note">This setting changes Create Image only. Video renders continue to use the project Render Style above.</div>
+        </div>
         <div class="field">
           <label>Size</label>
           <select id="stillsSize">

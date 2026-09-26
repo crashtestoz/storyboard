@@ -1689,6 +1689,9 @@ def _resolved_prompt(
     if view:
         parts.append(view)
     parts.append((project.get("sceneDescription") or "").strip())
+    render_style = (project.get("renderStyle") or "").strip()
+    if render_style:
+        parts.append(f"Render style: {render_style}")
     parts.append("Shared scene and Cast details are defaults. Explicit shot instructions take priority for actions, setting, and appearance changes.")
 
     # Characters appearing in this shot, named so the shot prompt can refer to
