@@ -26,7 +26,7 @@ the sense in which the MCP server "starts together with" the app: adding this
 entry to an MCP client's config is enough on its own — no separate
 ``./start.sh`` first.
 
-See ``../README.md`` → "MCP: driving Storyboard from an AI assistant" for the
+See ``../docs/REFERENCE.md`` → "MCP: driving Storyboard from an AI assistant" for the
 full tool reference.
 """
 
