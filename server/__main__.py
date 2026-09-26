@@ -20,23 +20,33 @@ from .tts import CONFIG_NAME, load_engines
 
 UI_ROOT = Path(__file__).resolve().parent.parent
 
-# Defaults for this machine. vpipe resolves models/ and its LMDB registry
-# relative to the directory it is launched from, so the workspace must be the
-# directory the models were prepared in — not merely the vpipe checkout.
-DEFAULT_WORKSPACE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe-work/sandbox")
-DEFAULT_VPIPE = Path("/Volumes/KINGSTON/ai-diffusers/vpipe/build/apps/vpipe/vpipe")
+# Defaults match the layout ./setup.sh creates: everything beside the
+# storyboard folder, on the same drive. vpipe resolves models/ and its LMDB
+# registry relative to the directory it is launched from, so the workspace
+# must be the directory the models were prepared in.
+DEFAULT_WORKSPACE = UI_ROOT.parent / "vpipe-workspace"
 # Storyboards and uploads are the user's documents, not vpipe's runtime state,
-# so they live in one selected folder outside whichever workspace/sandbox
-# vpipe happens to use. Project folders live directly beneath this directory.
-DEFAULT_DATA_DIR = Path("/Volumes/KINGSTON/ai-diffusers/storyboard-projects")
+# so they live in their own folder outside the workspace. Project folders live
+# directly beneath this directory.
+DEFAULT_DATA_DIR = UI_ROOT.parent / "storyboard-projects"
+# The CLI inside the Vpipe Manager app, which ./setup.sh installs.
+VPIPE_APP_CLI = "Vpipe Manager.app/Contents/Helpers/vpipe"
 
 
-def _configured_data_dir(ui_root: Path) -> Path | None:
-    """What the Settings dialog last saved, if anything.
+def _default_vpipe() -> Path:
+    for apps in (Path("/Applications"), Path.home() / "Applications"):
+        if (apps / VPIPE_APP_CLI).is_file():
+            return apps / VPIPE_APP_CLI
+    return Path("/Applications") / VPIPE_APP_CLI
 
-    Lowest priority above the hardcoded default: an explicit --data-dir or
-    SBV_DATA_DIR always wins, so a launch script that already pins one keeps
-    working exactly as before no matter what was saved here.
+
+def _configured(ui_root: Path, key: str) -> Path | None:
+    """A path saved in server-config.json — by ./setup.sh or the Settings
+    dialog — if any.
+
+    Below the command-line flag and the SBV_* environment variable, above the
+    built-in default, so a launch script that already pins one keeps working
+    exactly as before no matter what was saved here.
     """
     path = ui_root / SERVER_CONFIG_NAME
     if not path.is_file():
@@ -45,7 +55,7 @@ def _configured_data_dir(ui_root: Path) -> Path | None:
         doc = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
-    raw = doc.get("dataDir")
+    raw = doc.get(key)
     return Path(raw).expanduser() if raw else None
 
 
@@ -71,8 +81,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--workspace",
         type=Path,
-        default=Path(os.environ.get("SBV_WORKSPACE", DEFAULT_WORKSPACE)),
-        help="directory vpipe is launched from (must contain models/)",
+        default=None,
+        help="directory vpipe is launched from (must contain models/); falls "
+             "back to SBV_WORKSPACE, then server-config.json, then "
+             f"{DEFAULT_WORKSPACE}",
     )
     p.add_argument(
         "--data-dir",
@@ -85,8 +97,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--vpipe",
         type=Path,
-        default=Path(os.environ.get("SBV_VPIPE", DEFAULT_VPIPE)),
-        help="path to the vpipe CLI binary",
+        default=None,
+        help="path to the vpipe CLI binary; falls back to SBV_VPIPE, then "
+             "server-config.json, then the Vpipe Manager app",
     )
     p.add_argument(
         "--comfyui-url", default=os.environ.get("SBV_COMFYUI", "http://127.0.0.1:8188")
@@ -118,7 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     bind = "0.0.0.0" if args.lan else args.bind
 
-    workspace = args.workspace.expanduser()
+    workspace = (args.workspace
+                 or (Path(os.environ["SBV_WORKSPACE"]) if os.environ.get("SBV_WORKSPACE") else None)
+                 or _configured(UI_ROOT, "workspace")
+                 or DEFAULT_WORKSPACE).expanduser()
+    args.vpipe = (args.vpipe
+                  or (Path(os.environ["SBV_VPIPE"]) if os.environ.get("SBV_VPIPE") else None)
+                  or _configured(UI_ROOT, "vpipe")
+                  or _default_vpipe())
     # Two roots on purpose. The workspace is vpipe's — it resolves models/ and
     # its model registry relative to it, so it is not ours to choose. The data
     # directory is where the user's storyboards and uploads live. Priority,
@@ -131,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         data_dir = Path(os.environ["SBV_DATA_DIR"]).expanduser()
         data_dir_source = "env"
     else:
-        configured = _configured_data_dir(UI_ROOT)
+        configured = _configured(UI_ROOT, "dataDir")
         data_dir = configured or DEFAULT_DATA_DIR
         data_dir_source = "config" if configured else "default"
     data_dir.mkdir(parents=True, exist_ok=True)
