@@ -64,7 +64,7 @@
 
       <section class="panel">
         <div class="pane-head pane-head-with-note">
-          <div class="card-heading"><span class="card-heading-title">Background sound</span><span class="card-heading-desc">reused every shot</span></div>
+          <div class="card-heading"><span class="card-heading-title">Background sound effects</span><span class="card-heading-desc">rendered by H3 into every shot · music goes in Settings → Soundtrack</span></div>
           <div class="header-spacer"></div>
           <span id="soundscapeWandSlot"></span>
         </div>
@@ -226,6 +226,7 @@
         <button class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general">General</button>
         <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="video">Video</button>
         <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="audio">Audio</button>
+        <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="soundtrack">Soundtrack</button>
         <button class="settings-tab" role="tab" aria-selected="false" data-settings-tab="image">Image</button>
       </nav>
       <div class="modal-body settings-body">
@@ -391,6 +392,12 @@
         </div>
         </section>
         </div>
+        <div class="settings-pane" data-settings-pane="soundtrack">
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Soundtrack</span><span class="card-heading-desc">one piece of music under the whole cut, mixed in at assembly</span></div>
+        <div id="soundtrackSettings"></div>
+        </section>
+        </div>
         <div class="settings-pane" data-settings-pane="image">
         <section>
         <div class="card-heading"><span class="card-heading-title">Create Image</span><span class="card-heading-desc">a storyboard image of the shot's opening frame, from the scene prompt</span></div>
@@ -486,8 +493,8 @@
       </div>
       <div class="modal-foot">
         These apply to the whole storyboard. Scene description, background
-        sound and cast stay on the left, since those are what you edit while
-        writing.
+        sound effects and cast stay on the left, since those are what you edit
+        while writing.
       </div>
     </div>
   </div>

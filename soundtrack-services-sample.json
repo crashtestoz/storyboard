@@ -1,0 +1,10 @@
+{
+  "services": [
+    {
+      "id": "sa3-mlx",
+      "label": "Stable Audio 3 (MLX, local)",
+      "kind": "sa3-mlx",
+      "path": "/Volumes/KINGSTON/ai-diffusers/stable-audio-3/optimized/mlx"
+    }
+  ]
+}

@@ -1947,6 +1947,8 @@ function openSettings() {
   paintLlmServiceManager();
   paintTtsServiceManager();
   paintStillsEngineManager();
+  renderSoundtrackSettings();
+  refreshSoundtrackStatus();
   $("#settings").hidden = false;
   // Downloads finish while the app is open, so re-read what mflux has cached.
   API.info().then((i) => {
@@ -1964,6 +1966,7 @@ function initializeSettingsTabs() {
     if (/Clip settings|Draft mode/i.test(title)) tab = "video";
     if (/Audio settings/i.test(title)) tab = "audio";
     if (/Create Image/i.test(title)) tab = "image";
+    if (/^Soundtrack$/i.test(title)) tab = "soundtrack";
     panes[tab].appendChild(section);
   });
   document.querySelectorAll("[data-settings-tab]").forEach((button) => {
@@ -3183,8 +3186,8 @@ function renderRail() {
   const sndMode = $("#soundscapeInShots");
   sndMode.checked = state.board.soundscapeInShots !== false;
   sndMode.title = sndMode.checked
-    ? "The background sound text is included in every shot render."
-    : "Background sound is disabled for rendering. Only per-shot sound accents are included; no background track is added automatically later.";
+    ? "The background sound effects are included in every shot render."
+    : "Background sound effects are off for rendering. Only per-shot sound accents are included.";
 
   const wrap = $("#styleRefs");
   wrap.innerHTML = "";
@@ -3621,7 +3624,7 @@ function ensureSoundscapeWand() {
   wandSlot.appendChild(
     wandButton({
       title: (svc) =>
-        `Restyle the background sound using ${svc.label} (${svc.model}). ` +
+        `Restyle the background sound effects using ${svc.label} (${svc.model}). ` +
         `Takes up to a minute on a local model, and shows you the result ` +
         `before changing anything.`,
       slot: () => $("#soundscapeProposalSlot"),
@@ -3636,11 +3639,308 @@ function ensureSoundscapeWand() {
         markDirty();
         updateResolvedPreview();
         toast(
-          "Background sound replaced. Undo by editing it back — the old text is above."
+          "Background sound effects replaced. Undo by editing it back — the old text is above."
         );
       },
     })
   );
+}
+
+/* --- Settings → Soundtrack ----------------------------------------------- */
+
+/* Music for the whole cut, kept apart from the Background sound effects H3
+   renders into each shot. Whether it can be generated yet is the server's
+   call — every shot needs a clip first, so the cut's length is known (see
+   server/soundtrack/board.py) — and this tab only shows the answer. A board
+   from before the tab existed with a background file attached keeps using
+   that file as its soundtrack. */
+function soundtrackOpts() {
+  if (!state.board.soundtrack) {
+    const legacy = !!(state.board.assembly || {}).backgroundAudio;
+    state.board.soundtrack = legacy ? { enabled: true, source: "upload" } : { enabled: false, source: "generate" };
+  }
+  return state.board.soundtrack;
+}
+
+function soundtrackEngines() {
+  return (state.info && state.info.soundtrack && state.info.soundtrack.engines) || [];
+}
+
+const SOUNDTRACK_DEFAULTS = { model: "sm-music", referenceStrength: 0.5, duck: true, duckDb: 12, duckAttack: 0.15, duckRelease: 0.5 };
+
+function soundtrackChanged({ repaint = false } = {}) {
+  markDirty();
+  if (repaint) renderSoundtrackSettings();
+  // The status depends on the saved board, so ask again once this lands.
+  clearTimeout(soundtrackChanged._t);
+  soundtrackChanged._t = setTimeout(() => saveNow().then(refreshSoundtrackStatus), 800);
+}
+
+async function refreshSoundtrackStatus() {
+  if (!state.slug) return;
+  const slug = state.slug;
+  try {
+    const st = await API.soundtrackStatus(slug);
+    if (state.slug !== slug) return;
+    state.soundtrackStatus = st;
+  } catch (err) {
+    state.soundtrackStatus = { state: "blocked", message: err.message };
+  }
+  paintSoundtrackStatus();
+}
+
+function renderSoundtrackSettings() {
+  const host = $("#soundtrackSettings");
+  if (!host || !state.board) return;
+  host.innerHTML = "";
+  const s = soundtrackOpts();
+  const cut = () => (state.board.assembly ||= {});
+  const val = (k) => (s[k] ?? SOUNDTRACK_DEFAULTS[k]);
+
+  const toggle = (text, checked, change) => {
+    const label = el("label", "toggle");
+    const input = el("input"); input.type = "checkbox"; input.checked = !!checked;
+    input.addEventListener("change", () => change(input.checked));
+    label.append(input, el("span", "toggle-track"), el("span", null, text));
+    return label;
+  };
+  const field = (labelText, control, note) => {
+    const f = el("div", "field");
+    const l = el("label", null, labelText);
+    f.append(l, control);
+    if (note) f.appendChild(el("div", "field-note", note));
+    return f;
+  };
+  const number = (key, min, max, step, onChange) => {
+    const input = el("input"); input.type = "number";
+    input.min = String(min); input.max = String(max); input.step = String(step);
+    input.value = String(val(key));
+    input.addEventListener("change", () => {
+      const n = Number(input.value);
+      if (!Number.isFinite(n) || n < min || n > max) { input.value = String(val(key)); return; }
+      (onChange || ((v) => { s[key] = v; }))(n);
+      soundtrackChanged();
+    });
+    return input;
+  };
+  const upload = (label, onRef) => {
+    const input = el("input"); input.type = "file"; input.accept = "audio/*";
+    input.setAttribute("aria-label", label);
+    input.addEventListener("change", async () => {
+      if (!input.files[0]) return;
+      const slug = state.slug, board = state.board;
+      try {
+        const ref = await API.uploadRef(slug, input.files[0]);
+        if (state.board !== board) return;
+        onRef(ref); soundtrackChanged({ repaint: true });
+      } catch (err) { toast(err.message, "error"); }
+    });
+    return input;
+  };
+
+  host.appendChild(toggle("Add a soundtrack to the final cut", s.enabled, (on) => {
+    s.enabled = on;
+    if (on && !s.seed) s.seed = 1 + Math.floor(Math.random() * 2147483646);
+    // Asking H3 to leave music out changes every shot's prompt, so it is only
+    // switched on for the user while nothing has been rendered with the old one.
+    if (on && s.noMusicInShots === undefined) {
+      s.noMusicInShots = !shots().some((raw) => (raw.outputs || []).length);
+    }
+    soundtrackChanged({ repaint: true });
+  }));
+  if (!s.enabled) {
+    host.appendChild(el("div", "field-note",
+      "Music is separate from the Background sound effects, which H3 renders into each shot. " +
+      "The soundtrack is one continuous piece laid under the whole cut, ducked under dialogue."));
+    return;
+  }
+
+  const source = el("select");
+  for (const [v, t] of [["generate", "Generate with Stable Audio 3"], ["upload", "Use my own audio file"]]) {
+    const o = el("option", null, t); o.value = v; source.appendChild(o);
+  }
+  source.value = s.source || "generate";
+  source.addEventListener("change", () => { s.source = source.value; soundtrackChanged({ repaint: true }); });
+  host.appendChild(field("Source", source));
+
+  if ((s.source || "generate") === "generate") {
+    const engines = soundtrackEngines();
+    if (!engines.length) {
+      host.appendChild(el("div", "final-warn",
+        "No soundtrack engine is set up on this Mac. Run setup/install-stable-audio-3.sh, then restart Storyboard."));
+    } else {
+      const engineSel = el("select");
+      engines.forEach((e) => {
+        const o = el("option", null, e.healthy ? e.label : `${e.label} — unavailable`); o.value = e.id; engineSel.appendChild(o);
+      });
+      const engine = engines.find((e) => e.id === s.engine) || engines.find((e) => e.healthy) || engines[0];
+      engineSel.value = engine.id;
+      engineSel.addEventListener("change", () => { s.engine = engineSel.value; soundtrackChanged({ repaint: true }); });
+      const row = el("div", "field-row");
+      row.appendChild(field("Engine", engineSel, engine.healthy ? "" : engine.message));
+
+      const modelSel = el("select");
+      (engine.models || []).forEach((m) => {
+        const o = el("option", null, `${m.label} · up to ${dur(m.maxSeconds)}${m.installed ? "" : " · not downloaded"}`);
+        o.value = m.id; modelSel.appendChild(o);
+      });
+      modelSel.value = val("model");
+      modelSel.addEventListener("change", () => { s.model = modelSel.value; soundtrackChanged(); });
+      row.appendChild(field("Model", modelSel));
+      host.appendChild(row);
+    }
+
+    const promptField = el("div", "field");
+    const head = el("div", "rename-row");
+    head.append(el("label", null, "Music prompt"), el("span", null));
+    const wandSlot = head.lastChild;
+    const prompt = el("textarea"); prompt.id = "soundtrackPrompt"; prompt.rows = 4;
+    prompt.placeholder = "Music only — e.g. “Heroic orchestral fanfare, soaring brass melody over driving strings and timpani, " +
+      "triumphant 1980s adventure film score, builds to a climax, 110 BPM.”";
+    prompt.value = s.prompt || "";
+    prompt.addEventListener("input", () => { s.prompt = prompt.value; soundtrackChanged(); });
+    const proposalSlot = el("div", "proposal-slot");
+    wandSlot.appendChild(wandButton({
+      title: (svc) =>
+        `Turn this into a Stable Audio 3 music prompt using ${svc.label} (${svc.model}). ` +
+        `Names of films or composers are rewritten as the style they stand for.`,
+      slot: () => proposalSlot,
+      rewrite: () => API.rewrite(state.slug, { field: "soundtrackPrompt", text: prompt.value }),
+      onUse: (text) => {
+        prompt.value = text; s.prompt = text; soundtrackChanged();
+        toast("Music prompt replaced. Undo by editing it back — the old text is above.");
+      },
+    }));
+    promptField.append(head, prompt, proposalSlot, el("div", "field-note",
+      "Describe genre, instruments, mood and tempo. The model doesn't know film or composer names — " +
+      "write “like the Star Wars theme” and press Rewrite to turn it into a description of that style."));
+    host.appendChild(promptField);
+
+    const refField = el("div", "field");
+    refField.appendChild(el("label", null, "Reference audio (optional) — sets the tone"));
+    if (s.reference) {
+      const row = el("div", "rename-row");
+      const remove = el("button", "btn btn-sm", "Remove");
+      remove.onclick = () => { s.reference = null; soundtrackChanged({ repaint: true }); };
+      row.append(el("span", "field-note", s.reference.label || s.reference.path.split("/").pop()), remove);
+      refField.appendChild(row);
+      const strength = el("input"); strength.type = "range"; strength.min = "0"; strength.max = "1"; strength.step = "0.05";
+      strength.value = String(val("referenceStrength"));
+      const shown = el("span", "hint-inline");
+      const paint = () => {
+        const v = Number(strength.value);
+        shown.textContent = ` ${Math.round(v * 100)}% — ${v < 0.35 ? "loose: tempo and mood" : v < 0.7 ? "instruments and feel" : "close: may keep the melody"}`;
+      };
+      paint();
+      strength.addEventListener("input", paint);
+      strength.addEventListener("change", () => { s.referenceStrength = Number(strength.value); soundtrackChanged(); });
+      const sl = el("label", "field-note", "Reference strength"); sl.appendChild(shown);
+      refField.append(sl, strength);
+    } else {
+      refField.appendChild(upload("Soundtrack reference audio", (ref) => { s.reference = ref; }));
+    }
+    refField.appendChild(el("div", "field-note",
+      "Use music you own or are licensed to use. At high strength the result can reproduce the reference's melody."));
+    host.appendChild(refField);
+
+    const seedRow = el("div", "rename-row");
+    const seed = number("seed", 0, 2147483647, 1);
+    const reroll = el("button", "btn btn-sm", "New seed");
+    reroll.title = "Same prompt, a different piece of music";
+    reroll.onclick = () => { s.seed = 1 + Math.floor(Math.random() * 2147483646); soundtrackChanged({ repaint: true }); };
+    seedRow.append(seed, reroll);
+    host.appendChild(field("Seed", seedRow, "The same seed and settings always give the same music."));
+
+    const status = el("div", "soundtrack-status"); status.id = "soundtrackStatus";
+    host.appendChild(status);
+  } else {
+    const f = el("div", "field");
+    f.appendChild(el("label", null, "Audio file (loops if shorter than the cut)"));
+    const ref = cut().backgroundAudio;
+    if (ref) {
+      const row = el("div", "rename-row");
+      const remove = el("button", "btn btn-sm", "Remove");
+      remove.onclick = () => { delete cut().backgroundAudio; soundtrackChanged({ repaint: true }); };
+      row.append(el("span", "field-note", ref.label || ref.path.split("/").pop()), remove);
+      f.appendChild(row);
+    } else {
+      f.appendChild(upload("Soundtrack audio file", (r) => { cut().backgroundAudio = r; }));
+    }
+    host.appendChild(f);
+  }
+
+  host.appendChild(el("div", "card-heading-title soundtrack-subhead", "Mix"));
+  const volume = el("input"); volume.type = "number"; volume.min = "0"; volume.max = "2"; volume.step = "0.05";
+  volume.value = String(cut().backgroundVolume ?? 0.15);
+  volume.addEventListener("change", () => {
+    const n = Number(volume.value);
+    if (!Number.isFinite(n) || n < 0 || n > 2) return;
+    cut().backgroundVolume = n; soundtrackChanged();
+  });
+  host.appendChild(field("Soundtrack volume (1 = as generated)", volume));
+  host.appendChild(toggle("Duck the music under dialogue", val("duck"), (on) => { s.duck = on; soundtrackChanged({ repaint: true }); }));
+  if (val("duck")) {
+    const row = el("div", "field-row");
+    row.append(
+      field("Duck by (dB)", number("duckDb", 0, 30, 1)),
+      field("Dip ahead (s)", number("duckAttack", 0, 2, 0.05)),
+      field("Recover (s)", number("duckRelease", 0, 5, 0.05)),
+    );
+    host.appendChild(row);
+    host.appendChild(el("div", "field-note",
+      "Timed from each recorded line, so the music dips just before the first word and comes back after the last. " +
+      "Shots where H3 speaks the line itself are ducked for their whole length."));
+  }
+  host.appendChild(toggle("Ask H3 to leave music out of each shot", !!s.noMusicInShots, (on) => {
+    s.noMusicInShots = on; soundtrackChanged();
+  }));
+  host.appendChild(el("div", "field-note",
+    "Stops H3 composing its own music per shot under the soundtrack. It changes the shot prompt, " +
+    "so shots already rendered show as changed until re-rendered."));
+  paintSoundtrackStatus();
+}
+
+function paintSoundtrackStatus() {
+  const box = $("#soundtrackStatus");
+  if (!box) return;
+  box.innerHTML = "";
+  const st = state.soundtrackStatus;
+  if (!st) { box.appendChild(el("div", "field-note", "Checking the cut…")); return; }
+  const warn = ["waiting", "blocked", "stale"].includes(st.state);
+  box.appendChild(el("div", warn ? "final-warn" : "field-note", st.message || ""));
+  if (st.seconds != null) {
+    let line = `Cut length ${dur(st.seconds)}`;
+    if (st.loops) line += ` — this model tops out at ${dur(st.maxSeconds)}, so the music loops after that. Medium goes to ${dur(380)}.`;
+    box.appendChild(el("div", "field-note", line));
+  }
+  const r = st.render;
+  if (r && r.url) {
+    const audio = el("audio"); audio.controls = true; audio.preload = "none"; audio.src = r.url;
+    box.append(audio, el("div", "field-note",
+      `${st.state === "current" ? "Current" : "Previous"}: ${dur(r.seconds)} · ${r.model} · seed ${r.seed}`));
+  }
+  const busy = !!(state.status && (state.status.busy || (state.status.stills && state.status.stills.busy)));
+  const go = el("button", "btn btn-sm btn-primary", st.state === "current" ? "Up to date" : "Generate now");
+  go.disabled = busy || state.soundtrackGenerating || !["ready", "stale"].includes(st.state);
+  if (busy) go.title = "Wait for the render to finish — the music model shares memory with it.";
+  if (state.soundtrackGenerating) go.textContent = "Generating…";
+  go.onclick = async () => {
+    state.soundtrackGenerating = true; paintSoundtrackStatus();
+    try {
+      await saveNow();
+      const res = await API.generateSoundtrack(state.slug);
+      state.soundtrackStatus = res.status;
+      if (res.status && res.status.render) state.board.soundtrackRender = res.status.render;
+      toast(res.note.message);
+    } catch (err) {
+      toast(err.message, "error");
+      if (err.payload && err.payload.status) state.soundtrackStatus = err.payload.status;
+    } finally {
+      state.soundtrackGenerating = false; paintSoundtrackStatus();
+    }
+  };
+  const acts = el("div", "final-actions"); acts.appendChild(go);
+  box.appendChild(acts);
 }
 
 /* --- the assembled cut --------------------------------------------------- */
@@ -3669,29 +3969,15 @@ function renderCutSettings(host, busy) {
   };
   number("Crossfade seconds (0 = straight cut)", opts().transitionSeconds, 2, n => { opts().transitionSeconds = n; });
   number("Audio fade at scene edges (seconds)", opts().audioFadeSeconds, 2, n => { opts().audioFadeSeconds = n; });
-  number("Background audio volume (1 = original)", opts().backgroundVolume ?? 0.15, 2, n => { opts().backgroundVolume = n; });
   const normalize = el("input"); normalize.type = "checkbox";
   normalize.checked = !!opts().normalizeAudio; normalize.disabled = busy;
   normalize.addEventListener("change", () => { opts().normalizeAudio = normalize.checked; markDirty(); });
   const normLabel = el("label", "field-note");
   normLabel.append(normalize, el("span", null, " Match scene audio levels")); details.appendChild(normLabel);
-  const upload = el("input"); upload.type = "file"; upload.accept = "audio/*"; upload.disabled = busy;
-  upload.setAttribute("aria-label", "Continuous background audio");
-  upload.addEventListener("change", async () => {
-    if (!upload.files[0]) return;
-    const slug = state.slug, board = state.board;
-    try {
-      const ref = await API.uploadRef(slug, upload.files[0]);
-      if (state.board !== board) return;
-      opts().backgroundAudio = ref; markDirty(); renderFinal();
-    } catch (err) { toast(err.message, "error"); }
-  });
-  details.append(el("div", "field-note", "Continuous background audio (loops across the whole cut)"), upload);
-  if (opts().backgroundAudio) {
-    const remove = el("button", "btn btn-sm", "Remove background audio"); remove.disabled = busy;
-    remove.onclick = () => { delete opts().backgroundAudio; markDirty(); renderFinal(); };
-    details.append(el("div", "field-note", opts().backgroundAudio.label || "Background audio attached"), remove);
-  }
+  const music = el("button", "btn btn-sm btn-ghost", "Soundtrack settings…");
+  music.title = "Music under the whole cut — Settings → Soundtrack";
+  music.onclick = () => { openSettings(); document.querySelector('[data-settings-tab="soundtrack"]')?.click(); };
+  details.append(el("div", "field-note", "Music for the whole cut is set up in Settings → Soundtrack."), music);
   const chain = el("button", "btn btn-sm", "Chain all scenes from their previous shot");
   chain.disabled = busy || shots().length < 2;
   chain.onclick = () => {
@@ -3800,6 +4086,13 @@ function renderFinal(host = $("#preview .final-video-content")) {
       );
     }
     if (why) host.appendChild(el("div", "final-warn", `Out of date — ${why}.`));
+    const music = f.soundtrack;
+    if (music && ["failed", "skipped"].includes(music.state)) {
+      host.appendChild(el("div", "final-warn", `No soundtrack in this cut — ${music.message}`));
+    } else if (music && ["generated", "current", "upload"].includes(music.state)) {
+      host.appendChild(el("div", "final-meta", "Soundtrack mixed in" +
+        (((state.board.soundtrack || {}).duck ?? true) ? ", ducked under dialogue." : ".")));
+    }
   }
 
   const silent = shots().filter((raw) => !!dialogueWhy(raw.id));
@@ -4926,7 +5219,7 @@ function renderEditor() {
     const sa = el("textarea", "ta-tall");
     sa.value = raw.soundNote || "";
     sa.placeholder =
-      "Additional scene-background sounds for THIS clip — not the general Background Sound.\n" +
+      "Additional scene-background sounds for THIS clip — not the general Background sound effects.\n" +
       "Use local environmental details such as a nearby bird, distant siren, or passing vehicle.";
     sa.addEventListener("input", () => {
       live().soundNote = sa.value;
@@ -4937,14 +5230,14 @@ function renderEditor() {
     sa.dataset.fkey = "sound-accents";
 
     const sp2 = el("div");
-    const saHead = paneHint("Additional local background sound only", "do not repeat the general Background Sound");
+    const saHead = paneHint("Additional local background sound only", "do not repeat the general Background sound effects");
     saHead.appendChild(el("div", "header-spacer"));
     saHead.appendChild(
       wandButton({
         title: (svc) =>
           `Propose local background sound accents for this shot using ${svc.label} (${svc.model}). ` +
           `Adds only local scene-background sounds not already in the general ` +
-          `Background Sound; dialogue and foreground action Foley are never included. ` +
+          `Background sound effects; dialogue and foreground action Foley are never included. ` +
           `Takes up to a minute on a local model, and shows you the result ` +
           `before changing anything.`,
         slot: () => sp2.querySelector(".proposal-slot"),
