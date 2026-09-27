@@ -118,8 +118,11 @@ models are available.
 
 [h3.c](https://github.com/antirez/h3.c) is a native C/Metal MiniMax H3
 engine. It renders the same FL2VA and Ref2VA modes from the original BF16
-checkpoint, so on a large-memory Mac (64 GB+; 128 GB keeps everything
-resident) it is the better H3 engine. Boards render the same way on either
+checkpoint. With enough memory (about 96 GB and up) the whole model stays
+resident; on 48–64 GB turn on `ssdStreaming` and raise the GPU memory limit
+(`sudo sysctl iogpu.wired_limit_mb=40960` on 48 GB, reset at each restart).
+Measured on a 48 GB M4 Pro with streaming from a USB drive: an 8 s 960×544
+Ref2VA shot took 1 h 9 m, against 1 h 28 m on vpipe. Boards render the same way on either
 engine: prompts, references, voice cloning, draft and sketch all use the same
 code. Stills keep working through the mflux engines. Wan 2.2, LTX-2.5 and
 vpipe's Krea-2 are vpipe-only and are refused with a clear message on h3c.
