@@ -240,7 +240,8 @@ def speech_fingerprint(shot: dict, board: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
+def render_fingerprint(shot: dict[str, Any], board: dict[str, Any], *,
+                       _library_refs: list | None = None) -> str:
     """Hash of everything that decides what a render of *shot* produces.
 
     Recorded on a shot when it renders, so "has this been rendered?" can be
@@ -251,8 +252,19 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
     Only conditioning and geometry count. ``dialogue`` is included because it
     is passed to the video model as a visual mouth-movement cue; the audio is
     still synthesised outside the render path and muxed over the finished clip.
+
+    The project's style-reference *library* (``board["styleRefs"]``) is not
+    an input: a shot only sends a style reference that is also in its own
+    reference images (see vpipe_backend._ref2va_references), and those are
+    counted below. Counting the library too meant that adding an image to
+    one shot, which also files it in the library, marked every rendered shot
+    on the board as changed. ``_library_refs`` rebuilds that old formula, so
+    fingerprints recorded under it can be recognised (see
+    ``matches_pre_library_fix``); nothing else should pass it.
     """
     defaults = board.get("defaults") or {}
+    legacy = _library_refs is not None
+    library = list(_library_refs or [])
     wanted = set(shot.get("characterIds") or [])
     cast = [
         {
@@ -277,7 +289,7 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         "dialogueVoice": shot.get("dialogueVoice", ""),
         "dubMode": shot.get("dubMode", "mix"),
         "voices": [{"id": c.get("id"), "voice": _ref_key(c.get("voice")), "voiceText": c.get("voiceText", "")} for c in board.get("characters", []) if c.get("id") in wanted or c.get("id") == shot.get("speakerId")],
-        "referenceMetadata": [{"tag": r.get("tag", ""), "role": r.get("role", "")} for r in ([shot.get("startRef"), shot.get("endRef")] + (shot.get("referenceImages") or []) + (board.get("styleRefs") or []) + [c.get("image") for c in board.get("characters", []) if c.get("id") in wanted]) if isinstance(r, dict)],
+        "referenceMetadata": [{"tag": r.get("tag", ""), "role": r.get("role", "")} for r in ([shot.get("startRef"), shot.get("endRef")] + (shot.get("referenceImages") or []) + library + [c.get("image") for c in board.get("characters", []) if c.get("id") in wanted]) if isinstance(r, dict)],
         "prompt": (shot.get("prompt") or "").strip(),
         "dialogue": (shot.get("dialogue") or "").strip(),
         "soundNote": (shot.get("soundNote") or "").strip(),
@@ -286,7 +298,6 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         if board.get("soundscapeInShots", True) else "",
         "soundscapeInShots": bool(board.get("soundscapeInShots", True)),
         "cast": cast,
-        "styleRefs": [_ref_key(r) for r in (board.get("styleRefs") or [])],
         "startRef": _ref_key(shot.get("startRef")),
         "endRef": _ref_key(shot.get("endRef")),
         "referenceImages": [
@@ -324,8 +335,28 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any]) -> str:
         payload["renderStyle"] = render_style
     if no_music_in_shots(board):
         payload["noMusicInShots"] = True
+    if legacy:
+        payload["styleRefs"] = [_ref_key(r) for r in library]
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def matches_pre_library_fix(recorded: str | None, shot: dict[str, Any],
+                            board: dict[str, Any]) -> bool:
+    """Was *recorded* made by the old formula, which also hashed the style
+    library, from inputs that otherwise match this shot now?
+
+    The library only grows by appending (adding a shot reference files it
+    there), so the library as it was at render time is one of its prefixes;
+    trying each covers "images were added since", which is exactly the case
+    that marked unchanged shots CHANGED. A shot whose own inputs changed
+    matches none of them and stays stale, as it should.
+    """
+    if not recorded:
+        return False
+    library = board.get("styleRefs") or []
+    return any(recorded == render_fingerprint(shot, board, _library_refs=library[:k])
+               for k in range(len(library), -1, -1))
 
 
 def stale_reason(shot: dict[str, Any], board: dict[str, Any]) -> str:
@@ -344,6 +375,11 @@ def stale_reason(shot: dict[str, Any], board: dict[str, Any]) -> str:
         # how a stale clip reaches the final cut.
         return "rendered before the board started tracking changes, so it cannot be shown to match"
     if recorded != render_fingerprint(shot, board):
+        # Recorded before the style library stopped counting: current if
+        # nothing but the library has moved since (load() also restamps
+        # these, but an open tab's autosave can hand the old value back).
+        if matches_pre_library_fix(recorded, shot, board):
+            return ""
         return "the prompt, references or clip settings changed since this was rendered"
     return ""
 
@@ -682,9 +718,12 @@ class Store:
                 if scene["speechFingerprint"] != fingerprint:
                     scene["speechFingerprint"] = fingerprint
                     healed = True
-            if scene.get("renderFingerprint") == render_fingerprint(old, legacy):
+            recorded = scene.get("renderFingerprint")
+            if recorded and (recorded == render_fingerprint(old, legacy)
+                             or matches_pre_library_fix(recorded, old, legacy)
+                             or matches_pre_library_fix(recorded, scene, board)):
                 fingerprint = render_fingerprint(scene, board)
-                if scene["renderFingerprint"] != fingerprint:
+                if recorded != fingerprint:
                     scene["renderFingerprint"] = fingerprint
                     healed = True
         if healed:
