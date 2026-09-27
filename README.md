@@ -138,9 +138,9 @@ written by Salvatore Sanfilippo (antirez). It runs the full-quality original
 model instead of vpipe's smaller 8-bit version. Your storyboards work the
 same with either engine, and you can switch back and forth with one command.
 
-On a 48 GB M4 Pro, one 8-second 960 × 544 shot with a cloned voice took
-**1 h 9 m with h3.c, against 1 h 28 m with vpipe**. That run used the full
-model, streamed from an external USB drive.
+On a 48 GB M4 Pro, the same 8-second 960 × 544 shot with a cloned voice,
+rendered back to back, took **1 h 8 m with h3.c and 1 h 18 m with vpipe**.
+h3.c used the full model, streamed from an external USB drive.
 
 **1. Install the Hugging Face download tool.**
 
