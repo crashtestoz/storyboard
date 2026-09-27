@@ -3996,6 +3996,7 @@ function renderCutSettings(host, busy) {
   };
   number("Crossfade seconds (0 = straight cut)", opts().transitionSeconds, 2, n => { opts().transitionSeconds = n; });
   number("Audio fade at scene edges (seconds)", opts().audioFadeSeconds, 2, n => { opts().audioFadeSeconds = n; });
+  number("Fade from and to black on held first and last frames (seconds each, 0 = off; adds that time at both ends)", opts().fadeBlackSeconds, 3, n => { opts().fadeBlackSeconds = n; });
   const normalize = el("input"); normalize.type = "checkbox";
   normalize.checked = !!opts().normalizeAudio; normalize.disabled = busy;
   normalize.addEventListener("change", () => { opts().normalizeAudio = normalize.checked; markDirty(); });
@@ -4068,7 +4069,8 @@ function estimatedFinalStats() {
     .filter((raw) => (modelCap(effectiveShotModel(raw)) || {}).kind !== "image")
     .map((raw) => Math.max(0, (raw.frames || 0) / 24 - (raw.trimIn || 0) - (raw.trimOut || 0)));
   const overlap = lengths.length > 1 ? transition * (lengths.length - 1) : 0;
-  const seconds = Math.max(0, lengths.reduce((a, b) => a + b, 0) - overlap);
+  const black = lengths.length ? Math.min(3, Math.max(0, Number((state.board.assembly || {}).fadeBlackSeconds) || 0)) : 0;
+  const seconds = Math.max(0, lengths.reduce((a, b) => a + b, 0) - overlap) + 2 * black;
   return { clips: lengths.length, seconds, frames: Math.round(seconds * 24) };
 }
 
