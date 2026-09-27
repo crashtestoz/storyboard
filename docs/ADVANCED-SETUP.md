@@ -114,6 +114,49 @@ If your vpipe workspace keeps setup files elsewhere, run the equivalent
 prepare pipelines from that workspace. The server startup banner reports which
 models are available.
 
+### 3b. MiniMax H3 through h3.c instead of vpipe (optional)
+
+[h3.c](https://github.com/antirez/h3.c) is a native C/Metal MiniMax H3
+engine. It renders the same FL2VA and Ref2VA modes from the original BF16
+checkpoint, so on a large-memory Mac (64 GB+; 128 GB keeps everything
+resident) it is the better H3 engine. Boards render the same way on either
+engine: prompts, references, voice cloning, draft and sketch all use the same
+code. Stills keep working through the mflux engines. Wan 2.2, LTX-2.5 and
+vpipe's Krea-2 are vpipe-only and are refused with a clear message on h3c.
+
+```sh
+setup/h3c.sh --switch      # clone + build h3.c, download weights, switch
+```
+
+The script downloads only what h3.c reads: `FL2VA/` plus
+`Ref2VA/transformer`, about 196 GiB. The full repo is about 600 GB. Ref2VA's
+text encoder and VAEs are identical to FL2VA's, so the script symlinks them.
+Put the weights on a drive with room by setting `H3C_DIR=/path/to/h3.c`.
+Re-running the script resumes an interrupted download. vpipe's
+`local/MiniMax-H3-*-8bit` models are a different layout and cannot be reused.
+
+The switch itself is one change in `server-config.json`. `setup/h3c.sh
+--switch-only` makes it, and `setup/h3c.sh --back` reverses it:
+
+```json
+{
+  "backend": "h3c",
+  "h3cBinary": "/path/to/h3.c/h3",
+  "h3cModelDir": "/path/to/h3.c/MiniMax-H3",
+  "h3cOptions": { "layers": 50, "reuse": 1, "defaultSteps": 20 }
+}
+```
+
+Merge these keys into the existing file; don't replace it. The two paths
+are optional when h3.c sits beside this folder. Restart the server; the
+banner shows `backend h3c` and which H3 checkpoints were found. To switch
+back, set `"backend": "vpipe"` (or remove the key). `h3cOptions` maps onto
+h3.c's flags: `layers` (50/45/40), `reuse` (1/2/3), `coreReuse` (0 = off,
+1–6), `tokenReduction`, `ssdStreaming`, `int8RowFc2` (M5 only),
+`refImageSize` (`match`/`max`), `defaultSteps`. Differences from vpipe: clips
+can be as short as 22 frames and at most 362 (15 s), and the canvas is capped
+at 768×1344 pixels, so 21:9 must use 1344×576 or smaller.
+
 ### 4. Configure storyboard storage
 
 Storyboards and uploads are saved under:
@@ -320,7 +363,10 @@ from outside the code — nothing here should ever need editing in a `.py` or
 | --- | --- | --- | --- |
 | Port | `--port` | `SBV_PORT` | — |
 | Bind address | `--bind` / `--lan` | `SBV_BIND` | — |
-| Render backend | `--backend` | `SBV_BACKEND` | — |
+| Render backend (`vpipe`, `comfyui`, `h3c`) | `--backend` | `SBV_BACKEND` | `server-config.json` (`backend`); default `vpipe` |
+| h3.c binary | `--h3c` | `SBV_H3C` | `server-config.json` (`h3cBinary`); default `../h3.c/h3` |
+| h3.c MiniMax-H3 weights | `--h3c-model-dir` | `SBV_H3C_MODEL_DIR` | `server-config.json` (`h3cModelDir`); default `../h3.c/MiniMax-H3` |
+| h3.c speed/quality knobs | — | — | `server-config.json` (`h3cOptions`) — see *3b* above |
 | vpipe workspace | `--workspace` | `SBV_WORKSPACE` | `server-config.json` (`workspace`); default `../vpipe-workspace` |
 | vpipe CLI path | `--vpipe` | `SBV_VPIPE` | `server-config.json` (`vpipe`); default the CLI inside `Vpipe Manager.app` |
 | Storyboard data dir | `--data-dir` | `SBV_DATA_DIR` | `server-config.json` (`dataDir`); default `../storyboard-projects` |

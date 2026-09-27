@@ -131,6 +131,61 @@ After adding one, restart Storyboard (`./start.sh --restart`) and choose it in
 **⚙ Settings**. Cloud services (OpenAI, Anthropic, Gemini and others) can also
 power the AI buttons: add one in **Settings → General → Prompt rewriting**.
 
+## Use h3.c for MiniMax H3 (Macs with 64 GB or more)
+
+[h3.c](https://github.com/antirez/h3.c) is a second way to run MiniMax H3,
+written by Salvatore Sanfilippo (antirez). It runs the full-quality original
+model instead of vpipe's smaller 8-bit version, so on a Mac with lots of
+memory (64 GB or more; 128 GB is ideal) it can give better renders. Your
+storyboards work the same with either engine. This option is new: try one
+shot before rendering a whole board.
+
+**1. Install the Hugging Face download tool.**
+
+```sh
+brew install huggingface-cli
+```
+
+**2. Build h3.c and download the model.** It needs about **200 GB free**
+and takes a few hours. If it stops, run the same command again to carry on.
+
+```sh
+cd ~/Storyboard/storyboard
+setup/h3c.sh
+```
+
+h3.c and its model go in a new `h3.c` folder beside `storyboard`. To use a
+different drive, put `H3C_DIR=/Volumes/MyDrive/h3.c` in front of the
+command.
+
+**3. Switch Storyboard to h3.c.** This is a one-time change, saved in
+`server-config.json`:
+
+```sh
+setup/h3c.sh --switch-only
+./start.sh --restart
+```
+
+The startup banner now says `backend h3c`. To go back to vpipe:
+
+```sh
+setup/h3c.sh --back
+./start.sh --restart
+```
+
+Differences to know about:
+
+- **Only MiniMax H3 is available.** Create Image uses mflux instead
+  (`setup/add.sh images-mflux`).
+- **Largest frame is 1344 × 768** (or 768 × 1344). For 21:9 use 1344 × 576
+  or smaller.
+- **Clips can be about 1 to 15 seconds long.**
+- **The default is 20 steps instead of 8.** Renders are slower, but look
+  better.
+
+Speed and quality settings, and how to use a model folder you already have,
+are in [Advanced setup](docs/ADVANCED-SETUP.md#3b-minimax-h3-through-h3c-instead-of-vpipe-optional).
+
 ## Updating
 
 ```sh
@@ -176,6 +231,7 @@ them, and their terms apply to what you make with them.
 | Project | Made by | Used for | Licence |
 | --- | --- | --- | --- |
 | [vpipe](https://github.com/tgo-app-dev/vpipe) | T-Go LLC | The engine every render runs on | Apache 2.0 |
+| [h3.c](https://github.com/antirez/h3.c) | Salvatore Sanfilippo (antirez) | Optional MiniMax H3 engine for large-memory Macs | MIT |
 | [MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | MiniMax (weights packaged by [Comfy-Org](https://huggingface.co/Comfy-Org/MiniMax-H3)) | Video and sound for every shot | MiniMax H3 Community License |
 | [Krea-2 Turbo](https://huggingface.co/krea/Krea-2-Turbo) | Krea (M87 LoRA by mgwr) | Create Image previews | Krea-2 Community License |
 | [Wan 2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B) | Wan-AI (Alibaba) | Optional video engine | Apache 2.0 |

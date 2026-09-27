@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from typing import Any
 
 from .app import SERVER_CONFIG_NAME, Context, build_server
 from .backends import BACKEND_IDS, build_backend
@@ -59,6 +60,20 @@ def _configured(ui_root: Path, key: str) -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+def _configured_value(ui_root: Path, key: str) -> Any:
+    """A raw (non-path) value from server-config.json, or None."""
+    path = ui_root / SERVER_CONFIG_NAME
+    try:
+        return json.loads(path.read_text()).get(key)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+# h3.c defaults: a checkout beside the storyboard folder, with the Hugging
+# Face snapshot inside it — the layout h3.c's own README assumes.
+DEFAULT_H3C_DIR = UI_ROOT.parent / "h3.c"
+
+
 BANNER = r"""
   ______ _____  ____   ______  __ ______  ____  ___    ____  ____
  / __/ //_  __// __ \ / __ \ \/ // __ / / __ \/ _ |  / __ \/ __ \
@@ -76,7 +91,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--backend",
         choices=BACKEND_IDS,
-        default=os.environ.get("SBV_BACKEND", "vpipe"),
+        default=None,
+        help="render backend; falls back to SBV_BACKEND, then \"backend\" in "
+             "server-config.json, then vpipe",
+    )
+    p.add_argument(
+        "--h3c",
+        type=Path,
+        default=None,
+        help="path to the h3.c `h3` binary; falls back to SBV_H3C, then "
+             f"\"h3cBinary\" in server-config.json, then {DEFAULT_H3C_DIR}/h3",
+    )
+    p.add_argument(
+        "--h3c-model-dir",
+        type=Path,
+        default=None,
+        help="MiniMax-H3 Hugging Face snapshot for h3.c; falls back to "
+             "SBV_H3C_MODEL_DIR, then \"h3cModelDir\" in server-config.json, "
+             f"then {DEFAULT_H3C_DIR}/MiniMax-H3",
     )
     p.add_argument(
         "--workspace",
@@ -155,12 +187,36 @@ def main(argv: list[str] | None = None) -> int:
         data_dir = configured or DEFAULT_DATA_DIR
         data_dir_source = "config" if configured else "default"
     data_dir.mkdir(parents=True, exist_ok=True)
+    # Which engine renders video: a one-time choice, normally made with
+    # "backend" in server-config.json. The flag and env var still win so a
+    # launch script can pin one.
+    args.backend = (args.backend
+                    or os.environ.get("SBV_BACKEND")
+                    or _configured_value(UI_ROOT, "backend")
+                    or "vpipe")
+    if args.backend not in BACKEND_IDS:
+        print(f"error: unknown backend {args.backend!r} — expected one of "
+              f"{', '.join(BACKEND_IDS)}", file=sys.stderr)
+        return 2
+    h3c_binary = (args.h3c
+                  or (Path(os.environ["SBV_H3C"]) if os.environ.get("SBV_H3C") else None)
+                  or _configured(UI_ROOT, "h3cBinary")
+                  or DEFAULT_H3C_DIR / "h3").expanduser()
+    h3c_model_dir = (args.h3c_model_dir
+                     or (Path(os.environ["SBV_H3C_MODEL_DIR"])
+                         if os.environ.get("SBV_H3C_MODEL_DIR") else None)
+                     or _configured(UI_ROOT, "h3cModelDir")
+                     or DEFAULT_H3C_DIR / "MiniMax-H3").expanduser()
+    h3c_options = _configured_value(UI_ROOT, "h3cOptions")
     backend = build_backend(
         args.backend,
         vpipe_binary=args.vpipe.expanduser(),
         workspace=workspace,
         comfyui_url=args.comfyui_url,
         project_root=UI_ROOT,
+        h3c_binary=h3c_binary,
+        h3c_model_dir=h3c_model_dir,
+        h3c_options=h3c_options if isinstance(h3c_options, dict) else None,
     )
     # Engines come from tts-services.json: a service is a name and a URL, so
     # adding another instance is an edit rather than a code change. None loads
@@ -201,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(BANNER)
     print(f"  backend    {backend.id} — {backend.label}")
+    if backend.id == "h3c":
+        print(f"  h3         {h3c_binary}")
+        print(f"  weights    {h3c_model_dir}")
     print(f"  workspace  {workspace}   (vpipe's — models and registry)")
     print(f"  projects   {data_dir}"
           + ("   (inside the workspace)" if data_dir == workspace else ""))
