@@ -15,6 +15,8 @@ Routes
 ``POST /api/boards/<slug>/rename``   rename ``{name}`` — moves the folder too
 ``POST /api/rewrite``          restyle a shot prompt, the scene description, or the
                                 background sound with a local language model
+``POST /api/length-estimate``  how long a shot needs, from its prompt's action
+                                beats and its dialogue ``{slug, shotId, prompt?}``
 ``POST /api/chat``             discuss the board and propose reviewed edits
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
@@ -580,6 +582,35 @@ class Handler(BaseHTTPRequestHandler):
                 "model": model, "dialogueSource": source,
                 "references": [{k: v for k, v in r.items() if k != "ref"} for r in refs],
                 "warnings": warnings})
+
+        if path == "/api/length-estimate":
+            from .backends.vpipe_backend import _effective_video_model
+            from .length_estimate import estimate
+            payload = self._read_json() or {}
+            slug, shot_id = payload.get("slug"), payload.get("shotId")
+            if not slug or not shot_id:
+                raise ValueError("slug and shotId are required")
+            board = ctx.store.load(slug)
+            idx = next((i for i, s in enumerate(board["shots"]) if s["id"] == shot_id), None)
+            if idx is None:
+                raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+            # The editor may be ahead of the autosave; time what is on screen.
+            shot = dict(board["shots"][idx])
+            for key in ("prompt", "dialogue", "dialogueStyle"):
+                if isinstance(payload.get(key), str):
+                    shot[key] = payload[key]
+            service = ctx.llm(payload.get("service") or board.get("defaults", {}).get("llm"))
+            ok, why = service.health()
+            if not ok:
+                raise RuntimeError(f"{service.label}: {why}")
+            model, _ = _effective_video_model(shot, board)
+            cap = ctx.backend.capability(model)
+            return self._send_json(estimate(
+                service, shot,
+                frame_rule=cap.frame_rule if cap else None,
+                shot_dir=ctx.data_dir / ctx.store.shot_rel_dir(slug, idx + 1),
+                h3=model in ("ref2va", "fl2va"),
+            ))
 
         if path == "/api/rewrite":
             payload = self._read_json() or {}
