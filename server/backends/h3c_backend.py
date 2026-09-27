@@ -396,9 +396,13 @@ class H3cBackend(VpipeBackend):
                         pct = (i + pct / 100.0) / len(DECODE_ORDER) * 100.0
                     phase_pct[shared] = max(phase_pct.get(shared, 0.0), pct)
                     eta = None
+                    # The clock starts at "denoise 0/N", when the first step
+                    # begins. Starting it at 1/N instead drops a whole step
+                    # from the pace, which on an 8-step render made the
+                    # estimate about half the real remaining time.
+                    if shared == "denoise" and denoise_started_at is None:
+                        denoise_started_at = time.time()
                     if shared == "denoise" and done > 0:
-                        if denoise_started_at is None:
-                            denoise_started_at = time.time()
                         eta = _denoise_eta_seconds(
                             denoise_started_at, phase_pct["denoise"], time.time()
                         )
