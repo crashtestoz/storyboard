@@ -169,7 +169,7 @@ setup/h3c.sh --switch-only
 The startup banner now says `backend h3c`. To go back to vpipe:
 
 ```sh
-setup/h3c.sh --back
+setup/vpipe.sh --switch-only
 ./start.sh --restart
 ```
 

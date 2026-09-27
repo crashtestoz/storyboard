@@ -136,7 +136,7 @@ Re-running the script resumes an interrupted download. vpipe's
 `local/MiniMax-H3-*-8bit` models are a different layout and cannot be reused.
 
 The switch itself is one change in `server-config.json`. `setup/h3c.sh
---switch-only` makes it, and `setup/h3c.sh --back` reverses it:
+--switch-only` makes it, and `setup/vpipe.sh --switch-only` reverses it:
 
 ```json
 {

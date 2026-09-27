@@ -4,7 +4,7 @@
 #   setup/h3c.sh                  # build h3.c + download the weights
 #   setup/h3c.sh --switch         # ...and switch server-config.json to it
 #   setup/h3c.sh --switch-only    # just flip the config (already set up)
-#   setup/h3c.sh --back           # switch back to vpipe
+#   setup/h3c.sh --back           # switch back to vpipe (same as setup/vpipe.sh --switch-only)
 #
 #   H3C_DIR=/path/to/h3.c setup/h3c.sh   # somewhere other than ../h3.c
 #
