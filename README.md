@@ -131,14 +131,16 @@ After adding one, restart Storyboard (`./start.sh --restart`) and choose it in
 **⚙ Settings**. Cloud services (OpenAI, Anthropic, Gemini and others) can also
 power the AI buttons: add one in **Settings → General → Prompt rewriting**.
 
-## Use h3.c for MiniMax H3 (Macs with 64 GB or more)
+## Use h3.c for MiniMax H3 (Macs with 48 GB or more)
 
 [h3.c](https://github.com/antirez/h3.c) is a second way to run MiniMax H3,
 written by Salvatore Sanfilippo (antirez). It runs the full-quality original
-model instead of vpipe's smaller 8-bit version, so on a Mac with lots of
-memory (64 GB or more; 128 GB is ideal) it can give better renders. Your
-storyboards work the same with either engine. This option is new: try one
-shot before rendering a whole board.
+model instead of vpipe's smaller 8-bit version. Your storyboards work the
+same with either engine, and you can switch back and forth with one command.
+
+On a 48 GB M4 Pro, one 8-second 960 × 544 shot with a cloned voice took
+**1 h 9 m with h3.c, against 1 h 28 m with vpipe**. That run used the full
+model, streamed from an external USB drive.
 
 **1. Install the Hugging Face download tool.**
 
@@ -173,15 +175,39 @@ setup/vpipe.sh --switch-only
 ./start.sh --restart
 ```
 
-Differences to know about:
+**4. Match the settings to your Mac's memory.** The h3.c settings live in
+`server-config.json`, under `h3cOptions`. Restart Storyboard after changing
+them.
+
+| Mac memory | Setting | What it does |
+| --- | --- | --- |
+| **96 GB or more** | `"ssdStreaming": false` (the default) | Keeps the whole model in memory. Fastest. |
+| **48–64 GB** | `"ssdStreaming": true` | Reads the model from disk, one layer at a time, so a full-size shot has room. Each step is slower, but the result is the same. |
+
+On a 48 GB Mac, also let the GPU use up to 40 GB before rendering. macOS
+resets this when the Mac restarts, so run it again after each restart (use
+`=0` to put the default back). On a bigger Mac, leave about 8 GB for macOS.
+
+```sh
+sudo sysctl iogpu.wired_limit_mb=40960
+```
+
+The memory split in the table comes from testing on 48 GB; nobody has
+checked the exact point where streaming stops being needed. If **Swap**
+in the Details panel climbs during a render, turn streaming on.
+
+Differences from vpipe:
 
 - **Only MiniMax H3 is available.** Create Image uses mflux instead
   (`setup/add.sh images-mflux`).
 - **Largest frame is 1344 × 768** (or 768 × 1344). For 21:9 use 1344 × 576
   or smaller.
 - **Clips can be about 1 to 15 seconds long.**
-- **The default is 20 steps instead of 8.** Renders are slower, but look
-  better.
+- **New shots default to 20 steps instead of 8.** Renders are slower, but
+  look better. Existing shots keep the steps they already have.
+- **Progress pauses between steps.** After `load transformer core 50/50`,
+  nothing new appears until the first step finishes, which can take several
+  minutes for a long shot. The GPU is busy the whole time.
 
 Speed and quality settings, and how to use a model folder you already have,
 are in [Advanced setup](docs/ADVANCED-SETUP.md#3b-minimax-h3-through-h3c-instead-of-vpipe-optional).
@@ -207,7 +233,8 @@ Your projects and settings are never touched by an update.
 | The model download stopped | Run `./setup.sh` again; it resumes. The log is in `vpipe-workspace/setup/prepare-minimax-h3.log`. |
 | The page does not open | Check that Terminal shows the Storyboard banner. If it says `cannot bind`, Storyboard is already running — run `./start.sh --restart`. |
 | The startup banner says `ref2va … not prepared` | MiniMax H3 is not finished yet — run `./setup.sh` again. |
-| Renders are very slow | Close other large apps, use Draft mode, or shorten the shot. The Details panel shows memory use while a render runs. |
+| Renders are very slow | Close other large apps, use Draft mode, or shorten the shot. The Details panel shows memory and swap use while a render runs. |
+| **Swap** in the Details panel climbs and turns red during an h3.c render | The shot needs more memory than your Mac has. Stop the render, set `"ssdStreaming": true` under `h3cOptions` in `server-config.json`, run `./start.sh --restart`, and render again. |
 
 Still stuck? Open an issue on
 [GitHub](https://github.com/crashtestoz/storyboard/issues) with what you ran
