@@ -1287,6 +1287,11 @@ async function runStopRender() {
 }
 
 async function runAssembleNow() {
+  // The server assembles from the board on disk and then saves that copy back
+  // with the new finalVideo, so a cut setting still waiting on the save timer
+  // would be both ignored by this cut and overwritten after it.
+  await Promise.allSettled([...state.pendingSaves]);
+  if (state.dirty) await saveNow();
   const res = await API.assemble(state.slug);
   takeStale(res);
   state.board.finalVideo = res.finalVideo;
@@ -3996,7 +4001,17 @@ function renderCutSettings(host, busy) {
   };
   number("Crossfade seconds (0 = straight cut)", opts().transitionSeconds, 2, n => { opts().transitionSeconds = n; });
   number("Audio fade at scene edges (seconds)", opts().audioFadeSeconds, 2, n => { opts().audioFadeSeconds = n; });
-  number("Fade from and to black on held first and last frames (seconds each, 0 = off; adds that time at both ends)", opts().fadeBlackSeconds, 3, n => { opts().fadeBlackSeconds = n; });
+  // fadeBlackSeconds is the older single setting for both ends; the first
+  // change to either end splits it into the two settings.
+  const splitFade = () => {
+    const o = opts();
+    if (!("fadeBlackSeconds" in o)) return;
+    o.fadeInBlackSeconds ??= o.fadeBlackSeconds;
+    o.fadeOutBlackSeconds ??= o.fadeBlackSeconds;
+    delete o.fadeBlackSeconds;
+  };
+  number("Fade from black at the start (seconds, 0 = off)", opts().fadeInBlackSeconds ?? opts().fadeBlackSeconds, 3, n => { splitFade(); opts().fadeInBlackSeconds = n; });
+  number("Fade to black at the end (seconds, 0 = off)", opts().fadeOutBlackSeconds ?? opts().fadeBlackSeconds, 3, n => { splitFade(); opts().fadeOutBlackSeconds = n; });
   const normalize = el("input"); normalize.type = "checkbox";
   normalize.checked = !!opts().normalizeAudio; normalize.disabled = busy;
   normalize.addEventListener("change", () => { opts().normalizeAudio = normalize.checked; markDirty(); });
@@ -4069,8 +4084,7 @@ function estimatedFinalStats() {
     .filter((raw) => (modelCap(effectiveShotModel(raw)) || {}).kind !== "image")
     .map((raw) => Math.max(0, (raw.frames || 0) / 24 - (raw.trimIn || 0) - (raw.trimOut || 0)));
   const overlap = lengths.length > 1 ? transition * (lengths.length - 1) : 0;
-  const black = lengths.length ? Math.min(3, Math.max(0, Number((state.board.assembly || {}).fadeBlackSeconds) || 0)) : 0;
-  const seconds = Math.max(0, lengths.reduce((a, b) => a + b, 0) - overlap) + 2 * black;
+  const seconds = Math.max(0, lengths.reduce((a, b) => a + b, 0) - overlap);
   return { clips: lengths.length, seconds, frames: Math.round(seconds * 24) };
 }
 

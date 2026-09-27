@@ -51,8 +51,8 @@ def audio_peak_db(video: Path, start: float, seconds: float) -> float:
 
 @unittest.skipUnless(FFMPEG, "ffmpeg not on PATH")
 class FadeToBlackTests(unittest.TestCase):
-    """The first and last frames are held and faded, so every frame of the
-    scenes plays at full brightness and the cut grows by 2 x the fade."""
+    """The opening fades up from black and the ending fades down to it,
+    over the scenes themselves, so the cut keeps its length."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -64,26 +64,53 @@ class FadeToBlackTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_held_frames_fade_and_the_scenes_play_in_full(self):
+    def test_fades_over_the_scenes_without_adding_time(self):
         r = assemble(self.parts, self.out, 320, 180, options={"fadeBlackSeconds": 1.0})
         self.assertTrue(r.ok, r.error or r.log)
-        self.assertAlmostEqual(r.seconds, 6.0, delta=0.15)        # 4 s of scenes + 2 x 1 s
+        self.assertAlmostEqual(r.seconds, 4.0, delta=0.15)        # no held frames added
         self.assertLess(luma(self.out, 0.0), 30)                  # black at the very start
-        self.assertGreater(luma(self.out, 0.5), 60)               # held first frame, fading up
+        self.assertGreater(luma(self.out, 0.5), 60)               # scene 1 fading up
         self.assertLess(luma(self.out, 0.5), 200)
-        self.assertGreater(luma(self.out, 1.05), 225)             # scene 1 from its first frame, full
-        self.assertAlmostEqual(luma(self.out, 4.9), luma(self.out, 2.5 + 1.0), delta=5)  # scene 2 intact
+        self.assertGreater(luma(self.out, 1.5), 225)              # full after the fade
         self.assertLess(luma(self.out, r.seconds - 0.05), 30)     # black at the very end
-        # silent while the first frame is held, sound once the scene starts
-        self.assertLess(audio_peak_db(self.out, 0.0, 0.9), -60)
-        self.assertGreater(audio_peak_db(self.out, 1.1, 1.0), -30)
-        self.assertTrue(any("held the first and last frames" in l for l in r.log))
+        # sound fades with the picture
+        full = audio_peak_db(self.out, 1.2, 0.6)
+        self.assertGreater(full, -30)
+        self.assertLess(audio_peak_db(self.out, 0.0, 0.1), full - 15)
+        self.assertTrue(any("faded up from black" in l for l in r.log))
+        self.assertTrue(any("faded down to black" in l for l in r.log))
+
+    def test_fade_longer_than_half_the_cut_is_shortened(self):
+        r = assemble(self.parts[:1], self.out, 320, 180, options={"fadeBlackSeconds": 3})
+        self.assertTrue(r.ok, r.error)
+        self.assertAlmostEqual(r.seconds, 2.0, delta=0.15)
+        self.assertGreater(luma(self.out, 1.0), 180)              # peak at the midpoint
+
+    def test_fade_only_the_start(self):
+        r = assemble(self.parts, self.out, 320, 180, options={"fadeInBlackSeconds": 1.0})
+        self.assertTrue(r.ok, r.error)
+        self.assertAlmostEqual(r.seconds, 4.0, delta=0.15)
+        self.assertLess(luma(self.out, 0.0), 30)
+        self.assertGreater(luma(self.out, r.seconds - 0.05), 100)  # ends on the grey shot
+
+    def test_fade_only_the_end(self):
+        r = assemble(self.parts, self.out, 320, 180, options={"fadeOutBlackSeconds": 1.0})
+        self.assertTrue(r.ok, r.error)
+        self.assertGreater(luma(self.out, 0.0), 200)               # opens on the white shot
+        self.assertLess(luma(self.out, r.seconds - 0.05), 30)
+
+    def test_each_end_overrides_the_older_single_setting(self):
+        r = assemble(self.parts, self.out, 320, 180,
+                     options={"fadeBlackSeconds": 1.0, "fadeOutBlackSeconds": 0})
+        self.assertTrue(r.ok, r.error)
+        self.assertLess(luma(self.out, 0.0), 30)
+        self.assertGreater(luma(self.out, r.seconds - 0.05), 100)
 
     def test_with_crossfades_between_shots(self):
         r = assemble(self.parts, self.out, 320, 180,
                      options={"fadeBlackSeconds": 0.75, "transitionSeconds": 0.5})
         self.assertTrue(r.ok, r.error)
-        self.assertAlmostEqual(r.seconds, 4.0 - 0.5 + 1.5, delta=0.15)
+        self.assertAlmostEqual(r.seconds, 4.0 - 0.5, delta=0.15)
         self.assertLess(luma(self.out, 0.0), 30)
         self.assertLess(luma(self.out, r.seconds - 0.05), 30)
 
@@ -95,6 +122,9 @@ class FadeToBlackTests(unittest.TestCase):
 
     def test_out_of_range_is_refused(self):
         r = assemble(self.parts, self.out, 320, 180, options={"fadeBlackSeconds": 5})
+        self.assertFalse(r.ok)
+        self.assertIn("Fade from/to black", r.error)
+        r = assemble(self.parts, self.out, 320, 180, options={"fadeOutBlackSeconds": 5})
         self.assertFalse(r.ok)
         self.assertIn("Fade from/to black", r.error)
 
