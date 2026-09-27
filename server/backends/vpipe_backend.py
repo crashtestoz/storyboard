@@ -249,6 +249,10 @@ PHASE_ORDER = ["encoding references", "denoise", "vae decode"]
 class VpipeBackend(Backend):
     id = "vpipe"
     label = "vpipe (Apple Silicon, Metal)"
+    # What prepare() writes the per-shot job to. A subclass that reuses
+    # prepare()'s shot handling but runs something other than a vpipeline
+    # (h3c_backend) names its own file so neither clobbers the other's.
+    SPEC_FILE = "shot.vpipeline"
 
     def __init__(self, binary: Path, workspace: Path):
         self.binary = Path(binary)
@@ -640,7 +644,7 @@ class VpipeBackend(Backend):
                 )
             frames_dir = paths.abs_frames if save_frames else None
 
-        spec_path = paths.abs_dir / "shot.vpipeline"
+        spec_path = paths.abs_dir / self.SPEC_FILE
         spec_path.write_text(json.dumps(spec, indent=2) + "\n")
 
         return JobSpec(
@@ -652,7 +656,7 @@ class VpipeBackend(Backend):
             # (render_timings.py); a backend has no business guessing it.
             payload={
                 "spec_path": str(spec_path),
-                "rel_spec": f"{paths.pipe_dir}/shot.vpipeline",
+                "rel_spec": f"{paths.pipe_dir}/{self.SPEC_FILE}",
                 "cwd": str(self.workspace),
                 "model": model,
                 "frames": render_frames,

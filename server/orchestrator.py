@@ -1145,7 +1145,9 @@ class Orchestrator:
     def _geometry(spec) -> dict[str, Any] | None:
         p = spec.payload or {}
         try:
-            g = {"model": str(p["model"]), "width": int(p["width"]),
+            # timingModel keeps engines that share a model id (vpipe and
+            # h3c both render "ref2va") from being timed against each other.
+            g = {"model": str(p.get("timingModel") or p["model"]), "width": int(p["width"]),
                  "height": int(p["height"]), "frames": int(p["frames"]),
                  "steps": int(p["steps"])}
         except (KeyError, TypeError, ValueError):
