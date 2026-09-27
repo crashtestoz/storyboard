@@ -347,5 +347,83 @@ class ConversationMemoryTests(unittest.TestCase):
         self.assertIn("Settings → Soundtrack", CHAT_SYSTEM_PROMPT)
 
 
+class ClipReviewTests(unittest.TestCase):
+    """The AD sees the rendered clip as evenly spaced, time-labelled frames."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "projects"
+        self.board = default_board("Review")
+        self.board["shots"] = [default_shot(self.board["defaults"]) for _ in range(3)]
+        for i, s in enumerate(self.board["shots"], 1):
+            s["title"] = f"Shot {i}"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def render(self, number, seconds=2):
+        """A real clip where the store would put it, and its /media/ URL."""
+        import shutil
+        import subprocess
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg not on PATH")
+        shot_dir = self.data / "review" / "shots" / f"{number:02d}"
+        shot_dir.mkdir(parents=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                        f"testsrc=size=320x180:rate=24:duration={seconds}",
+                        "-pix_fmt", "yuv420p", str(shot_dir / "clip.mp4")], check=True)
+        shot = self.board["shots"][number - 1]
+        shot["outputs"] = [f"/media/review/shots/{number:02d}/Review - scene {number:02d} - clip.mp4?t=1"]
+        shot["frames"] = seconds * 24
+        return shot
+
+    def test_picks_the_focused_shot_and_any_scene_named_by_number(self):
+        from server.storyboard_chat import _shots_to_review
+        sel = self.board["shots"][0]["id"]
+        self.assertEqual([n for n, _ in _shots_to_review(self.board, sel, "tidy it up")], [1])
+        self.assertEqual([n for n, _ in _shots_to_review(self.board, sel, "compare with scene 3")], [1, 3])
+        self.assertEqual([n for n, _ in _shots_to_review(self.board, None, "review shot #2")], [2])
+        # out of range, and no duplicate of the focused shot
+        self.assertEqual([n for n, _ in _shots_to_review(self.board, sel, "scene 9 and scene 1")], [1])
+
+    def test_frames_are_labelled_with_their_time(self):
+        from server.storyboard_chat import CLIP_REVIEW_FRAMES, _chat_clip_frames
+        self.render(2)
+        out = Path(self.tmp.name) / "frames"
+        out.mkdir()
+        files, labels = _chat_clip_frames(self.board, None, "review scene 2", self.data, out)
+        self.assertEqual(len(files), CLIP_REVIEW_FRAMES)
+        self.assertTrue(all(f.is_file() and f.stat().st_size for f in files))
+        self.assertIn('Scene 2 ("Shot 2") rendered clip, frame 1 of', labels[0])
+        self.assertIn("at 0.0s of 2.0s", labels[0])
+        self.assertIn(f"frame {CLIP_REVIEW_FRAMES} of {CLIP_REVIEW_FRAMES}", labels[-1])
+
+    def test_unrendered_shot_and_escaping_paths_give_no_frames(self):
+        from server.storyboard_chat import _chat_clip_frames, _rendered_clip
+        out = Path(self.tmp.name) / "frames"
+        out.mkdir()
+        self.assertEqual(_chat_clip_frames(self.board, None, "review scene 1", self.data, out), ([], []))
+        self.board["shots"][0]["outputs"] = ["/media/../../etc/clip.mp4"]
+        self.assertIsNone(_rendered_clip(self.board["shots"][0], self.data))
+
+    def test_chat_sends_clip_frames_with_the_message(self):
+        self.render(1)
+        sent = {}
+
+        class VisionLLM(FakeLLM):
+            def complete_with_media(self, system, user, *, images=None, timeout=300.0):
+                sent["images"], sent["user"] = list(images or []), user
+                return json.dumps({"message": "seen", "actions": []})
+
+        reply = chat(VisionLLM("unused"), self.board, "review this clip",
+                     selected_id=self.board["shots"][0]["id"], data_dir=self.data)
+        self.assertEqual(reply["message"], "seen")
+        self.assertTrue(sent["images"])
+        self.assertIn("rendered clip", sent["user"])
+        self.assertIn("you CAN review what the clip shows", sent["user"])
+        # frames live in a temporary folder that is gone after the turn
+        self.assertFalse(any(p.exists() for p in sent["images"]))
+
+
 if __name__ == "__main__":
     unittest.main()
