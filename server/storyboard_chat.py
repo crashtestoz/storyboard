@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -522,6 +525,93 @@ def _chat_reference_images(
     return files, labels
 
 
+CLIP_REVIEW_FRAMES = 6      # per shot: first, last and evenly between
+CLIP_REVIEW_MAX_SHOTS = 2
+CLIP_REVIEW_EDGE = 768      # long edge, px — enough to read composition
+
+
+def _shots_to_review(board: dict[str, Any], selected_id: str | None,
+                     message: str) -> list[tuple[int, dict[str, Any]]]:
+    """The focused shot, plus any shot the message names by number
+    ("scene 8", "shot 3"), as (1-based number, shot)."""
+    shots = board.get("shots") or []
+    picked: list[int] = [i for i, s in enumerate(shots, 1) if s.get("id") == selected_id]
+    for m in re.finditer(r"\b(?:scene|shot)s?\s*#?\s*(\d{1,3})\b", message, re.I):
+        n = int(m.group(1))
+        if 1 <= n <= len(shots) and n not in picked:
+            picked.append(n)
+    return [(n, shots[n - 1]) for n in picked[:CLIP_REVIEW_MAX_SHOTS]]
+
+
+def _rendered_clip(shot: dict[str, Any], data_dir: Path) -> Path | None:
+    """The shot's rendered clip on disk, from the /media/ URL in outputs."""
+    root = data_dir.resolve()
+    for url in shot.get("outputs") or []:
+        if not isinstance(url, str) or not url.startswith("/media/"):
+            continue
+        rel = url[len("/media/"):].split("?", 1)[0]
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        # clip.mp4 beside the scene-named copy is the file renders write.
+        for candidate in (target.parent / "clip.mp4", target):
+            if candidate.is_file() and candidate.suffix.lower() == ".mp4":
+                return candidate
+    return None
+
+
+def _chat_clip_frames(
+    board: dict[str, Any], selected_id: str | None, message: str,
+    data_dir: Path | None, workdir: Path,
+) -> tuple[list[Path], list[str]]:
+    """Stills from the rendered clip(s) under discussion, for the AD to look at.
+
+    A vision model cannot take video, so the clip goes in as a handful of
+    evenly spaced frames, each labelled with its time. That is enough to
+    judge composition, layout, and where things are at the start, middle and
+    end — which is most of what "review the clip" means. It is not enough to
+    judge fine motion or anything about the sound, and the labels say so.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if data_dir is None or not ffmpeg:
+        return [], []
+    files: list[Path] = []
+    labels: list[str] = []
+    for number, shot in _shots_to_review(board, selected_id, message):
+        clip = _rendered_clip(shot, data_dir)
+        if clip is None:
+            continue
+        seconds = max(int(shot.get("frames") or 0), 1) / 24.0
+        stale = stale_reason(shot, board)
+        title = (shot.get("title") or "").strip()
+        name = f"Scene {number}" + (f" (\"{title}\")" if title else "")
+        for i in range(CLIP_REVIEW_FRAMES):
+            # Stop one frame short of the end: seeking to the exact duration
+            # can land past the last frame and return nothing.
+            t = (seconds - 1 / 24.0) * i / (CLIP_REVIEW_FRAMES - 1)
+            out = workdir / f"scene{number:02d}-{i + 1}.jpg"
+            try:
+                subprocess.run(
+                    [ffmpeg, "-y", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", str(clip),
+                     "-frames:v", "1", "-vf",
+                     f"scale='min({CLIP_REVIEW_EDGE},iw)':-2", "-q:v", "3", str(out)],
+                    check=True, capture_output=True, timeout=30,
+                )
+            except Exception:  # noqa: BLE001 — a frame short is still a review
+                continue
+            if out.is_file() and out.stat().st_size:
+                files.append(out)
+                labels.append(
+                    f"{name} rendered clip, frame {i + 1} of {CLIP_REVIEW_FRAMES} at "
+                    f"{t:.1f}s of {seconds:.1f}s"
+                    + (" — rendered before the current prompt; it may not reflect "
+                       f"recent edits ({stale})" if stale else "")
+                )
+    return files, labels
+
+
 def _clean_fields(value: Any, allowed: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -677,14 +767,33 @@ def chat(
         if role in ("user", "assistant") and isinstance(content, str):
             cleaned.append({"role": role, "content": content})
     summary, recent = ad_memory.condense(service, cleaned, memory_path)
+    with tempfile.TemporaryDirectory(prefix="sbv-ad-frames-") as tmp:
+        return _chat_turn(service, board, message, selected_id, search_url,
+                          data_dir, timings, summary, recent, Path(tmp))
+
+
+def _chat_turn(service, board, message, selected_id, search_url, data_dir,
+               timings, summary, recent, frames_dir: Path) -> dict[str, Any]:
     images, image_labels = _chat_reference_images(board, selected_id, data_dir)
+    clip_images, clip_labels = _chat_clip_frames(
+        board, selected_id, message, data_dir, frames_dir)
+    images, image_labels = images + clip_images, image_labels + clip_labels
     visual_context = ""
     if image_labels:
         visual_context = (
-            "\n\nATTACHED SCENE REFERENCE IMAGES (inspect their visual contents and use "
-            "them as context for the user's request):\n" + "\n".join(
+            "\n\nATTACHED IMAGES (inspect their visual contents and use them as "
+            "context for the user's request):\n" + "\n".join(
                 f"- Image {i}: {label}" for i, label in enumerate(image_labels, 1)
             )
+        )
+    if clip_labels:
+        visual_context += (
+            "\nThe 'rendered clip' images are stills taken at even intervals from the "
+            "shot's actual render, so you CAN review what the clip shows: layout, "
+            "positions, framing, and how they change from start to end. Describe what "
+            "you see in them before suggesting changes. They are single frames, so say "
+            "so if a judgment needs the motion between them, and you still cannot hear "
+            "the clip's sound."
         )
     # Conversation first, board second: the conversation only ever grows at
     # its end, so a backend that reuses a cached prompt prefix (Ollama,
