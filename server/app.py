@@ -87,6 +87,38 @@ MAX_UPLOAD = 32 * 1024 * 1024
 # tts-services.json — one more "linked, not installed" bit of local config —
 # rather than inside data_dir itself, since data_dir is the very thing it names.
 SERVER_CONFIG_NAME = "server-config.json"
+
+# What a render (or Create Image) leaves on a shot. Only the server writes
+# these — the orchestrator when a run starts and finishes, and the accept /
+# keep-this-take endpoints — but the page autosaves its whole copy of the
+# board. A tab that missed a render finishing (opened before it, a second
+# tab, another machine) would otherwise save its stale "running, no clip"
+# copy straight over the result, losing the clip and with it any CHANGED
+# marker: exactly what happened to a Sample scene.
+SERVER_RENDER_FIELDS = (
+    "status", "reason", "progress", "runtimeSeconds", "outputs", "validation",
+    "thumb", "logUrl", "renderedAs", "renderFingerprint", "renderedDialogueSource",
+    "stills",
+)
+
+
+def _keep_server_render_state(board: dict, current: dict) -> None:
+    """Carry the server's render state over a page save, shot by shot.
+
+    Matched by id, so reordering, editing and deleting shots all still come
+    from the page; a shot the server has never seen (just added) keeps what
+    the page sent, which is its empty starting state.
+    """
+    known = {s.get("id"): s for s in current.get("shots") or [] if s.get("id")}
+    for shot in board.get("shots") or []:
+        server = known.get(shot.get("id"))
+        if server is None:
+            continue
+        for key in SERVER_RENDER_FIELDS:
+            if key in server:
+                shot[key] = server[key]
+            else:
+                shot.pop(key, None)
 # Extensions are the reliable signal here: browsers disagree about audio MIME
 # types (Safari says audio/mp3, others audio/mpeg, some send nothing at all or
 # application/octet-stream), and the client is ours. The content type is only
@@ -320,6 +352,7 @@ class Handler(BaseHTTPRequestHandler):
             # Only the server writes the generated soundtrack's record, and it
             # does so while the page keeps autosaving its own copy of the board.
             board["soundtrackRender"] = current.get("soundtrackRender")
+            _keep_server_render_state(board, current)
             saved = self.ctx.store.save(m.group(1), board)
             return self._send_json(
                 {
