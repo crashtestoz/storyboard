@@ -125,6 +125,14 @@ def _memory() -> tuple[float, float] | None:
         return None
 
 
+def _swap_gb() -> float | None:
+    """Swap in use, in GB. The number that shows a render outgrowing
+    memory: a model that does not fit keeps "Memory" pinned near full while
+    this climbs, so the two together tell a tight fit from a thrashing one."""
+    m = re.search(r"used = ([\d.]+)M", _sysctl("vm.swapusage"))
+    return round(float(m.group(1)) / 1024, 1) if m else None
+
+
 def _gpu_percent() -> float | None:
     try:
         out = subprocess.run(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"],
@@ -186,10 +194,11 @@ def _power_watts() -> float | None:
 
 
 def system_load() -> dict:
-    """Current CPU, GPU and memory use (percent) and power draw (watts); any
-    reading that is unavailable is None."""
+    """Current CPU, GPU and memory use (percent), swap in use (GB) and power
+    draw (watts); any reading that is unavailable is None."""
     if platform.system() != "Darwin":
-        return {"cpu": None, "gpu": None, "memory": None, "powerW": None}
+        return {"cpu": None, "gpu": None, "memory": None, "swapGB": None,
+                "powerW": None}
     mem = _memory()
     return {
         "cpu": _cpu_percent(),
@@ -197,5 +206,6 @@ def system_load() -> dict:
         "memory": round(100 * mem[0] / mem[1], 1) if mem else None,
         "memoryUsedGB": round(mem[0], 1) if mem else None,
         "memoryTotalGB": round(mem[1]) if mem else None,
+        "swapGB": _swap_gb(),
         "powerW": _power_watts(),
     }

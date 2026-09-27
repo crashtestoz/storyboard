@@ -2794,13 +2794,24 @@ const SYSTEM_LOAD_ROWS = [
   ["cpu", "CPU"],
   ["gpu", "GPU"],
   ["memory", "Memory"],
+  ["swapGB", "Swap"],
   ["powerW", "Power (1-min avg)"],
 ];
+
+// Swap has no percentage of its own; it is judged against RAM instead. A
+// quarter of RAM in swap is worth noticing, half means a render has
+// outgrown memory and is thrashing (a 48 GB Mac hit 36 GB doing exactly that).
+function swapLevel(load) {
+  const gb = load && load.swapGB, ram = load && load.memoryTotalGB;
+  if (gb == null || !ram) return "";
+  return gb >= ram * 0.5 ? "high" : gb >= ram * 0.25 ? "mid" : "";
+}
 
 function systemLoadText(key, load) {
   const v = load && load[key];
   if (v == null) return "—";
   if (key === "powerW") return `${Math.round(v)} W`;
+  if (key === "swapGB") return `${v} GB`;
   const pct = `${Math.round(v)}%`;
   return key === "memory" && load.memoryTotalGB
     ? `${pct} (${load.memoryUsedGB} / ${load.memoryTotalGB} GB)`
@@ -2812,14 +2823,16 @@ function paintSystemLoad() {
     const key = dd.dataset.load;
     dd.textContent = systemLoadText(key, state.systemLoad);
     const v = state.systemLoad && state.systemLoad[key];
-    // Watts have no fixed ceiling to colour against; only percentages do.
-    dd.dataset.level = v == null || key === "powerW" ? "" : v >= 90 ? "high" : v >= 70 ? "mid" : "";
+    // Watts have no fixed ceiling to colour against; percentages do, and
+    // swap is measured against RAM.
+    dd.dataset.level = key === "swapGB" ? swapLevel(state.systemLoad)
+      : v == null || key === "powerW" ? "" : v >= 90 ? "high" : v >= 70 ? "mid" : "";
   });
 }
 
 function systemLoadGrid() {
   const grid = el("dl", "stat-grid sys-load");
-  grid.title = "This machine, updated every 2 seconds. Power is the whole machine's draw at the wall: macOS refreshes it about once a minute, so it is that minute's average.";
+  grid.title = "This machine, updated every 2 seconds. Swap is memory macOS has moved to disk: if it keeps climbing during a render, the render needs more memory than this Mac has. Power is the whole machine's draw at the wall: macOS refreshes it about once a minute, so it is that minute's average.";
   SYSTEM_LOAD_ROWS.forEach(([key, label]) => {
     grid.appendChild(el("dt", null, label));
     const dd = el("dd", null, systemLoadText(key, state.systemLoad));
