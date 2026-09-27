@@ -122,5 +122,32 @@ class EstimateTests(unittest.TestCase):
             estimate(FakeLLM(SCENE_5), {"prompt": ""})
 
 
+class OnlyThisLineTests(unittest.TestCase):
+    """Native speech is told to stay to the scripted line, once."""
+
+    def prompt(self, **shot):
+        from server.backends.vpipe_backend import _resolved_prompt
+        from server.store import default_board, default_character, default_shot
+        board = default_board("B")
+        doc = default_character("Ray", "wild white hair")
+        doc["voice"] = {"path": "b/refs/doc.m4a"}
+        board["characters"] = [doc]
+        s = default_shot(board["defaults"])
+        s.update(prompt="Ray leans over.", characterIds=[doc["id"]], speakerId=doc["id"],
+                 dialogue="We aren't going to a where, Sam.", **shot)
+        board["shots"] = [s]
+        return _resolved_prompt(s, board, with_audio=True, model="ref2va")
+
+    def test_native_line_says_nothing_else_and_how_long_it_takes(self):
+        p = self.prompt(dialogueSource="native", frames=243)
+        self.assertIn("Ray speaks only this one line, exactly once", p)
+        self.assertIn("never what they say", p)                 # cloned voice clip
+        self.assertIn("about 3 seconds of this 10-second clip", p)
+
+    def test_dubbed_line_is_not_told_to_speak(self):
+        p = self.prompt(dialogueSource="recording", frames=124)
+        self.assertNotIn("speaks only this one line", p)
+
+
 if __name__ == "__main__":
     unittest.main()

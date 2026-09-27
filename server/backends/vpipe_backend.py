@@ -1786,7 +1786,42 @@ def _resolved_prompt(
                 "; any 'no speech' instruction applies only to background or "
                 "unrelated voices."
             )
+            # H3 generates the whole soundtrack in one pass, so a short line
+            # in a long clip leaves seconds of audio it fills with more
+            # talking — improvised, garbled, or words lifted from the voice
+            # reference clip (a 7-word line in a 10 s Sample shot
+            # came back as a stream of gibberish). Say what the line is NOT,
+            # and roughly where it sits, not only what it is.
+            parts.append(_only_this_line(shot, project, clones_voice))
     return " ".join(_sentence(p) for p in parts if p)
+
+
+def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
+    """Keep native speech to the scripted line, once, with no filler."""
+    from ..length_estimate import FPS, dialogue_seconds
+
+    speaker = _speaker_name(shot, project)
+    text = (
+        f"{speaker} speaks only this one line, exactly once, and says nothing "
+        "else: no extra words, no repeats, no ad-libbing, and no other voices."
+    )
+    if clones_voice:
+        text += (
+            " The reference voice clip sets how they sound, never what they say; "
+            "do not repeat any words from it."
+        )
+    clip = int(shot.get("frames") or 0) / FPS
+    speech, _ = dialogue_seconds(shot, None)
+    if clip and speech:
+        text += (
+            f" The line takes only about {speech:.0f} seconds of this "
+            f"{clip:.0f}-second clip; before and after it there is no speech at "
+            "all, only the scene's sound effects and ambience."
+            if clip - speech > 1.5 else
+            " Apart from the line there is no speech, only the scene's sound "
+            "effects and ambience."
+        )
+    return text
 
 
 def _effective_video_model(shot: dict, project: dict) -> tuple[str, str]:
