@@ -62,6 +62,11 @@ const API = {
   rewrite: (slug, { shotId, field, text, service, speakerId } = {}) =>
     req("POST", "/api/rewrite", { slug, shotId, field, text, service, speakerId }),
 
+  // How long a shot needs: action beats from the prompt plus the dialogue.
+  // The editor's current text goes along, since it may not be saved yet.
+  lengthEstimate: (slug, shotId, { prompt, dialogue, dialogueStyle } = {}) =>
+    req("POST", "/api/length-estimate", { slug, shotId, prompt, dialogue, dialogueStyle }),
+
   chat: (slug, message, history, selectedShotId, service) =>
     req("POST", "/api/chat", { slug, message, history, selectedShotId, service }),
 

@@ -5511,6 +5511,7 @@ function renderEditor() {
     )
   );
   params.appendChild(row2);
+  if (!isImage) params.appendChild(lengthCheck(raw, cap, live));
 
   const projRes = projectResolution();
   if (cap && cap.resolutions.length && !cap.resolutions.includes(projRes)) {
@@ -5631,6 +5632,143 @@ function validLengths(cap) {
 
 function fmtDur(frames, fps = 24) {
   return `${(frames / fps).toFixed(1)}s`;
+}
+
+/* ==========================================================================
+   Length check (Parameters card)
+   ========================================================================== */
+
+// Estimates in flight, by shot id, so a re-render of the editor while the
+// model is thinking still shows "Estimating…" instead of offering the button.
+const lengthEstimating = new Set();
+
+function lengthVerdict(est, frames) {
+  if (frames < est.minFrames) return "short";
+  if (frames < est.comfortableFrames) return "tight";
+  return "ok";
+}
+
+function lengthEstimateStale(est, shot) {
+  const basis = est.basis || {};
+  return (basis.prompt || "") !== (shot.prompt || "").trim()
+    || (basis.dialogue || "") !== (shot.dialogue || "").trim();
+}
+
+/**
+ * "Is this shot long enough?" — the prompt's action beats and the dialogue,
+ * timed and snapped to lengths this model renders. Painted into its own box
+ * and repainted in place, so an estimate landing while someone types in the
+ * prompt does not rebuild the editor under their cursor.
+ */
+function lengthCheck(raw, cap, live) {
+  const box = el("div", "length-check");
+  const paint = () => {
+    const shot = live();
+    box.replaceChildren();
+    const head = el("div", "length-head");
+    head.appendChild(el("span", "length-title", "Length check"));
+    const est = shot.lengthEstimate;
+    const busy = lengthEstimating.has(shot.id);
+    const btn = el("button", "btn btn-ghost btn-sm",
+      busy ? "Estimating…" : est ? "Re-estimate" : "Estimate length");
+    btn.disabled = busy || !(shot.prompt || "").trim();
+    btn.title = "Asks the board's AI model to split the prompt into its actions and time "
+      + "each one, then adds the dialogue. Takes about 15–60 seconds.";
+    btn.addEventListener("click", async () => {
+      const id = shot.id;
+      lengthEstimating.add(id);
+      paint();
+      try {
+        const s = live();
+        const result = await API.lengthEstimate(state.slug, id, {
+          prompt: s.prompt || "", dialogue: s.dialogue || "", dialogueStyle: s.dialogueStyle || "",
+        });
+        const target = shotById(id);
+        if (target) {
+          target.lengthEstimate = result;
+          markDirty();
+        }
+      } catch (err) {
+        toast(`Length check failed: ${err.message}`, "error");
+      } finally {
+        lengthEstimating.delete(id);
+        if (box.isConnected) paint();
+      }
+    });
+    head.appendChild(btn);
+    box.appendChild(head);
+
+    if (!est) {
+      box.appendChild(el("div", "field-note",
+        "Checks whether this duration gives every action in the prompt, and the dialogue, "
+        + "enough time. A shot that is too short comes out rushed and cut off."));
+      return;
+    }
+
+    const frames = Number(shot.frames) || 0;
+    const v = lengthVerdict(est, frames);
+    const summary = el("div", `length-summary length-${v}`);
+    const say = {
+      short: `Too short: ${fmtDur(frames)} is under the ${fmtDur(est.minFrames)} minimum`,
+      tight: `Tight: ${fmtDur(frames)} fits, but ${fmtDur(est.comfortableFrames)} would feel unhurried`,
+      ok: `Long enough: ${fmtDur(frames)} covers the ${fmtDur(est.comfortableFrames)} recommended`,
+    }[v];
+    summary.appendChild(el("div", null, say));
+    summary.appendChild(el("div", "length-range",
+      `Minimum ${fmtDur(est.minFrames)} (${est.minFrames}f) · recommended `
+      + `${fmtDur(est.comfortableFrames)} (${est.comfortableFrames}f)`
+      + (est.limitedBy === "dialogue" ? " · set by the dialogue" : "")));
+    box.appendChild(summary);
+
+    const use = el("div", "length-actions");
+    [["Use minimum", est.minFrames], ["Use recommended", est.comfortableFrames]].forEach(([label, f]) => {
+      if (!f || f === frames) return;
+      const b = el("button", "btn btn-sm", `${label} · ${fmtDur(f)}`);
+      b.addEventListener("click", () => {
+        live().frames = f;
+        markDirty();
+        renderEditor();
+        renderStrip();
+      });
+      use.appendChild(b);
+    });
+    if (use.children.length) box.appendChild(use);
+
+    if (est.tooLongForOneShot) {
+      box.appendChild(el("div", "field-warn",
+        "⚠ More than MiniMax H3's ~15 s per clip — consider splitting this into two shots."));
+    }
+    if (lengthEstimateStale(est, shot)) {
+      box.appendChild(el("div", "field-warn",
+        "⚠ The prompt or dialogue has changed since this estimate — re-estimate to update it."));
+    }
+
+    const details = el("details", "length-details");
+    details.appendChild(el("summary", null,
+      `${est.beats.length} action${est.beats.length === 1 ? "" : "s"}, `
+      + `${est.actionSeconds.min}–${est.actionSeconds.comfortable}s`
+      + (est.dialogueSeconds ? ` · dialogue ${est.dialogueSeconds}s` : "")));
+    const list = el("ol", "length-beats");
+    est.beats.forEach((b) => {
+      const li = el("li");
+      li.appendChild(el("span", "length-beat-time", `${b.min}–${b.comfortable}s`));
+      li.appendChild(el("span", null, b.action));
+      list.appendChild(li);
+    });
+    details.appendChild(list);
+    if (est.dialogueSeconds) {
+      details.appendChild(el("div", "field-note",
+        `Dialogue: ${est.dialogueSeconds}s (${est.dialogueBasis}), plus a short beat before `
+        + "and after. It runs during the action, so the longer of the two sets the minimum."));
+    }
+    if (est.note) details.appendChild(el("div", "field-note", est.note));
+    details.appendChild(el("div", "field-note",
+      `Timed by ${est.service || "the board's AI model"}. Action times are an estimate; `
+      + "dialogue is measured from the take when one exists."));
+    box.appendChild(details);
+  };
+  paint();
+  return box;
 }
 
 /**

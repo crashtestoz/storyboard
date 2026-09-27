@@ -2513,3 +2513,30 @@ textarea.ta-compact {
 #soundtrackSettings .toggle { margin-top: var(--sp-3); }
 #soundtrackSettings > .field-note { margin-bottom: var(--sp-2); }
 #soundtrackSettings input[type="range"] { width: 100%; }
+
+/* Length check (Parameters card): is this duration long enough for the
+   prompt's actions and dialogue? */
+.length-check {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+.length-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.length-title { font-size: var(--fs-sm); color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+.length-summary {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  font-size: var(--fs-base);
+}
+.length-short { color: var(--err); border-color: var(--err); background: var(--err-ghost); }
+.length-tight { color: var(--warn); border-color: var(--warn); background: var(--warn-ghost); }
+.length-ok { color: var(--ok); border-color: var(--ok); background: var(--ok-ghost); }
+.length-range { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); }
+.length-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); }
+.length-details { margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--text-dim); }
+.length-details summary { cursor: pointer; }
+.length-beats { margin: var(--sp-2) 0 var(--sp-2) var(--sp-4); padding: 0; line-height: 1.5; }
+.length-beats li { margin-bottom: 2px; }
+.length-beat-time { display: inline-block; min-width: 64px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
