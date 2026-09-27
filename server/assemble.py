@@ -422,8 +422,11 @@ def assemble(
         transition = _seconds(options.get("transitionSeconds"), "Transition")
         fade = _seconds(options.get("audioFadeSeconds"), "Audio fade")
         gain = _seconds(options.get("backgroundVolume", 0.15), "Background volume")
+        black = _seconds(options.get("fadeBlackSeconds"), "Fade from/to black")
         if transition > 2 or fade > 2 or gain > 2:
             raise ValueError("Transition, fade and background volume must be between 0 and 2")
+        if black > 3:
+            raise ValueError("Fade from/to black must be between 0 and 3 seconds")
         timings, _ = cut_timings([clip for _, clip in clips], options)
     except (ValueError, TypeError) as exc:
         res.error = str(exc)
@@ -506,9 +509,28 @@ def assemble(
         filters.append("[baseaudio][bed]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:latency=1[a]")
     else:
         filters.append("[baseaudio]anull[a]")
+    # Fade from and to black on held frames, not on the scenes themselves:
+    # the first frame is held for the fade and faded up from black, then the
+    # cut plays in full; the last frame is held and faded out the same way.
+    # A fade laid over the footage would hide the opening of a short first
+    # shot, so this adds the fade time at each end instead of taking it.
+    # Sound is silent over the held frames, so it stays in sync with the
+    # picture it belongs to. Nothing is re-rendered.
+    video_out, audio_out = "[v]", "[a]"
+    if black:
+        filters.append(f"[v]tpad=start_duration={black}:start_mode=clone:"
+                       f"stop_duration={black}:stop_mode=clone,"
+                       f"fade=t=in:st=0:d={black}:color=black,"
+                       f"fade=t=out:st={total + black}:d={black}:color=black[vblack]")
+        filters.append(f"[a]adelay=delays={round(black * 1000)}:all=1,"
+                       f"apad=pad_dur={black}[ablack]")
+        video_out, audio_out = "[vblack]", "[ablack]"
+        total += 2 * black
+        res.log.append(f"[INFO] held the first and last frames for {black:.2f}s "
+                       "each, fading from and to black")
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = out.with_name(out.stem + ".assembling.mp4")
-    argv += ["-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
+    argv += ["-filter_complex", ";".join(filters), "-map", video_out, "-map", audio_out,
              "-t", str(total), "-c:v", "libx264", "-preset", "medium", "-crf", "18",
              "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
              "-movflags", "+faststart", str(temporary)]
