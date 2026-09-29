@@ -6363,6 +6363,7 @@ function renderPreview() {
   const sp = el("div", "details-stats");
   sp.append(stats, systemLoadGrid());
   detailsPane.appendChild(sp);
+  detailsPane.appendChild(forumSummaryBox(activeMainTab === "final" ? null : raw));
 
   const logPane = el("div", "tab-pane");
   logPane.dataset.tab = "log";
@@ -6456,6 +6457,101 @@ function renderPreview() {
   detailPanes.append(detailsPane, logPane);
   showDetailTab(activeDetailTab);
   box.scrollTop = 0;
+}
+
+/* What a clip was (or will be) rendered at. A rendered clip reports what it
+   actually rendered as — a draft take is draft-sized at 4 steps whatever the
+   project says now; an unrendered one follows the current draft toggle, the
+   same way the shot card's subtitle does. */
+function clipRenderSpec(raw) {
+  const cap = modelCap(effectiveShotModel(raw));
+  const d = state.board.defaults || {};
+  const draft = raw.renderedAs ? raw.renderedAs === "draft" : !!d.draft;
+  const [w, h] = projectResolution().split("x").map(Number);
+  const [rw, rh] = draft ? draftGeometry(w, h, cap ? cap.sizeAlign : 16) : [w, h];
+  return {
+    model: (cap || {}).label || effectiveShotModel(raw),
+    still: !!cap && cap.kind === "image",
+    res: `${rw}×${rh}`,
+    mode: draft ? (d.sketch && !raw.renderedAs ? "sketch" : "draft") : "",
+    steps: draft ? 4 : raw.steps,
+  };
+}
+
+/* Plain text for pasting into a forum post: the machine, then the numbers
+   people compare renders by — for one clip, or (shot = null) for the whole
+   cut. */
+function forumSummaryText(shot) {
+  const hw = (state.info && state.info.hardware) || {};
+  const hwLine = [
+    hw.chip,
+    hw.gpuCores ? `${hw.gpuCores}-core GPU` : "",
+    hw.cpuCores ? `${hw.cpuCores}-core CPU` : "",
+    hw.memoryGB ? `${hw.memoryGB} GB RAM` : "",
+    hw.osVersion ? `macOS ${hw.osVersion}` : "",
+  ].filter(Boolean).join(" · ") || hw.summary || "unknown";
+  const lines = [`Storyboard: ${state.board.name || state.slug || "Untitled"}`, `Hardware: ${hwLine}`];
+
+  if (shot) {
+    const spec = clipRenderSpec(shot);
+    lines.push(
+      `Clip: ${shotIndex(shot.id) + 1}. ${shot.title || "Untitled"}`,
+      `Model: ${spec.model}`,
+      `Resolution: ${spec.res}${spec.mode ? ` (${spec.mode})` : ""}`,
+      spec.still ? "Frames: still image" : `Frames: ${shot.frames} @ 24fps`,
+      ...(spec.still ? [] : [`Duration: ${fmtDur(shot.frames)}`]),
+      `Diffusion steps: ${spec.steps}`,
+      `Render time: ${shot.runtimeSeconds ? dur(shot.runtimeSeconds) : "not rendered"}`,
+    );
+    return lines.join("\n");
+  }
+
+  // Whole video: one value where every clip agrees, the set where they don't.
+  const uniq = (xs) => [...new Set(xs)].join(" / ");
+  const specs = shots().map(clipRenderSpec);
+  const videoSpecs = specs.filter((s) => !s.still);
+  const f = state.board.finalVideo;
+  const est = estimatedFinalStats();
+  const seconds = f && f.url ? f.seconds || 0 : est.seconds;
+  const renderSecs = shots().reduce((a, raw) => a + (raw.runtimeSeconds || 0), 0);
+  const unrendered = shots().filter((raw) => !raw.runtimeSeconds).length;
+  lines.push(
+    `Model: ${uniq(specs.map((s) => s.model)) || "—"}`,
+    `Resolution: ${uniq(videoSpecs.map((s) => s.res + (s.mode ? ` (${s.mode})` : ""))) || projectResolution()}`,
+    `Clips: ${est.clips}`,
+    `Frames: ${Math.round(seconds * 24)} @ 24fps`,
+    `Duration: ${seconds.toFixed(1)}s${seconds >= 60 ? ` (${dur(seconds)})` : ""}${f && f.url ? "" : " (estimated)"}`,
+    `Diffusion steps per clip: ${uniq(videoSpecs.map((s) => s.steps)) || "—"}`,
+    `Total render time: ${renderSecs ? dur(renderSecs) : "not rendered"}` +
+      (renderSecs && unrendered ? ` (${unrendered} clip${unrendered === 1 ? "" : "s"} not rendered)` : ""),
+  );
+  return lines.join("\n");
+}
+
+function forumSummaryBox(shot) {
+  const wrap = el("div", "forum-summary");
+  const head = el("div", "forum-summary-head");
+  head.appendChild(el("span", null, shot ? "Clip summary for sharing" : "Video summary for sharing"));
+  const copy = el("button", "btn btn-sm btn-ghost", "Copy");
+  head.appendChild(copy);
+  const text = forumSummaryText(shot);
+  const box = el("textarea");
+  box.readOnly = true;
+  box.value = text;
+  box.rows = Math.min(12, text.split("\n").length);
+  box.addEventListener("focus", () => box.select());
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(box.value);
+      copy.textContent = "Copied";
+    } catch {
+      box.select();  // clipboard API blocked (plain http on a LAN address) — leave it selected for ⌘C
+      copy.textContent = "Press ⌘C";
+    }
+    window.setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+  });
+  wrap.append(head, box);
+  return wrap;
 }
 
 /* Two shapes reach here: live lines arrive as {level, text} from the
