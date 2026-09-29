@@ -2540,3 +2540,21 @@ textarea.ta-compact {
 .length-beats { margin: var(--sp-2) 0 var(--sp-2) var(--sp-4); padding: 0; line-height: 1.5; }
 .length-beats li { margin-bottom: 2px; }
 .length-beat-time { display: inline-block; min-width: 64px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+/* Details card: plain-text summary for pasting into a forum post. */
+.forum-summary { margin-top: var(--sp-3); }
+.forum-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+.forum-summary textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-sm);
+  white-space: pre;
+  overflow-x: auto;
+}

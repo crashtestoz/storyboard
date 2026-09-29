@@ -36,16 +36,21 @@ def describe_hardware() -> dict:
     system = platform.system()
     chip = ""
     memory_gb = 0
+    gpu_cores = 0
+    os_version = ""
 
     if system == "Darwin":
         chip = _sysctl("machdep.cpu.brand_string") or _sysctl("hw.model")
         mem_bytes = _sysctl("hw.memsize")
         if mem_bytes.isdigit():
             memory_gb = round(int(mem_bytes) / (1024**3))
+        gpu_cores = _gpu_cores()
+        os_version = platform.mac_ver()[0]
 
     cpu_cores = os.cpu_count() or 0
     parts = [
         chip,
+        f"{gpu_cores}-core GPU" if gpu_cores else "",
         f"{memory_gb} GB RAM" if memory_gb else "",
         f"{cpu_cores} CPU cores" if cpu_cores else "",
     ]
@@ -57,8 +62,24 @@ def describe_hardware() -> dict:
         "chip": chip,
         "memoryGB": memory_gb,
         "cpuCores": cpu_cores,
+        "gpuCores": gpu_cores,
+        "osVersion": os_version,
         "summary": summary,
     }
+
+
+def _gpu_cores() -> int:
+    """Apple Silicon GPU core count, from the AGX accelerator's ioreg entry —
+    the figure that separates, say, a 16- from a 20-core M4 Pro."""
+    try:
+        out = subprocess.run(
+            ["ioreg", "-rc", "AGXAccelerator", "-d1"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        m = re.search(r'"gpu-core-count"\s*=\s*(\d+)', out)
+        return int(m.group(1)) if m else 0
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # --------------------------------------------------------------------------- #
