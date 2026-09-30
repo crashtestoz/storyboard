@@ -11,6 +11,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The server finds ffmpeg/ffprobe through PATH. A shell that never ran
+# `brew shellenv` (an editor terminal, a login item) lacks Homebrew's bin, so
+# add it here rather than have assembly fail with "ffmpeg is not on PATH".
+for dir in /opt/homebrew/bin /usr/local/bin; do
+  if [[ -d "$dir" && ":$PATH:" != *":$dir:"* ]]; then
+    PATH="$dir:$PATH"
+  fi
+done
+export PATH
+
 RESTART=0
 PORT=9877
 ARGS=()
