@@ -1209,6 +1209,21 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .chat-message.assistant { align-self: flex-start; background: var(--panel-raised); }
 .chat-message.pending { color: var(--text-dim); }
+
+/* Storyboard AD's thinking line: three dots fading up in turn. */
+.thinking-dots { margin-left: 0.3em; }
+.thinking-dots span {
+  animation: thinking-dot 1.4s infinite ease-in-out both;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-dot {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dots span { animation: none; }
+}
 .chat-message.error { border-color: var(--err); color: var(--err); }
 
 .chat-proposal {
