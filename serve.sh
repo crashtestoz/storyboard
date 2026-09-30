@@ -22,8 +22,8 @@
 #   --data-dir   yours. Storyboards and uploaded references are saved under
 #                <data-dir>/projects/<slug>/, alongside the shots they render,
 #                so a project folder is self-contained and can be copied or
-#                zipped on its own. Defaults to /Volumes/KINGSTON/ai-diffusers,
-#                outside any vpipe workspace; point it anywhere else to keep
+#                zipped on its own. Defaults to storyboard-projects/ beside this
+#                folder, outside any vpipe workspace; point it anywhere else to keep
 #                your work wherever you'd rather it live.
 # ==========================================================================
 
