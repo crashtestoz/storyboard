@@ -254,7 +254,7 @@ Added since, from use rather than from the plan:
    passed to the video model only as a visual mouth-movement cue. The final
    voice is mixed over the finished clip rather than trusted to the video
    model, which does not produce intelligible speech.
-8. **Draft mode** — long edge capped around 384 px, 4 steps, same length and seed,
+8. **Draft mode** — long edge capped around 384 px, 8 steps, same length and seed,
    no generated audio or full frame dump unless needed for chained shots.
 9. **Aspect ratios** with the sizes each model's docs cite marked as such.
 

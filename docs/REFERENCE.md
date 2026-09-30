@@ -187,7 +187,7 @@ the fact that a shot has dialogue. The resolved tab shows the assembled prompt
 **segmented and labelled by source** — scene, each cast member, shot, sound
 bed, accents — so it is never ambiguous which clause came from where.
 
-**Draft mode.** Renders with the long edge capped around 384 px and 4 steps,
+**Draft mode.** Renders with the long edge capped around 384 px and 8 steps,
 without generated audio or full PNG frame dumps unless another shot chains
 from it. Clip length and seed are left alone, so the move you see is the move
 you will get. A draft output is badged as such so it is never mistaken for a

@@ -243,7 +243,7 @@ they say it finished. stop_render cancels a run in progress. A shot goes \
 is the shot's needsRender flag in context. assemble joins rendered clips \
 (the dubbed version wins while current) into final.mp4, in shot order.
 
-Draft mode renders small and fast (capped resolution, 4 steps, no generated \
+Draft mode renders small and fast (capped resolution, up to 8 steps, no generated \
 audio) for blocking iteration before a full-quality pass. Steps: 8 is draft \
 quality, 16 is the final-quality setting.
 

@@ -3343,10 +3343,10 @@ function renderRail() {
   const cap = modelCap(effectiveShotModel(selectedShot())) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
-    ? `Rendering at ${dw}×${dh} and 4 steps, dialogue and sound effects ` +
+    ? `Rendering at ${dw}×${dh} and ${DRAFT_STEPS} steps, dialogue and sound effects ` +
       `included. Clip length and seed are unchanged, so the camera move is ` +
       `the one you will get.`
-    : `Drafts render at ${dw}×${dh} and 4 steps to check framing, motion, ` +
+    : `Drafts render at ${dw}×${dh} and ${DRAFT_STEPS} steps to check framing, motion, ` +
       `dialogue and sound quickly. Full frame dumps are skipped unless ` +
       `needed for chaining.`;
 
@@ -3421,7 +3421,7 @@ function renderRail() {
   $("#stillsSizeNote").textContent = largeStills
     ? `Renders at this project's real resolution and step count — big enough ` +
       `to use as a reference image, but noticeably slower than the small size.`
-    : `Renders at draft size (384px long edge, 4 steps) — fast, good for ` +
+    : `Renders at draft size (384px long edge) — fast, good for ` +
       `judging composition, too small to use as a reference image.`;
 
   // stills engine — mirrors Orchestrator._still_model's "auto" rule
@@ -4637,7 +4637,7 @@ function renderStrip() {
     body.appendChild(el("div", "shot-title", raw.title || "Untitled"));
     const cap = modelCap(effectiveShotModel(raw));
     // What will actually render, not just what's configured: draft mode
-    // shrinks the frame and caps steps at 4 (see draftGeometry / the
+    // shrinks the frame and caps steps at 8 (see draftGeometry / the
     // backend's own _draft_geometry), so this must track that toggle and
     // the project resolution live rather than always showing the full-size
     // numbers.
@@ -4647,7 +4647,7 @@ function renderStrip() {
     const resLabel = draftOn
       ? `${draftGeometry(rw, rh, cap ? cap.sizeAlign : 16).join("×")} (${sketchOn ? "sketch" : "draft"})`
       : projectResolution();
-    const stepsLabel = draftOn ? 4 : raw.steps;
+    const stepsLabel = draftOn ? draftSteps(raw.steps) : raw.steps;
     // Sketch renders far fewer real frames (see the backend's own comment
     // in prepare()) then stretches the clip back to this same duration, so
     // the length shown here still holds — only the frame count actually
@@ -5985,6 +5985,11 @@ function alignUp(v, align) {
   return Math.ceil(v / align) * align;
 }
 
+// Mirrors the backend's _draft_geometry: drafts run at DRAFT_STEPS, or at
+// the shot's own count when that is lower.
+const DRAFT_STEPS = 8;
+const draftSteps = (steps) => Math.min(steps || DRAFT_STEPS, DRAFT_STEPS);
+
 function draftGeometry(w, h, align = 16) {
   const scale = Math.min(0.5, 384 / Math.max(w, h));
   return [
@@ -6387,7 +6392,7 @@ function renderPreview() {
     ["Status", STATUS_LABELS[shot.status] || shot.status],
     ["Model", (modelCap(effectiveShotModel(raw)) || {}).label || effectiveShotModel(raw)],
     ["Runtime", dur(shot.runtimeSeconds)],
-    ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, 4 steps)"
+    ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, reduced steps)"
                  : raw.renderedAs === "final" ? "final" : "—"],
     ["Outputs", (shot.outputs || []).length
       ? (shot.outputs || []).map((u) => u.split("/").pop()).join(", ")
@@ -6497,7 +6502,7 @@ function renderPreview() {
 }
 
 /* What a clip was (or will be) rendered at. A rendered clip reports what it
-   actually rendered as — a draft take is draft-sized at 4 steps whatever the
+   actually rendered as — a draft take is draft-sized at draft steps whatever the
    project says now; an unrendered one follows the current draft toggle, the
    same way the shot card's subtitle does. */
 function clipRenderSpec(raw) {
@@ -6511,7 +6516,7 @@ function clipRenderSpec(raw) {
     still: !!cap && cap.kind === "image",
     res: `${rw}×${rh}`,
     mode: draft ? (d.sketch && !raw.renderedAs ? "sketch" : "draft") : "",
-    steps: draft ? 4 : raw.steps,
+    steps: draft ? draftSteps(raw.steps) : raw.steps,
   };
 }
 
