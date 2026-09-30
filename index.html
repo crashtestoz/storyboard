@@ -4,6 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Storyboard</title>
+  <script>
+    // iPhones get the phone view (mobile.html). ?desktop=1 opts out and is
+    // remembered; ?mobile=1 opts back in.
+    (function () {
+      try {
+        var q = location.search, KEY = "sb.view";
+        if (/[?&]desktop=1/.test(q)) localStorage.setItem(KEY, "desktop");
+        if (/[?&]mobile=1/.test(q)) localStorage.removeItem(KEY);
+        var phone = /iPhone|iPod/.test(navigator.userAgent) ||
+          (matchMedia("(max-width: 500px)").matches && matchMedia("(pointer: coarse)").matches);
+        if (phone && localStorage.getItem(KEY) !== "desktop") location.replace("mobile.html");
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="css/tokens.css">
   <link rel="stylesheet" href="css/app.css">
 </head>

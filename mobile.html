@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#151a21">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Storyboard">
+  <title>Storyboard</title>
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/mobile.css">
+</head>
+<body>
+  <!-- The phone view: watch renders, start/stop them, make stills and pull
+       files down. Nothing here edits a board — that stays on the desktop. -->
+  <header class="m-header">
+    <div class="brand">
+      <span class="brand-mark">▦</span>
+      <span>Storyboard</span>
+    </div>
+    <span class="backend-dot" id="connDot" data-ok="true" title="Server connection"></span>
+    <button class="icon-btn" id="btnMenu" aria-label="Menu" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </header>
+
+  <nav class="m-menu" id="menu" hidden>
+    <button class="m-menu-item" id="mRenderAll">▶ Render all scenes</button>
+    <button class="m-menu-item" id="mBatch">☰ Batch render…</button>
+    <button class="m-menu-item danger" id="mStop">■ Stop</button>
+    <a class="m-menu-item" id="mVideo" download>⬇ Download video</a>
+    <div class="m-menu-sep"></div>
+    <button class="m-menu-item" id="mRefresh">↻ Refresh</button>
+    <a class="m-menu-item" href="index.html?desktop=1">Desktop view</a>
+  </nav>
+
+  <main class="m-main">
+    <!-- What the GPU is doing right now, whichever project it belongs to. -->
+    <section class="now" id="now" data-state="idle">
+      <div class="now-head">
+        <span class="chip" id="nowChip" data-status="draft">Idle</span>
+        <span class="now-eta" id="nowEta"></span>
+      </div>
+      <div class="now-title" id="nowTitle">Nothing rendering</div>
+      <div class="now-sub" id="nowSub"></div>
+      <div class="bar" id="nowBar" hidden><div class="bar-fill"></div></div>
+    </section>
+
+    <select id="projectPicker" class="project-picker" aria-label="Project"></select>
+    <div class="project-row">
+      <div class="project-meta" id="projectMeta"></div>
+      <button class="btn btn-sm btn-primary" id="btnPlay" hidden>▶ Play video</button>
+    </div>
+
+    <ol class="scenes" id="scenes"></ol>
+  </main>
+
+  <!-- Batch render: pick projects, render them back to back. -->
+  <div class="sheet-backdrop" id="batchSheet" hidden>
+    <div class="sheet" role="dialog" aria-labelledby="batchTitle">
+      <div class="sheet-head">
+        <h2 id="batchTitle">Batch render</h2>
+        <button class="btn btn-ghost btn-sm" id="batchCancel">Cancel</button>
+      </div>
+      <p class="sheet-note">Each project renders in turn with its own saved settings.</p>
+      <div class="batch-list" id="batchList"></div>
+      <button class="btn btn-primary btn-block" id="batchStart" disabled>Start batch</button>
+    </div>
+  </div>
+
+  <!-- The assembled video. -->
+  <div class="player" id="player" hidden>
+    <div class="player-head">
+      <span id="playerTitle"></span>
+      <button class="btn btn-ghost btn-sm" id="playerClose">Done</button>
+    </div>
+    <video id="playerVideo" controls playsinline preload="metadata"></video>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="js/api.js"></script>
+  <script src="js/mobile.js"></script>
+</body>
+</html>
