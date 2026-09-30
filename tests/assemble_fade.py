@@ -64,6 +64,22 @@ class FadeToBlackTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_muted_shot_is_silent_in_the_cut(self):
+        muted = str(self.parts[1][1])
+        r = assemble(self.parts, self.out, 320, 180, options={"muted": [muted]})
+        self.assertTrue(r.ok, r.error or r.log)
+        self.assertAlmostEqual(r.seconds, 4.0, delta=0.15)        # picture kept
+        self.assertGreater(audio_peak_db(self.out, 0.5, 1.0), -30)  # shot 1 still heard
+        self.assertLess(audio_peak_db(self.out, 2.5, 1.0), -80)     # shot 2 silent
+
+    def test_muting_changes_the_fingerprint_only_when_used(self):
+        board = {"shots": [{"id": "a"}, {"id": "b"}]}
+        before = assembly_fingerprint(board)
+        board["shots"][1]["muteAudio"] = False
+        self.assertEqual(assembly_fingerprint(board), before)
+        board["shots"][1]["muteAudio"] = True
+        self.assertNotEqual(assembly_fingerprint(board), before)
+
     def test_fades_over_the_scenes_without_adding_time(self):
         r = assemble(self.parts, self.out, 320, 180, options={"fadeBlackSeconds": 1.0})
         self.assertTrue(r.ok, r.error or r.log)

@@ -207,6 +207,10 @@ def assembly_fingerprint(board: dict) -> str:
     trims = [[s.get("id"), s.get("trimIn", 0), s.get("trimOut", 0)]
              for s in board.get("shots", []) if s.get("trimIn") or s.get("trimOut")]
     payload: list[Any] = [settings, trims]
+    # Appended only when a shot is muted, so older cuts keep their fingerprint.
+    muted = [s.get("id") for s in board.get("shots", []) if s.get("muteAudio")]
+    if muted:
+        payload.append({"muted": muted})
     # Only boards that have opened the Soundtrack settings carry the key, so
     # every cut assembled before it existed keeps its fingerprint.
     if "soundtrack" in board:
@@ -234,12 +238,26 @@ def clip_trims(board: dict, project_dir: Path) -> dict[str, list[float]]:
     return trims
 
 
+def muted_clips(board: dict, project_dir: Path) -> list[str]:
+    """Clips whose own audio is left out of the cut — a title card or any shot
+    where H3's generated sound is unwanted. The soundtrack still plays under it."""
+    muted = []
+    for i, shot in enumerate(board.get("shots", []), 1):
+        if not shot.get("muteAudio"):
+            continue
+        clip = shot_clip(project_dir / "shots" / f"{i:02d}", shot)
+        if clip:
+            muted.append(str(clip))
+    return muted
+
+
 def board_options(board: dict, project_dir: Path, data_dir: Path) -> dict:
     from .soundtrack.board import settings as soundtrack_settings, usable_render
 
     options = dict(board.get("assembly") or {})
     options["fingerprint"] = assembly_fingerprint(board)
     options["trims"] = clip_trims(board, project_dir)
+    options["muted"] = muted_clips(board, project_dir)
     ref = options.pop("backgroundAudio", None)
     music = soundtrack_settings(board)
     if music["enabled"] and music["source"] == "upload" and ref:
@@ -272,7 +290,7 @@ def duck_keys(board: dict, project_dir: Path) -> dict[str, dict[str, Any]]:
     """
     keys: dict[str, dict[str, Any]] = {}
     for i, shot in enumerate(board.get("shots") or [], 1):
-        if not (shot.get("dialogue") or "").strip():
+        if not (shot.get("dialogue") or "").strip() or shot.get("muteAudio"):
             continue
         shot_dir = project_dir / "shots" / f"{i:02d}"
         clip = shot_clip(shot_dir, shot)
@@ -448,6 +466,7 @@ def assemble(
     # here, once in the crossfade itself), producing an audible dip in the
     # middle of what is meant to be a seamless blend.
     crossfading = bool(transition and len(clips) > 1)
+    muted = set(options.get("muted") or [])
     filters = []
     for i, ((_, clip), (start, duration)) in enumerate(zip(clips, timings)):
         filters.append(
@@ -456,7 +475,7 @@ def assemble(
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
             f"fps={fps},format=yuv420p,settb=AVTB[v{i}]"
         )
-        if _has_audio(clip):
+        if str(clip) not in muted and _has_audio(clip):
             audio = f"[{i}:a]atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS"
         else:
             audio = f"anullsrc=r={SAMPLE_RATE}:cl=stereo,atrim=duration={duration}"

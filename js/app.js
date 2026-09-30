@@ -4080,7 +4080,7 @@ function renderBoundaryReview(host, raw, idx) {
   for (const [scene, ending] of [[previous, true], [raw, false]]) {
     const cell = el("div");
     const video = el("video"); video.src = clip(scene); video.controls = true; video.preload = "metadata";
-    video.muted = outputMuted();
+    video.muted = outputMuted() || !!scene.muteAudio;
     let begin = 0, end = 0;
     video.addEventListener("loadedmetadata", () => {
       end = Math.max(0, video.duration - (scene.trimOut || 0));
@@ -5463,6 +5463,22 @@ function renderEditor() {
       label.appendChild(input); trim.appendChild(label);
     }
     trim.appendChild(el("div", "field-note", "Trims affect assembly only. Continuity references use the original final rendered frame."));
+    // H3 always generates sound, even for a title card with nothing to hear.
+    // Muting drops the clip's own audio (and any dub on it) from the cut; the
+    // soundtrack keeps playing underneath. The render itself is untouched.
+    const muteToggle = el("label", "toggle");
+    const muteBox = el("input");
+    muteBox.type = "checkbox";
+    muteBox.checked = !!raw.muteAudio;
+    muteBox.addEventListener("change", () => {
+      live().muteAudio = muteBox.checked;
+      markDirty();
+    });
+    muteToggle.style.marginTop = "var(--sp-3)";
+    muteToggle.append(muteBox, el("span", "toggle-track"),
+                      el("span", null, "Mute this shot's audio in the final cut"));
+    trim.append(muteToggle, el("div", "field-note",
+      "Silences everything H3 generated for this shot (sound effects, ambience, speech). The soundtrack added at assembly still plays."));
     host.appendChild(trim);
     renderBoundaryReview(host, raw, idx);
   }
