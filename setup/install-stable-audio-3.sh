@@ -9,7 +9,7 @@
 #
 # Usage:
 #   setup/install-stable-audio-3.sh
-#   setup/install-stable-audio-3.sh --dir /Volumes/Data/ai-diffusers/stable-audio-3
+#   setup/install-stable-audio-3.sh --dir /Volumes/MyDrive/stable-audio-3
 #   setup/install-stable-audio-3.sh --models sm-music        # small only (~1.9 GB)
 #   setup/install-stable-audio-3.sh --models medium,sm-music # default (~7.3 GB)
 #

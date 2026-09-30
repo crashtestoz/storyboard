@@ -9,7 +9,9 @@ only knows where it is. Engines are listed in ``soundtrack-services.json``::
       "services": [
         {"id": "sa3-mlx", "label": "Stable Audio 3 (MLX, local)",
          "kind": "sa3-mlx",
-         "path": "/Volumes/Data/ai-diffusers/stable-audio-3/optimized/mlx"}
+         "path": "../stable-audio-3/optimized/mlx"}
+
+A relative ``path`` is resolved against this project's folder.
       ]
     }
 
@@ -91,13 +93,18 @@ def load_config(project_root: Path) -> list[dict[str, Any]]:
     return services if isinstance(services, list) else []
 
 
-def build_one(entry: dict[str, Any]) -> SoundtrackEngine:
+def build_one(entry: dict[str, Any], project_root: Path | None = None) -> SoundtrackEngine:
     kind = entry.get("kind")
     sid = str(entry.get("id") or kind or "unnamed")
     label = str(entry.get("label") or sid)
     if kind == "sa3-mlx":
         from .sa3_mlx import Sa3MlxEngine
-        return Sa3MlxEngine(sid, label, Path(str(entry.get("path") or "")).expanduser())
+        path = Path(str(entry.get("path") or "")).expanduser()
+        # A relative "path" (as in the committed sample) is relative to this
+        # project, not to wherever the server happened to be launched from.
+        if project_root is not None and str(path) != "." and not path.is_absolute():
+            path = (Path(project_root) / path).resolve()
+        return Sa3MlxEngine(sid, label, path)
     return BrokenEngine(sid, label, f"unknown soundtrack engine kind {kind!r} in {CONFIG_NAME} "
                                     f"(expected {', '.join(KNOWN_KINDS)})")
 
@@ -106,6 +113,6 @@ def load_engines(project_root: Path) -> dict[str, SoundtrackEngine]:
     engines: dict[str, SoundtrackEngine] = {}
     for entry in load_config(project_root):
         if isinstance(entry, dict):
-            eng = build_one(entry)
+            eng = build_one(entry, project_root)
             engines[eng.id] = eng
     return engines
