@@ -176,6 +176,9 @@ const API = {
   accept: (slug, shotId) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept`, {}),
   stop: () => req("POST", "/api/stop"),
+  // Launch an offline local engine server (Qwen3-TTS, Ollama); see
+  // server/services.py for the only commands this can run.
+  startService: (group, id) => req("POST", "/api/services/start", { group, id }),
   status: () => req("GET", "/api/status"),
   systemLoad: () => req("GET", "/api/system-load"),
 };

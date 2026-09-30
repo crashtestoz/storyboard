@@ -28,6 +28,7 @@ Routes
 ``POST /api/render-batch``      render several projects in sequence ``{slugs}``
 ``POST /api/stills``            one opening-frame preview still ``{slug, shotId}``
 ``POST /api/stop``              stop the running batch
+``POST /api/services/start``    start a local engine server ``{group, id}``
 ``GET  /api/status``            live queue state (polled by the UI)
 ``POST /api/server-settings``   set the global projects folder ``{dataDir}``
                                  (takes effect on restart) and/or the Storyboard
@@ -66,6 +67,7 @@ from .llm import load_services as load_llm_services
 from .llm import load_config as load_llm_config
 from .llm import KNOWN_KINDS as LLM_KINDS
 from .local_config import ensure_local_configs
+from . import services as local_services
 from .dubbing import speaker_for
 from .ad_memory import MEMORY_FILE as AD_MEMORY_FILE
 from .storyboard_chat import chat as storyboard_chat
@@ -513,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                         "engines": [e.to_json() for e in ctx.soundtrack_engines().values()],
                         "configs": load_soundtrack_config(ctx.ui_root),
                     },
+                    # Services Settings can offer a Start button for.
+                    "startable": local_services.startable(ctx.ui_root),
                 }
             )
 
@@ -1038,6 +1042,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stop":
             return self._send_json(ctx.orch.stop())
+
+        if path == "/api/services/start":
+            payload = self._read_json() or {}
+            return self._send_json(local_services.start(
+                ctx.ui_root, str(payload.get("group") or ""), str(payload.get("id") or "")))
 
         if path == "/api/assemble":
             return self._assemble()
