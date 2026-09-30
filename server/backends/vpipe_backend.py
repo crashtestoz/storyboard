@@ -1566,6 +1566,9 @@ def _align_up(v: int, align: int) -> int:
     return ((v + align - 1) // align) * align
 
 
+DRAFT_STEPS = 8
+
+
 def _draft_geometry(w: int, h: int, steps: int,
                     align: int = 16) -> tuple[int, int, int]:
     """Shrink a request so a draft answers "does the shot work" quickly.
@@ -1578,9 +1581,10 @@ def _draft_geometry(w: int, h: int, steps: int,
         Up rather than down because generate-video rounds up: a draft that
         rounded the other way would be re-rounded there, and a start-frame
         anchor encoded at this size would stop matching.
-    *   **Steps** — cut to 4. Below 8 is nominally the Turbo LoRA's territory
-        rather than the raw model's, but for judging whether a camera move and
-        a composition work, noisy output is the correct trade.
+    *   **Steps** — capped at DRAFT_STEPS (8), or the shot's own count if that
+        is lower. Drafts used to run at 4, but 8 is truer to the final
+        render's motion and composition, and at draft size it still takes
+        only a minute or two on an M5 Max.
     *   **Frames — NOT cut.** The whole point of a draft here is checking
         motion, and a shorter clip is a different motion. Length is preserved.
     *   **Seed — NOT changed** (handled by the caller). Same seed keeps the
@@ -1591,7 +1595,7 @@ def _draft_geometry(w: int, h: int, steps: int,
     scale = min(0.5, 384.0 / max(w, h))
     dw = _align_up(max(align, round(w * scale)), align)
     dh = _align_up(max(align, round(h * scale)), align)
-    return dw, dh, max(4, min(steps, 4))
+    return dw, dh, min(steps, DRAFT_STEPS) if steps > 0 else DRAFT_STEPS
 
 
 def _wh(res: str) -> tuple[int, int]:

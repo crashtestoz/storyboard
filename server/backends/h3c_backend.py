@@ -320,7 +320,7 @@ class H3cBackend(VpipeBackend):
             argv += ["--core-reuse", str(core_reuse)]
         else:
             # h3.c warns that reuse at 2-7 steps leaves too few fresh
-            # evaluations; drafts run at 4, so they always get reuse 1.
+            # evaluations, so a shot at 7 or fewer always gets reuse 1.
             reuse = 1 if steps <= 7 else int(o["reuse"])
             argv += ["--reuse", str(reuse)]
         if o.get("tokenReduction"):

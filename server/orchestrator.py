@@ -607,7 +607,7 @@ class Orchestrator:
                 still_shot["model"] = still_model
                 still_shot["steps"] = steps
                 # An explicit step count survives the draft geometry that
-                # Small otherwise applies (which caps steps at 4).
+                # Small otherwise applies (which caps steps at 8).
                 still_shot["_fixedSteps"] = True
                 still_shot["seed"] = seed
                 # An LLM-extracted description of what THIS shot's own prompt

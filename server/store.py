@@ -323,7 +323,7 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any], *,
         "sketch": bool(defaults.get("draft")) and bool(defaults.get("sketch")),
     }
     if payload["draft"]:
-        payload["draftProfile"] = "384-long-edge-4-step-with-audio"
+        payload["draftProfile"] = "384-long-edge-8-step-with-audio"
     if payload["sketch"]:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["effectiveModel"] == "ref2va":
