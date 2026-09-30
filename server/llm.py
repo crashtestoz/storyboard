@@ -91,9 +91,10 @@ closing "Sound effects only." is the one allowed exception.
 # The house style: a fixed three-label breakdown (camera, then appearance
 # when a character is on screen, then action) rather than a single flowing
 # paragraph. Chosen over the old free-paragraph style because it's what
-# reliably came out right on this workspace's runs, and it keeps clothing
-# text explicit even when a character portrait is attached -- the portrait
-# carries identity, not outfit, and H3 has no other way to learn the outfit.
+# reliably came out right on this workspace's runs. Clothing / Appearance
+# carries only what differs from a character's Cast description: the render
+# already sends that description (and, on Ref2VA, the portrait) with every
+# shot, so restating the standing outfit just repeats it.
 SYSTEM_PROMPT = """\
 You rewrite shot descriptions into prompts for MiniMax H3, a text-to-video \
 model that generates picture and sound together in one pass, using this \
@@ -106,16 +107,19 @@ it's composed (e.g. "focusing on her face, body in the lower part of the \
 frame"), and lens detail when it matters (focal length, aperture, depth of \
 field, e.g. "50mm f/2.0 lens, shallow depth").
 Clothing / Appearance: what the subject is wearing and any other visible \
-appearance detail. Include this section only when a character or person is \
-in the shot; omit it entirely (not as an empty line) for shots with no \
-character.
+appearance detail, but only what the character's Cast description does not \
+already give — a change in this shot (soaked, torn sleeve, helmet on) or a \
+person with no Cast description. The Cast description is sent with every \
+shot, so never restate it. Omit this section entirely (not as an empty line) \
+when there is nothing to add, including shots with no character.
 Pose / Action: what the subject does, in the present tense, in the order it \
 happens (e.g. "she waves to the audience, then holds up a sign reading \
 ...").
 
 Rules:
 - Camera Direction & Framing and Pose / Action are always present. Clothing \
-/ Appearance is present only when a character is in the shot.
+/ Appearance is present only when a character in the shot looks different \
+from their Cast description, or has none.
 - Use exactly these three labels, in this order, each starting a new line: \
 "Camera Direction & Framing:", "Clothing / Appearance:", "Pose / Action:".
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
@@ -139,9 +143,8 @@ resolve by reversing the subject instead — say what the camera does, then \
 say what the subject does, in that order.
 - If reference images are listed in the context, treat them as visual \
 constraints: fold relevant framing, lighting, material and composition cues \
-into Camera Direction & Framing, and relevant clothing cues into Clothing / \
-Appearance — even when a character portrait is attached, still name their \
-visible clothing in that section; the portrait carries identity, not outfit. \
+into Camera Direction & Framing, and clothing cues into Clothing / \
+Appearance only where they differ from that character's Cast description. \
 Do not include filenames or paths in the final prompt.
 - Refer to named characters by exactly the name the writer used.
 - No preamble, no explanation, no quotation marks, no bullet points or \
