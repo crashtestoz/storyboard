@@ -1479,7 +1479,7 @@ class Handler(BaseHTTPRequestHandler):
         target = self._resolve_within(self.ctx.ui_root, rel)
         if target is not None:
             inside = target.relative_to(self.ctx.ui_root).parts
-            if not (inside == ("index.html",) or (len(inside) > 1 and inside[0] in self.STATIC_DIRS)):
+            if not (inside in (("index.html",), ("mobile.html",)) or (len(inside) > 1 and inside[0] in self.STATIC_DIRS)):
                 target = None
         if target is None or not target.is_file():
             return self._err(404, "not found")

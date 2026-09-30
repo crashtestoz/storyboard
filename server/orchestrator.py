@@ -156,6 +156,9 @@ class Orchestrator:
         # reusing _runs/_order, which are shaped around a whole render batch.
         self._stills_thread: threading.Thread | None = None
         self._stills_shot_id: str | None = None
+        # Shot ids are only unique within a board, and the phone view has to
+        # say which project the stills belong to.
+        self._stills_slug: str | None = None
         self._stills_phase: str = ""
         self._stills_progress: float = 0.0
         self._stills_error: str = ""
@@ -208,6 +211,7 @@ class Orchestrator:
                 "stills": {
                     "busy": self.stills_busy,
                     "shotId": self._stills_shot_id,
+                    "slug": self._stills_slug,
                     "phase": self._stills_phase,
                     "progress": round(self._stills_progress, 1),
                     "error": self._stills_error,
@@ -519,6 +523,7 @@ class Orchestrator:
         with self._lock:
             self._cancel.clear()
             self._stills_shot_id = shot_id
+            self._stills_slug = slug
             self._stills_phase = "starting"
             self._stills_progress = 0.0
             self._stills_error = ""
