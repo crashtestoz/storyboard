@@ -2017,6 +2017,8 @@ function initializeSettingsTabs() {
       Object.entries(panes).forEach(([name, pane]) => pane.classList.toggle("active", name === active));
     };
   });
+  $("#btnStartLlm").onclick = () => startLocalService("llm", $("#llmService").value);
+  $("#btnStartTts").onclick = () => startLocalService("tts", $("#ttsEngine").value);
   $("#btnNewLlmService").onclick = () => openLlmEditor("");
   $("#btnEditLlmService").onclick = () => {
     const id = $("#llmService").value;
@@ -2211,10 +2213,62 @@ function openLlmEditor(id) {
     if (!draft) { draft = el("option", null, "New service…"); draft.value = ""; sel.prepend(draft); }
     sel.value = "";
     $("#llmStatus").hidden = true;
+    $("#btnStartLlm").hidden = true;
     $("#llmNote").textContent = "Fill in the details, then Add service.";
     $("#llmNote").className = "field-note";
     $("#llmServiceLabel").focus();
   }
+}
+
+/* Start buttons beside the Offline chips. The server decides which services
+   it can launch (server/services.py: Qwen3-TTS and Ollama on this Mac); after
+   starting one, health is re-read until it answers. Qwen3-TTS loads two
+   models before it listens, so that can take a minute or more. */
+const serviceStarting = new Set();
+const startableIds = (group) => ((state.info && state.info.startable) || {})[group] || [];
+
+function paintStartButton(button, group, svc) {
+  const starting = !!svc && serviceStarting.has(`${group}:${svc.id}`);
+  button.hidden = !svc || svc.id === "none" || (svc.healthy && !starting) ||
+    !startableIds(group).includes(svc.id);
+  button.disabled = starting;
+  button.textContent = starting ? "Starting…" : "Start";
+}
+
+async function startLocalService(group, id) {
+  const key = `${group}:${id}`;
+  if (!id || serviceStarting.has(key)) return;
+  const list = () => (group === "tts" ? state.info.tts.engines : state.info.llm.services) || [];
+  const label = (list().find((s) => s.id === id) || {}).label || id;
+  serviceStarting.add(key);
+  render();
+  let started;
+  try {
+    started = await API.startService(group, id);
+  } catch (err) {
+    serviceStarting.delete(key);
+    render();
+    return toast(err.message, "error");
+  }
+  const deadline = Date.now() + 180000;
+  let healthy = false;
+  while (!healthy && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const info = await API.info();
+      state.info.tts = info.tts;
+      state.tts = info.tts.engines;
+      state.info.llm = info.llm;
+      state.info.startable = info.startable;
+      healthy = !!(list().find((s) => s.id === id) || {}).healthy;
+    } catch {
+      // The server is busy or restarting; try again on the next tick.
+    }
+  }
+  serviceStarting.delete(key);
+  render();
+  if (healthy) toast(`${label} is running.`, "info");
+  else toast(`${label} did not come online within 3 minutes — see ${started.log}`, "error");
 }
 
 /* Speech engines use the same pattern as LLM services: the dropdown picks
@@ -2293,6 +2347,7 @@ function openTtsEditor(id) {
     if (!draft) { draft = el("option", null, "New speech engine…"); draft.value = ""; sel.prepend(draft); }
     sel.value = "";
     $("#ttsStatus").hidden = true;
+    $("#btnStartTts").hidden = true;
     $("#ttsNote").textContent = "Fill in the details, then Add engine.";
     $("#ttsNote").className = "field-note";
     $("#ttsServiceLabel").focus();
@@ -3589,6 +3644,7 @@ function renderRail() {
     chip.dataset.status = eng?.healthy ? "online" : "offline";
     chip.textContent = eng?.healthy ? "Online" : "Offline";
     chip.title = eng && !eng.healthy ? eng.message || "" : "";
+    paintStartButton($("#btnStartTts"), "tts", eng);
   }
   $("#btnEditTtsService").disabled = !ttsSel.value || ttsSel.value === "none";
 
@@ -3625,6 +3681,7 @@ function renderRail() {
     chip.dataset.status = sv?.healthy ? "online" : "offline";
     chip.textContent = sv?.healthy ? "Online" : "Offline";
     chip.title = sv && !sv.healthy ? sv.message || "" : "";
+    paintStartButton($("#btnStartLlm"), "llm", sv);
   }
   $("#btnEditLlmService").disabled = !llmSel.value || llmSel.value === "none";
 
