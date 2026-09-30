@@ -7,3 +7,5 @@ soundfile
 numpy
 faster-whisper
 librosa
+# faster-whisper 1.2.1 passes av.open(metadata_errors=...), which PyAV 19 removed
+av<19
