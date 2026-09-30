@@ -6812,7 +6812,9 @@ function diagnostic(raw, shot) {
       try {
         await saveNow();
         state.status = await API.acceptReview(state.slug, raw.id);
-        state.board = await API.getBoard(state.slug);
+        const res = await API.getBoard(state.slug);
+        takeStale(res);
+        state.board = res.board;
         toast("Accepted — shots that continue from this one can render now.", "info");
       } catch (err) {
         toast(err.message, "error");
