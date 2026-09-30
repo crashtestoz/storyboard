@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .app import SERVER_CONFIG_NAME, Context, build_server
+from .app import SERVER_CONFIG_NAME, Context, build_server, llm_services_json
 from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .render_timings import FILE_NAME as TIMINGS_FILE, RenderTimings
@@ -287,12 +287,13 @@ def main(argv: list[str] | None = None) -> int:
               + ("" if tok else f"  ({tmsg.splitlines()[0][:86]})"))
     print("")
     print(f"  rewriting  from {LLM_CONFIG_NAME}, default '{args.llm}'")
-    for sid, svc in llm_services.items():
-        if sid == "none":
+    # Checked in parallel, and this fills the cache the first page load reads.
+    for svc in llm_services_json(ctx):
+        if svc["id"] == "none":
             continue
-        lok, lmsg = svc.health()
-        print(f"             [{'ok  ' if lok else '--  '}] {sid}"
-              + (f"  ({svc.model})" if lok else f"  ({lmsg.splitlines()[0][:86]})"))
+        lok, lmsg = svc["healthy"], svc["message"]
+        print(f"             [{'ok  ' if lok else '--  '}] {svc['id']}"
+              + (f"  ({svc['model']})" if lok else f"  ({lmsg.splitlines()[0][:86]})"))
     print("")
     if data_dir != workspace:
         old = workspace / "projects"
