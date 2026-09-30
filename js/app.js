@@ -805,7 +805,19 @@ function renderAssistantChat() {
     host.appendChild(empty);
   }
   turns.forEach((turn) => {
-    host.appendChild(el("div", `chat-message ${turn.role}${turn.pending ? " pending" : ""}${turn.error ? " error" : ""}`, turn.content));
+    const cls = `chat-message ${turn.role}${turn.pending ? " pending" : ""}${turn.error ? " error" : ""}`;
+    if (turn.pending) {
+      // The thinking line's own "…" becomes three dots that pulse in turn
+      // while the AD is working.
+      const msg = el("div", cls, (turn.content || "").replace(/(…|\.{3})\s*$/, ""));
+      const dots = el("span", "thinking-dots");
+      dots.setAttribute("aria-hidden", "true");
+      for (let i = 0; i < 3; i++) dots.appendChild(el("span", null, "."));
+      msg.appendChild(dots);
+      host.appendChild(msg);
+    } else {
+      host.appendChild(el("div", cls, turn.content));
+    }
     if (turn.actions && turn.actions.length && !turn.dismissed) {
       const proposal = el("div", `chat-proposal${turn.applied ? " applied" : ""}`);
       proposal.appendChild(el("div", "chat-proposal-head",
