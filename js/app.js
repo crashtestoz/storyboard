@@ -1631,6 +1631,27 @@ function wireChrome() {
     state.board.defaults.steps = Number(e.target.value);
     markDirty();
   });
+  // The default only seeds new shots; each existing shot keeps its own
+  // steps. Once the value settles (spinner clicks fire one change each),
+  // offer to apply it to every scene too.
+  let stepsPromptTimer = null;
+  $("#defSteps").addEventListener("change", (e) => {
+    clearTimeout(stepsPromptTimer);
+    stepsPromptTimer = setTimeout(() => {
+      const steps = Number(e.target.value);
+      const all = shots();
+      if (!steps || !all.some((s) => s.steps !== steps)) return;
+      const n = all.length;
+      if (!confirm(
+        `Also set ${steps} steps on all ${n} scene${n === 1 ? "" : "s"}?\n\n` +
+        "OK updates every scene. Cancel keeps each scene's own steps; " +
+        "the new default applies to scenes you add."
+      )) return;
+      for (const s of all) s.steps = steps;
+      markDirty();
+      render();
+    }, 600);
+  });
 
   window.addEventListener("beforeunload", (e) => {
     if (state.dirty) {
