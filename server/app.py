@@ -48,6 +48,7 @@ import re
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -258,6 +259,73 @@ class Context:
         return engines.get(kind or self.default_tts) or engines.get("none")
 
 
+#: How long an LLM service's health counts as fresh on a page load. Each check
+#: is a network round trip, and one to a machine that is off or not serving
+#: took 1–4 s — sequentially, per service, before the page could show anything.
+#: Past this age the last answer is still served, and re-checked in the
+#: background. Only the listing is cached: rewrite and chat still check health
+#: live before using a service.
+LLM_HEALTH_TTL = 30.0
+_llm_json_cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_llm_json_refreshing: set[tuple] = set()
+_llm_json_generation = 0
+_llm_json_lock = threading.Lock()
+
+
+def forget_llm_health() -> None:
+    """Called when services or their keys change, so the next load re-checks."""
+    global _llm_json_generation
+    with _llm_json_lock:
+        _llm_json_cache.clear()
+        _llm_json_generation += 1  # a check already in flight must not land
+
+
+def _check_llm_health(todo: list[tuple[tuple, Any]]) -> dict[tuple, dict[str, Any]]:
+    with _llm_json_lock:
+        generation = _llm_json_generation
+    with ThreadPoolExecutor(max_workers=len(todo)) as pool:
+        fresh = dict(zip([k for k, _ in todo], pool.map(lambda ks: ks[1].to_json(), todo)))
+    now = time.monotonic()
+    with _llm_json_lock:
+        if generation == _llm_json_generation:
+            for k, v in fresh.items():
+                _llm_json_cache[k] = (now, v)
+    return fresh
+
+
+def _refresh_llm_health(todo: list[tuple[tuple, Any]]) -> None:
+    try:
+        _check_llm_health(todo)
+    finally:
+        with _llm_json_lock:
+            _llm_json_refreshing.difference_update(k for k, _ in todo)
+
+
+def llm_services_json(ctx) -> list[dict[str, Any]]:
+    """LLM services as the page lists them, health included. Checked in
+    parallel; a known answer is returned at once and, once older than
+    LLM_HEALTH_TTL, re-checked in the background."""
+    services = list(ctx.llm_services().values())
+    # Keyed on the service's settings, so an edited URL or model is checked
+    # straight away rather than reporting the old one's health.
+    keys = [(type(s).__name__, repr(sorted(vars(s).items()))) for s in services]
+    now = time.monotonic()
+    with _llm_json_lock:
+        known = {k: _llm_json_cache[k] for k in keys if k in _llm_json_cache}
+        stale = [(k, s) for k, s in zip(keys, services)
+                 if k in known and now - known[k][0] >= LLM_HEALTH_TTL
+                 and k not in _llm_json_refreshing]
+        _llm_json_refreshing.update(k for k, _ in stale)
+    if stale:
+        threading.Thread(target=_refresh_llm_health, args=(stale,),
+                         name="llm-health", daemon=True).start()
+    out = {k: v for k, (_, v) in known.items()}
+    missing = [(k, s) for k, s in zip(keys, services) if k not in out]
+    if missing:
+        out.update(_check_llm_health(missing))
+    return [out[k] for k in keys]
+
+
 def tts_engines_json(ctx) -> list[dict[str, Any]]:
     """Speech engines as the page lists them, health included."""
     out = []
@@ -432,7 +500,7 @@ class Handler(BaseHTTPRequestHandler):
                                      if getattr(ctx.backend, "mflux", None) else []),
                     "llm": {
                         "default": ctx.default_llm,
-                        "services": [s.to_json() for s in ctx.llm_services().values()],
+                        "services": llm_services_json(ctx),
                         "configs": [{k: v for k, v in e.items() if k != "apiKey"}
                                     for e in load_llm_config(ctx.ui_root)],
                     },
@@ -978,6 +1046,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._read_json() or {}
             if not {"dataDir", "searchUrl", "mfluxModel", "llmKey"} & set(payload):
                 raise ValueError("nothing to save")
+            if "llmKey" in payload:
+                forget_llm_health()
             cfg = ctx.ui_root / SERVER_CONFIG_NAME
             doc: dict[str, Any] = {}
             if cfg.exists():
@@ -1051,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
             tmp.replace(cfg)
             if "llmKey" in payload:
                 # Status only, read back after the write -- never the key.
-                result["llm"] = [s.to_json() for s in ctx.llm_services().values()]
+                result["llm"] = llm_services_json(ctx)
             if "mfluxModel" in payload:
                 # after the write: describe() reads the saved choice back
                 result["mflux"] = ctx.backend.mflux.describe()
@@ -1062,6 +1132,7 @@ class Handler(BaseHTTPRequestHandler):
             services = payload.get("services")
             if not isinstance(services, list):
                 raise ValueError("services must be a list")
+            forget_llm_health()
             existing = {str(e.get("id")): e for e in load_llm_config(ctx.ui_root)
                         if isinstance(e, dict)}
             clean = []
@@ -1102,7 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
             settings_tmp.write_text(json.dumps(local, indent=2) + "\n")
             os.chmod(settings_tmp, 0o600)
             settings_tmp.replace(settings_path)
-            return self._send_json({"ok": True, "llm": [s.to_json() for s in ctx.llm_services().values()],
+            return self._send_json({"ok": True, "llm": llm_services_json(ctx),
                                     "configs": [{k: v for k, v in e.items() if k != "apiKey"}
                                                 for e in clean]})
 
