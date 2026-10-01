@@ -1814,6 +1814,35 @@ def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
             " The reference voice clip sets how they sound, never what they say; "
             "do not repeat any words from it."
         )
+    # A cast member who is on screen but not speaking is still a visible
+    # face H3 will happily give a voice to — Back to the Future shots 5–7,
+    # with Marty cast beside a speaking Doc, came back with mumbling before
+    # and after Doc's line that the same shots without Marty did not have.
+    # "No other voices" alone is not enough; name who stays quiet.
+    # And a shot chained from the previous one is told to "continue
+    # naturally" from it — which H3 also applies to the sound: shots 6 and 7
+    # of the same board, both chained from a shot that ended mid-conversation,
+    # opened with a burst of speech before the scripted line even started.
+    start = shot.get("startRef")
+    if isinstance(start, dict) and start.get("kind") == "chain":
+        text += (
+            " The previous scene's dialogue has already ended: this clip opens "
+            f"with no speech at all, and nobody talks until {speaker} starts "
+            "the line."
+        )
+    speaker_obj = speaker_for(shot, project)
+    silent = [
+        (c.get("name") or "").strip()
+        for c in _shot_characters(shot, project)
+        if c is not speaker_obj and (c.get("name") or "").strip()
+    ]
+    if silent:
+        who = silent[0] if len(silent) == 1 else ", ".join(silent[:-1]) + " and " + silent[-1]
+        text += (
+            f" {who} {'is' if len(silent) == 1 else 'are'} on screen but silent "
+            "for the whole clip: mouth closed, no speech, no murmuring, no "
+            "vocal sounds of any kind."
+        )
     clip = int(shot.get("frames") or 0) / FPS
     speech, _ = dialogue_seconds(shot, None)
     if clip and speech:
