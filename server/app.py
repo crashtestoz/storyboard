@@ -29,6 +29,12 @@ Routes
 ``POST /api/render``            start ``{slug, shotIds?}``
 ``POST /api/render-batch``      render several projects in sequence ``{slugs}``
 ``POST /api/stills``            one opening-frame preview still ``{slug, shotId}``
+``POST /api/render-seeds``      render one shot at several seeds, into takes
+                                beside it ``{slug, shotId, count | seeds}``
+``GET  /api/boards/<slug>/shots/<id>/seed-takes``  that shot's seed takes
+``DELETE /api/boards/<slug>/shots/<id>/seed-takes``  delete them
+``POST /api/boards/<slug>/shots/<id>/seed-takes/<seed>/adopt``  make a take
+                                the shot's own clip and seed
 ``POST /api/stop``              stop the running batch
 ``POST /api/services/start``    start a local engine server ``{group, id}``
 ``GET  /api/status``            live queue state (polled by the UI)
@@ -458,6 +464,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return self._err(400, f"{type(exc).__name__}: {exc}")
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/seed-takes", path)
+        if m:
+            try:
+                return self._send_json({"deleted": self.ctx.orch.delete_seed_takes(m.group(1), m.group(2))})
+            except Exception as exc:  # noqa: BLE001
+                return self._err(409 if isinstance(exc, RuntimeError) else 400, str(exc))
+
         m = re.fullmatch(r"/api/boards/([^/]+)", path)
         if not m:
             return self._err(404, "not found")
@@ -542,6 +555,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/soundtrack", path)
         if m:
             return self._send_json(self._soundtrack_status(m.group(1)))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/seed-takes", path)
+        if m:
+            return self._send_json({"takes": ctx.orch.seed_takes(m.group(1), m.group(2))})
 
         m = re.fullmatch(r"/api/boards/([^/]+)/export\.zip", path)
         if m:
@@ -1031,6 +1048,22 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(payload.get("board"), dict):
                 ctx.store.save(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
+
+        if path == "/api/render-seeds":
+            payload = self._read_json() or {}
+            slug, shot_id = payload.get("slug"), payload.get("shotId")
+            if not slug or not shot_id:
+                raise ValueError("slug and shotId are required")
+            if isinstance(payload.get("board"), dict):
+                ctx.store.save(slug, payload["board"])
+            return self._send_json(ctx.orch.start_seed_sweep(
+                slug, shot_id, int(payload.get("count") or 4), payload.get("seeds")))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/seed-takes/(\d+)/adopt", path)
+        if m:
+            board = ctx.orch.adopt_seed_take(m.group(1), m.group(2), int(m.group(3)))
+            return self._send_json({"slug": m.group(1), "board": board,
+                                    "stale": self._staleness(m.group(1), board)})
 
         if path == "/api/prepare-dialogue":
             payload = self._read_json() or {}

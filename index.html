@@ -192,6 +192,25 @@
     </div>
   </div>
 
+  <div id="seedDialog" class="modal" hidden>
+    <div class="modal-card seed-card">
+      <div class="modal-head">
+        <span id="seedDialogTitle">Seed comparison</span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-ghost btn-sm" id="seedPlayAll" type="button" title="Start every take from the beginning, together">▶ Play all from start</button>
+        <button class="btn btn-ghost btn-sm" id="seedPauseAll" type="button">⏸ Pause all</button>
+        <button class="btn btn-ghost btn-sm" id="seedDelete" type="button" title="Delete this shot's seed takes to free disk space. The shot's own clip is kept.">Delete takes</button>
+        <button class="btn btn-ghost btn-sm" id="seedClose" type="button">Close</button>
+      </div>
+      <div class="seed-grid" id="seedGrid"></div>
+      <div class="modal-foot">
+        Every take is this shot with only the seed changed. Takes play muted —
+        press <b>🔈 Listen</b> on one to hear it. <b>Use this take</b> makes it the
+        shot's clip and seed without rendering again.
+      </div>
+    </div>
+  </div>
+
   <div id="openDialog" class="modal" hidden>
     <div class="modal-card" style="width:min(760px,100%)">
       <div class="modal-head">
