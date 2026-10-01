@@ -80,6 +80,7 @@ const API = {
   renameBoard: (slug, name) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/rename`, { name }),
   exportUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export`,
+  exportZipUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export.zip`,
 
   // Saved to server-config.json; takes effect on the next restart, not
   // immediately — see restartServer.
