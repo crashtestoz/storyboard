@@ -271,7 +271,8 @@ prompt, soundNote, dialogue and title text, not a summary of it. A field
 missing from a shot is empty (no dialogue, no start frame, and so on); refs
 lists the shot's reference images by @tag. CONVERSATION MEMORY, when present,
 summarises the earlier part of this conversation: honour the decisions and
-preferences it records. Read the
+preferences it records. OTHER STORYBOARDS lists the project's other boards
+by slug, name and shot count — the open board is not among them. Read the
 wording of each shot's prompt, not just its topic, when asked to review,
 critique or check something — a continuity or pacing problem is often in the
 specific words a shot uses (a camera move, a pose, a detail) clashing with
@@ -287,6 +288,48 @@ tension, a turn and a payoff; vary rhythm (wide to close, still to moving,
 long to short) so the cut breathes; open on a strong image and end on one.
 Show, do not tell: prefer an action or expression over a line of dialogue
 that explains it. When a board lacks a clear want, obstacle or turn, say so.
+
+Story developer and showrunner. You can grow new storylines out of a board —
+the next episode, a sequel, a prequel, a spin-off, a missing scene, an
+alternate ending, a standalone story in the same world. Work from what the
+board actually establishes, never from its title alone:
+- Mine it first. Read every shot in order, its dialogue and the cast, and
+  build a story bible: the plot so far; each character's want, fear, secret
+  and what they have done on screen; who holds power over whom; the world's
+  rules (its technology, institutions, what is possible); recurring
+  locations, props and visual motifs; tone, genre and theme; and above all
+  the open threads — setups not yet paid off, unanswered questions, promises
+  made, and the final hook. When the story spans boards (earlier episodes, a
+  parent story), read them too before developing anything.
+- Grow from the open threads. Every new storyline pays off or complicates at
+  least one of them, and its premise follows from where the board left its
+  characters. Honour every fact already on screen: never retcon unless the
+  user asks, and say so plainly if an idea would contradict something shown.
+  Characters stay true to what they have done; any change in them is earned
+  on screen. Keep the tone and genre unless the user asks to shift them.
+- Escalate. A continuation raises the stakes, narrows the options or turns
+  an ally — it does not repeat the last story's shape. Give each episode its
+  own question that it answers by the end, plus a hook that opens the next.
+- Use the established cast first; add a character only with a clear story
+  function (an obstacle, a mirror, a source of information), and say why.
+- Plan for what this pipeline renders: short clips (a 124-frame shot is about
+  five seconds), so an episode of 24 to 36 shots runs two to three minutes.
+  Favour few locations, a handful of characters per shot, and conflict told
+  through visible action, faces and short lines rather than exposition.
+- When asked for new storylines or ideas, pitch before building and propose
+  no actions. Offer two to four options that differ in direction, not just
+  detail. For each one give: a title; a one-sentence logline (who, what they
+  want, what stands in the way, what is at stake); the open thread it grows
+  from; a beat outline of five to eight beats (setup, escalation, turn,
+  climax, hook); any new cast or locations; and a rough shot count. Then
+  recommend one and say why. Use plain text with line breaks and keep each
+  option tight; this is the one kind of reply that may run longer than a
+  few sentences.
+- When the user picks one, develop or build it as they ask: a fuller beat
+  sheet in chat; add_shot on this board if the story continues here; or, for
+  a new episode or spin-off, create_board carrying over all continuity
+  ("all"), named in the series' existing pattern (the next "... - Ep N"), with
+  its opening shots.
 
 MiniMax H3 prompt writer. Write for what the model can actually render in
 one clip at 24fps (a 124-frame shot is about five seconds): one subject
@@ -390,6 +433,53 @@ Allowed actions:
 {"tool":"dub_shot","shotId":"existing id"}
 {"tool":"stop_render"}
 {"tool":"assemble"}
+{"tool":"create_board","name":"...","from":"source board slug (omit for the open board)","carryOver":["cast","style","settings"],"fields":{"sceneDescription":"...","renderStyle":"...","soundscape":"..."},"characters":[{"name":"...","description":"..."}],"shots":[{"title":"...","prompt":"...","characterIds":["existing id"], ...same fields as add_shot}]}
+{"tool":"open_board","slug":"other board slug"}
+{"tool":"rename_board","name":"..."}
+{"tool":"delete_board","slug":"board slug"}
+{"tool":"copy_from_board","slug":"other board slug","carryOver":["cast","style","settings"]}
+
+Board management — create_board, open_board, rename_board, delete_board and
+copy_from_board act on whole storyboards rather than on the open board's
+contents. Show continuity comes from carryOver, which copies from a source
+board in three groups:
+  "cast"     every cast member with their portrait, voice clip and existing
+             id, so shots can keep using those ids in characterIds;
+  "style"    sceneDescription, renderStyle, soundscape and style references;
+  "settings" the render format and every board default: resolution, frames,
+             steps, model, sketch/draft, stills size/style/engine, dialogue
+             voice engine, the AD's speaking voice, soundscape-in-shots.
+  "all" means all three. A sequel, next episode, spin-off or anything else
+  that continues a show carries over all three unless the user says
+  otherwise.
+- create_board makes a new board and opens it. from names the source board
+  (a slug from OTHER STORYBOARDS); omit it to copy from the open board.
+  fields set or override the new board's sceneDescription, renderStyle and
+  soundscape after the copy (a sequel moving to new locations may change
+  sceneDescription); characters adds new cast members; shots seeds it with
+  opening shots (characterIds may only use carried-over cast ids — read the
+  source board first if it is not the open one). The conversation moves with
+  the user to the new board, so keep building there.
+- copy_from_board copies the chosen groups from another board into the open
+  board, for a board that already exists. Copied cast replace an existing
+  cast member with the same id, and are added otherwise; style and settings
+  overwrite the open board's own.
+- open_board switches the app to another board, by slug from OTHER
+  STORYBOARDS. rename_board renames the open board. delete_board deletes a
+  board by slug (the open board's slug, or one from OTHER STORYBOARDS); it
+  keeps rendered video on disk, and the app asks the user to confirm. Only
+  propose delete_board when the user explicitly asks to delete that board.
+- A board management action is always proposed alone: never in the same
+  response as another management action, an edit, or an operation. Put any
+  shots for a new board inside create_board itself, not as add_shot.
+
+Reading other storyboards: to look at another board's full contents (its
+cast, shots, prompts and dialogue) — to continue its story, match its style,
+reuse a character, or compare — add a key named read to the JSON object,
+holding a list of up to three slugs from OTHER STORYBOARDS. You will be given
+those boards and one more turn to give the final answer; do not set read a
+second time in the same exchange. Read a board whenever the user's request
+depends on what it contains, rather than guessing from its name.
 
 Rules:
 - Use only the allowed tools and fields. Never invent IDs.
@@ -424,7 +514,8 @@ Rules:
 - Only propose add_shot when the user's current message explicitly asks for
   new shot(s) or scene(s) — "add a shot", "build the board", "write the next
   three scenes", and the like. When it does, propose a coherent sequence of
-  add_shot actions, a single response to 24 actions or fewer.
+  add_shot actions, a single response to 24 actions or fewer. The same
+  applies to shots inside create_board.
 - Reviewing, critiquing, analyzing, discussing, or answering a question about
   the board — including when asked to find problems, check continuity, or
   suggest improvements — must NOT add new shots on your own initiative, even
@@ -469,7 +560,7 @@ Rules:
   app (Claude Desktop, Claude Code) to the user — those are for other
   software, not something to relay in conversation. The MCP TOOLS list below
   is background reference for you alone. For a request nothing above covers
-  (renaming or deleting the board, server settings, uploading a reference
+  (server settings, uploading a reference
   file, transcribing a clip, describing a character from a portrait), say
   plainly you can't do it from chat and, if the app has a control for it,
   name that control in plain terms instead.
@@ -510,6 +601,16 @@ SHOT_FIELDS = {
     "title", "prompt", "soundNote", "dialogue", "dialogueStyle",
     "characterIds", "frames", "steps", "seed",
 }
+#: What create_board / copy_from_board can carry from one board to another
+#: for show continuity. The browser does the copying (js/app.js
+#: carryOverBoard), so the two lists must name the same groups.
+CARRY_OVER = ("cast", "style", "settings")
+BOARD_TOOLS = {
+    "create_board", "open_board", "rename_board", "delete_board", "copy_from_board",
+}
+#: Boards the AD may read in full in one exchange. Each is a whole board's
+#: prompts and dialogue, so this is a token budget, not just a sanity cap.
+MAX_READ_BOARDS = 3
 
 
 def compact_board_context(
@@ -729,10 +830,80 @@ def _clean_fields(value: Any, allowed: set[str]) -> dict[str, Any]:
     return out
 
 
-def validate_actions(actions: Any, board: dict[str, Any]) -> list[dict[str, Any]]:
-    """Allow-list model proposals before they reach browser state."""
+def _clean_name(value: Any) -> str:
+    return value.strip()[:120] if isinstance(value, str) else ""
+
+
+def _clean_carry(value: Any) -> list[str]:
+    if value == "all" or (isinstance(value, list) and "all" in value):
+        return list(CARRY_OVER)
+    return [v for v in CARRY_OVER if isinstance(value, list) and v in value]
+
+
+def _validate_create_board(raw: dict[str, Any], character_ids: set,
+                           source: str | None) -> dict[str, Any] | None:
+    name = _clean_name(raw.get("name"))
+    if not name:
+        return None
+    carry = _clean_carry(raw.get("carryOver"))
+    action: dict[str, Any] = {"tool": "create_board", "name": name, "carryOver": carry}
+    if source:
+        action["from"] = source
+    fields = _clean_fields(raw.get("fields"), BOARD_FIELDS)
+    if fields:
+        action["fields"] = fields
+    raw_characters = raw.get("characters")
+    characters = [
+        fields for fields in (
+            _clean_fields(c, CHARACTER_FIELDS)
+            for c in (raw_characters if isinstance(raw_characters, list) else [])
+        ) if fields.get("name")
+    ]
+    if characters:
+        action["characters"] = characters[:24]
+    # Only carried-over cast keep their ids on the new board; a new
+    # character's id does not exist until the browser makes it.
+    usable = character_ids if "cast" in carry else set()
+    raw_shots = raw.get("shots")
+    shots = []
+    for shot in raw_shots if isinstance(raw_shots, list) else []:
+        fields = _clean_fields(shot, SHOT_FIELDS)
+        if "characterIds" in fields:
+            fields["characterIds"] = [v for v in fields["characterIds"] if v in usable]
+        if fields:
+            shots.append(fields)
+    if shots:
+        action["shots"] = shots[:24]
+    return action
+
+
+def validate_actions(
+    actions: Any, board: dict[str, Any], board_slugs: set[str] | None = None,
+    current_slug: str | None = None, load_board=None,
+) -> list[dict[str, Any]]:
+    """Allow-list model proposals before they reach browser state.
+
+    *board_slugs* are the project's other boards; *current_slug* is the open
+    one. Without them, open_board, delete_board and copying from another
+    board have nothing valid to point at and are dropped. *load_board*
+    (slug -> board) resolves another board's cast, so a new board's shots
+    copied from it can be checked against real character ids.
+    """
     if not isinstance(actions, list):
         return []
+    board_slugs = board_slugs or set()
+
+    def source_cast(slug: Any) -> set | None:
+        """Character ids of the board a copy reads from, or None if invalid."""
+        if not slug or slug == current_slug:
+            return character_ids
+        if slug not in board_slugs or load_board is None:
+            return None
+        try:
+            return {c.get("id") for c in load_board(slug).get("characters") or []}
+        except Exception:  # noqa: BLE001 — an unreadable board is not a source
+            return None
+
     shot_ids = {s.get("id") for s in board.get("shots") or []}
     character_ids = {c.get("id") for c in board.get("characters") or []}
     clean: list[dict[str, Any]] = []
@@ -740,7 +911,26 @@ def validate_actions(actions: Any, board: dict[str, Any]) -> list[dict[str, Any]
         if not isinstance(raw, dict):
             continue
         tool = raw.get("tool")
-        if tool == "set_board_fields":
+        if tool == "create_board":
+            source = raw.get("from") if raw.get("from") != current_slug else None
+            cast = source_cast(source)
+            action = (_validate_create_board(raw, cast, source)
+                      if cast is not None else None)
+            if action:
+                clean.append(action)
+        elif tool == "copy_from_board" and raw.get("slug") in board_slugs:
+            carry = _clean_carry(raw.get("carryOver"))
+            if carry:
+                clean.append({"tool": tool, "slug": raw["slug"], "carryOver": carry})
+        elif tool == "open_board" and raw.get("slug") in board_slugs:
+            clean.append({"tool": tool, "slug": raw["slug"]})
+        elif tool == "rename_board" and _clean_name(raw.get("name")):
+            clean.append({"tool": tool, "name": _clean_name(raw["name"])})
+        elif tool == "delete_board" and (
+                raw.get("slug") in board_slugs
+                or (current_slug and raw.get("slug") == current_slug)):
+            clean.append({"tool": tool, "slug": raw["slug"]})
+        elif tool == "set_board_fields":
             fields = _clean_fields(raw.get("fields"), BOARD_FIELDS)
             if fields:
                 clean.append({"tool": tool, "fields": fields})
@@ -795,6 +985,11 @@ def _separate_render_from_edits(actions: list[dict[str, Any]]) -> tuple[list[dic
         "set_board_fields", "add_character", "update_character",
         "add_shot", "update_shot",
     }
+    # A board management action switches, renames or removes the board the
+    # rest of the proposal would land on, so it only ever applies alone.
+    board_action = next((a for a in actions if a.get("tool") in BOARD_TOOLS), None)
+    if board_action is not None:
+        return [board_action], False
     if not any(action.get("tool") in edit_tools for action in actions):
         return actions, False
     filtered = [action for action in actions if action.get("tool") != "start_render"]
@@ -821,6 +1016,9 @@ def _first_json_object(text: str) -> Any:
     return doc
 
 
+EMPTY_REPLY = "The model returned an empty response."
+
+
 def _parse_reply(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     # A thinking model that ignores the enable_thinking=False request (older
@@ -834,13 +1032,18 @@ def _parse_reply(raw: str) -> dict[str, Any]:
         text = fenced.group(1).strip()
     doc = _first_json_object(text)
     if doc is None:
-        return {"message": text or "The model returned an empty response.", "actions": [], "search": ""}
+        return {"message": text or EMPTY_REPLY, "actions": [],
+                "search": "", "read": []}
     if not isinstance(doc, dict):
-        return {"message": text, "actions": [], "search": ""}
+        return {"message": text, "actions": [], "search": "", "read": []}
+    read = doc.get("read")
+    if isinstance(read, str):
+        read = [read]
     return {
         "message": str(doc.get("message") or "").strip(),
         "actions": doc.get("actions"),
         "search": str(doc.get("search") or "").strip(),
+        "read": [v for v in read if isinstance(v, str)] if isinstance(read, list) else [],
     }
 
 
@@ -852,7 +1055,16 @@ def chat(
     data_dir: Path | None = None,
     timings=None,
     memory_path: Path | None = None,
+    slug: str | None = None,
+    other_boards: list[dict[str, Any]] | None = None,
+    load_board=None,
 ) -> dict[str, Any]:
+    """One Storyboard AD turn.
+
+    *other_boards* is the project's board listing (``Store.list_boards``)
+    without the open board; *load_board* (slug -> board) lets the AD read
+    one of them in full and lets validation check a copy's source cast.
+    """
     message = (message or "").strip()
     if not message:
         raise ValueError("message is required")
@@ -868,11 +1080,45 @@ def chat(
     summary, recent = ad_memory.condense(service, cleaned, memory_path)
     with tempfile.TemporaryDirectory(prefix="sbv-ad-frames-") as tmp:
         return _chat_turn(service, board, message, selected_id, search_url,
-                          data_dir, timings, summary, recent, Path(tmp))
+                          data_dir, timings, summary, recent, Path(tmp),
+                          slug, other_boards or [], load_board)
+
+
+def _other_boards_context(other_boards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"slug": b.get("slug"), "name": b.get("name"), "shots": b.get("shots", 0)}
+            for b in other_boards]
+
+
+def _read_boards(slugs: list[str], other_boards: list[dict[str, Any]], load_board) -> str:
+    """The requested boards as compact JSON blocks, for the AD's second turn.
+
+    Only slugs from the listing are honoured, so the model cannot read a path
+    of its choosing. Render estimates are left out: they are about this
+    machine's queue, not about what a board says.
+    """
+    known = {b.get("slug") for b in other_boards}
+    blocks = []
+    for slug in list(dict.fromkeys(slugs))[:MAX_READ_BOARDS]:
+        if slug not in known or load_board is None:
+            blocks.append(f"BOARD {slug}: not one of OTHER STORYBOARDS.")
+            continue
+        try:
+            context = compact_board_context(load_board(slug))
+        except Exception as exc:  # noqa: BLE001 — say so rather than fail the turn
+            blocks.append(f"BOARD {slug}: could not be read ({exc}).")
+            continue
+        for shot in context["shots"]:
+            shot.pop("needsRender", None)
+            shot.pop("estimatedRenderSeconds", None)
+        context.pop("selectedShotId", None)
+        blocks.append(f"BOARD {slug} (compact JSON):\n"
+                      + json.dumps(context, ensure_ascii=False, separators=(",", ":")))
+    return "\n\n".join(blocks)
 
 
 def _chat_turn(service, board, message, selected_id, search_url, data_dir,
-               timings, summary, recent, frames_dir: Path) -> dict[str, Any]:
+               timings, summary, recent, frames_dir: Path,
+               slug=None, other_boards=(), load_board=None) -> dict[str, Any]:
     images, image_labels = _chat_reference_images(board, selected_id, data_dir)
     clip_images, clip_labels = _chat_clip_frames(
         board, selected_id, message, data_dir, frames_dir)
@@ -906,6 +1152,8 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
         + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
         + "\n\nCURRENT STORYBOARD (compact JSON):\n"
         + json.dumps(compact_board_context(board, selected_id, timings), ensure_ascii=False, separators=(",", ":"))
+        + "\n\nOTHER STORYBOARDS:\n"
+        + json.dumps(_other_boards_context(other_boards), ensure_ascii=False, separators=(",", ":"))
         + visual_context
         + "\n\nUSER:\n" + message
     )
@@ -916,18 +1164,38 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
     )) if images else (lambda prompt: service.complete(
         system, prompt, timeout=300.0, max_tokens=CHAT_MAX_TOKENS
     ))
-    parsed = _parse_reply(complete(user))
+    def ask(prompt: str) -> dict[str, Any]:
+        # A local model occasionally returns nothing at all (seen on a long
+        # storyline pitch after a board read); one retry usually answers,
+        # where showing the user "empty response" never does.
+        reply = _parse_reply(complete(prompt))
+        if reply["message"] == EMPTY_REPLY:
+            reply = _parse_reply(complete(prompt))
+        return reply
+
+    parsed = ask(user)
     query = parsed.get("search") if search_url else ""
-    if query:
-        results = web_search(search_url, query)
-        followup = (
-            user
-            + f"\n\nSEARCH RESULTS for \"{query}\":\n" + format_search_results(results)
-            + "\n\nAnswer the user now using these results if they help; say "
-              "so plainly if they don't. Do not request another search."
-        )
-        parsed = _parse_reply(complete(followup))
-    actions = validate_actions(parsed.get("actions"), board)
+    reads = parsed.get("read") or []
+    if query or reads:
+        # One follow-up turn answers both, so asking for a search and a board
+        # read together still costs a single extra round trip.
+        followup = user
+        if reads:
+            followup += ("\n\nREQUESTED STORYBOARDS:\n"
+                         + _read_boards(reads, list(other_boards), load_board))
+        if query:
+            results = web_search(search_url, query)
+            followup += (f"\n\nSEARCH RESULTS for \"{query}\":\n"
+                         + format_search_results(results))
+        followup += ("\n\nAnswer the user now using what was requested above; say "
+                     "so plainly if it didn't help. Do not request another search "
+                     "or board read.")
+        parsed = ask(followup)
+    actions = validate_actions(
+        parsed.get("actions"), board,
+        board_slugs={b.get("slug") for b in other_boards},
+        current_slug=slug, load_board=load_board,
+    )
     actions, render_removed = _separate_render_from_edits(actions)
     response_message = parsed["message"] or "I prepared the requested storyboard changes."
     if render_removed:
