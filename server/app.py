@@ -992,6 +992,9 @@ class Handler(BaseHTTPRequestHandler):
                 data_dir=ctx.data_dir,
                 timings=ctx.orch.timings,
                 memory_path=ctx.store.project_dir(slug) / AD_MEMORY_FILE,
+                slug=slug,
+                other_boards=[b for b in ctx.store.list_boards() if b["slug"] != slug],
+                load_board=ctx.store.load,
             ))
 
         if path == "/api/describe-character":

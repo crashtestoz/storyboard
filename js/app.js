@@ -768,6 +768,16 @@ function proposalDetailFields(action) {
   if (action.tool === "set_board_fields") {
     return Object.entries(action.fields || {}).map(([k, v]) => ({ label: k, before: state.board[k], after: v }));
   }
+  if (action.tool === "create_board") {
+    return [
+      ...Object.entries(action.fields || {}).map(([k, v]) => ({ label: k, before: undefined, after: v })),
+      ...(action.characters || []).map((c) => ({ label: "new cast", before: undefined, after: `${c.name}: ${c.description || ""}` })),
+      ...(action.shots || []).map((sh, i) => ({
+        label: `shot ${i + 1}`, before: undefined,
+        after: [sh.title, sh.prompt, sh.dialogue && `Dialogue: ${sh.dialogue}`].filter(Boolean).join("\n"),
+      })),
+    ];
+  }
   return null;
 }
 
@@ -799,6 +809,16 @@ function proposalSummary(action) {
   }
   if (action.tool === "stop_render") return "Stop the current render";
   if (action.tool === "assemble") return "Assemble the final cut";
+  const carried = (action.carryOver || []).length
+    ? ` with ${action.carryOver.join(", ")} from “${boardName(action.from || action.slug || state.slug)}”` : "";
+  if (action.tool === "create_board") {
+    const n = (action.shots || []).length;
+    return `Create storyboard “${action.name}”${carried}${n ? `, ${n} opening shot${n === 1 ? "" : "s"}` : ""}`;
+  }
+  if (action.tool === "copy_from_board") return `Copy ${action.carryOver.join(", ")} from “${boardName(action.slug)}” into this board`;
+  if (action.tool === "open_board") return `Open storyboard “${boardName(action.slug)}”`;
+  if (action.tool === "rename_board") return `Rename this storyboard to “${action.name}”`;
+  if (action.tool === "delete_board") return `Delete storyboard “${boardName(action.slug)}”`;
   return action.tool;
 }
 
@@ -871,10 +891,19 @@ function renderAssistantChat() {
         const apply = el("button", "btn btn-sm btn-primary", "Apply changes");
         apply.addEventListener("click", async () => {
           apply.disabled = true;
+          const slugBefore = state.slug;
           try {
-            const messages = await applyAssistantActions(turn.actions);
+            const { messages, movedTo } = await applyAssistantActions(turn.actions);
             turn.applied = true;
-            persistChat(state.slug);
+            // The turn belongs to the board it was proposed on, which a
+            // rename has since moved to the new slug.
+            persistChat(state.chats[slugBefore] ? slugBefore : state.slug);
+            if (movedTo) {
+              // A new board picks up the conversation that created it, so
+              // the AD can keep building there without being re-briefed.
+              state.chats[movedTo] = JSON.parse(JSON.stringify(state.chats[slugBefore] || []));
+              persistChat(movedTo);
+            }
             render();
             renderAssistantChat();
             if (messages.length) messages.forEach((m) => toast(m));
@@ -907,8 +936,8 @@ function assistantId(prefix) {
   return prefix + tail;
 }
 
-function assistantShot(fields) {
-  const d = state.board.defaults || {};
+function assistantShot(fields, defaults) {
+  const d = defaults || state.board.defaults || {};
   return Object.assign({
     id: assistantId("s"), title: "New shot", prompt: "", soundNote: "",
     characterIds: [], dialogue: "", dialogueSource: "recording", dialogueStyle: "",
@@ -988,10 +1017,121 @@ async function runAssistantOperation(action) {
   return "";
 }
 
+// Storyboard AD's whole-board actions. The server always proposes one alone
+// (see BOARD_TOOLS in server/storyboard_chat.py), since each switches,
+// renames or removes the board any other action would have landed on.
+const BOARD_TOOLS = new Set([
+  "create_board", "open_board", "rename_board", "delete_board", "copy_from_board",
+]);
+
+// Board settings that make two boards look and sound like one show, by the
+// carryOver group that copies them. Keep the group names in step with
+// CARRY_OVER in server/storyboard_chat.py.
+const CARRY_STYLE_FIELDS = ["sceneDescription", "renderStyle", "soundscape", "styleRefs"];
+const CARRY_SETTINGS_FIELDS = ["soundscapeInShots"];
+
+/* Copies the chosen continuity groups from `source` onto `target`, in place.
+   Cast keep their ids, so shots written against the source's cast work on
+   the target unchanged; a portrait or style reference that still points
+   into the source's folder is copied into the target's own folder the next
+   time the server loads it (Store._rehome_media). */
+function carryOverBoard(source, target, carry) {
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  if (carry.includes("cast")) {
+    target.characters = target.characters || [];
+    (source.characters || []).forEach((c) => {
+      const i = target.characters.findIndex((x) => x.id === c.id);
+      if (i >= 0) target.characters[i] = clone(c);
+      else target.characters.push(clone(c));
+    });
+  }
+  if (carry.includes("style")) {
+    CARRY_STYLE_FIELDS.forEach((k) => { if (k in source) target[k] = clone(source[k]); });
+  }
+  if (carry.includes("settings")) {
+    target.defaults = Object.assign(target.defaults || {}, clone(source.defaults || {}));
+    CARRY_SETTINGS_FIELDS.forEach((k) => { if (k in source) target[k] = clone(source[k]); });
+  }
+}
+
+async function refreshBoardList() {
+  state.boards = (await API.listBoards()).boards;
+  renderBoardPicker();
+}
+
+function boardName(slug) {
+  if (slug === state.slug && state.board) return state.board.name;
+  const b = (state.boards || []).find((x) => x.slug === slug);
+  return b ? b.name : slug;
+}
+
+/* Runs one whole-board action. Returns {message, movedTo}: movedTo is the
+   slug of a board this created, so the caller can carry the conversation
+   over to it. Unsaved edits on the open board are saved first, since every
+   one of these either leaves the board or reloads it. */
+async function runBoardAction(action) {
+  if (action.tool === "create_board") {
+    await saveNow();
+    const source = !action.from || action.from === state.slug
+      ? state.board : (await API.getBoard(action.from)).board;
+    const { slug, board } = await API.createBoard(action.name);
+    carryOverBoard(source, board, action.carryOver || []);
+    Object.assign(board, action.fields || {});
+    (action.characters || []).forEach((c) => board.characters.push(Object.assign({
+      id: assistantId("c"), name: "", description: "", image: null, voice: null, voiceText: "",
+    }, c)));
+    board.shots = (action.shots || []).map((s) => assistantShot(s, board.defaults));
+    await API.saveBoard(slug, board);
+    await refreshBoardList();
+    await openBoard(slug);
+    return { message: `Created and opened “${action.name}”.`, movedTo: slug };
+  }
+  if (action.tool === "copy_from_board") {
+    const { board: source } = await API.getBoard(action.slug);
+    carryOverBoard(source, state.board, action.carryOver);
+    markDirty();
+    await saveNow();
+    // Reload, so a copied portrait or style reference comes back already
+    // rehomed into this board's own folder.
+    await openBoard(state.slug);
+    return { message: `Copied ${action.carryOver.join(", ")} from “${source.name}”.` };
+  }
+  if (action.tool === "open_board") {
+    await saveNow();
+    await openBoard(action.slug);
+    renderBoardPicker();
+    return { message: `Opened “${state.board.name}”.` };
+  }
+  if (action.tool === "rename_board") {
+    await renameCurrentBoard(action.name);
+    return { message: `Renamed to “${state.board.name}”.` };
+  }
+  if (action.tool === "delete_board") {
+    const name = boardName(action.slug);
+    if (!confirm(`Storyboard AD wants to delete storyboard “${name}”.\n\nThis cannot be undone in the app. Videos and reference files will remain on disk.`)) {
+      throw new Error("deletion cancelled");
+    }
+    if (action.slug === state.slug) {
+      await deleteCurrentBoard(name);   // reloads the page
+      return { message: "" };
+    }
+    await API.deleteBoard(action.slug, name);
+    clearPersistedChat(action.slug);
+    await refreshBoardList();
+    return { message: `Deleted “${name}”.` };
+  }
+  return { message: "" };
+}
+
 /* Field edits apply first (in memory) so a render or dub proposed in the
    same turn picks up whatever was just changed — e.g. "update the dialogue
    for shot 2 and render it" should render the new line, not the old one. */
 async function applyAssistantActions(actions) {
+  const boardAction = actions.find((a) => BOARD_TOOLS.has(a.tool));
+  if (boardAction) {
+    const { message, movedTo } = await runBoardAction(boardAction);
+    return { messages: message ? [message] : [], movedTo };
+  }
   const editActions = actions.filter((a) => !OPERATION_TOOLS.has(a.tool));
   const opActions = actions.filter((a) => OPERATION_TOOLS.has(a.tool));
   applyBoardEditActions(editActions);
@@ -1000,7 +1140,7 @@ async function applyAssistantActions(actions) {
   for (const action of opActions) {
     messages.push(await runAssistantOperation(action));
   }
-  return messages.filter(Boolean);
+  return { messages: messages.filter(Boolean) };
 }
 
 const AD_THINKING_LINES = [
@@ -2760,9 +2900,9 @@ function paintProjPath() {
 
 async function deleteProject() {
   if (!state.board || state.deletingBoard) return;
-  const { slug, board } = state;
-  if (state.dialoguePreparing || state.status?.busy || state.status?.stills?.busy) {
-    toast("Wait for rendering or dialogue preparation to finish before deleting a storyboard.", "warn");
+  const { board } = state;
+  if (boardBusyReason()) {
+    toast(boardBusyReason(), "warn");
     return;
   }
   const typed = prompt(
@@ -2775,6 +2915,25 @@ async function deleteProject() {
     return;
   }
   if (!confirm(`Permanently delete storyboard “${board.name}”?\n\nThis cannot be undone in the app. Videos and reference files will remain on disk.`)) return;
+  try {
+    await deleteCurrentBoard(typed);
+  } catch (err) {
+    toast(`Delete failed: ${err.message}`, "error");
+  }
+}
+
+function boardBusyReason() {
+  return state.dialoguePreparing || state.status?.busy || state.status?.stills?.busy
+    ? "Wait for rendering or dialogue preparation to finish before deleting a storyboard."
+    : "";
+}
+
+/* Deletes the open board once the caller has confirmed it, then reloads the
+   page. Shared by the Delete button and Storyboard AD's delete_board; throws
+   rather than toasting, so each caller reports failure its own way. */
+async function deleteCurrentBoard(confirmName) {
+  if (boardBusyReason()) throw new Error(boardBusyReason());
+  const { slug } = state;
   state.deletingBoard = true;
   const btn = $("#btnDeleteBoard");
   btn.disabled = true;
@@ -2782,7 +2941,7 @@ async function deleteProject() {
   try {
     // Let already-sent saves finish before removing the board.
     await Promise.allSettled([...state.pendingSaves]);
-    await API.deleteBoard(slug, typed);
+    await API.deleteBoard(slug, confirmName);
     stopPolling();
     state.slug = null;
     state.board = null;
@@ -2793,8 +2952,8 @@ async function deleteProject() {
   } catch (err) {
     state.deletingBoard = false;
     btn.disabled = false;
-    toast(`Delete failed: ${err.message}`, "error");
     if (state.dirty) markDirty();
+    throw err;
   }
 }
 
@@ -2807,33 +2966,39 @@ async function renameProject() {
   const was = btn.textContent;
   btn.textContent = "renaming…";
   try {
-    // Any unsaved edits must land first: the rename reloads the board from
-    // disk, and would otherwise discard them.
-    await saveNow();
-    const oldSlug = state.slug;
-    const r = await API.renameBoard(state.slug, name);
-    state.slug = r.slug;
-    state.board = r.board;
-    // Renaming moves the project's folder, and the chat's storage key
-    // follows it — otherwise a refresh would find no history under the new
-    // slug and stale history sitting orphaned under the old one.
-    if (r.slug !== oldSlug) {
-      state.chats[r.slug] = state.chats[oldSlug] || loadPersistedChat(oldSlug);
-      delete state.chats[oldSlug];
-      persistChat(r.slug);
-      clearPersistedChat(oldSlug);
-    }
-    state.boards = (await API.listBoards()).boards;
-    state.sig = null;
-    render();
-    paintProjPath();
-    toast(`Renamed to “${r.board.name}”.`);
+    await renameCurrentBoard(name);
+    toast(`Renamed to “${state.board.name}”.`);
   } catch (err) {
     toast(`Rename failed: ${err.message}`, "error");
     btn.disabled = false;
   } finally {
     btn.textContent = was;
   }
+}
+
+/* Shared by the Rename button and Storyboard AD's rename_board. */
+async function renameCurrentBoard(name) {
+  // Any unsaved edits must land first: the rename reloads the board from
+  // disk, and would otherwise discard them.
+  await saveNow();
+  const oldSlug = state.slug;
+  const r = await API.renameBoard(state.slug, name);
+  state.slug = r.slug;
+  state.board = r.board;
+  rememberLastOpened(r.slug);
+  // Renaming moves the project's folder, and the chat's storage key
+  // follows it — otherwise a refresh would find no history under the new
+  // slug and stale history sitting orphaned under the old one.
+  if (r.slug !== oldSlug) {
+    state.chats[r.slug] = state.chats[oldSlug] || loadPersistedChat(oldSlug);
+    delete state.chats[oldSlug];
+    persistChat(r.slug);
+    clearPersistedChat(oldSlug);
+  }
+  state.boards = (await API.listBoards()).boards;
+  state.sig = null;
+  render();
+  paintProjPath();
 }
 
 async function saveDataDirAndRestart() {

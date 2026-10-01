@@ -252,6 +252,118 @@ class StoryboardChatTests(unittest.TestCase):
         self.assertEqual(result["message"], "Still not sure.")
 
 
+class BoardManagementTests(unittest.TestCase):
+    """The AD can see, read, create, copy, open, rename and delete boards."""
+
+    def setUp(self):
+        self.board = default_board("Echoes Ep1")
+        self.elias = default_character("Elias", "Mid-forties, unkempt hair.")
+        self.board["characters"] = [self.elias]
+        self.board["shots"] = [default_shot(self.board["defaults"])]
+        self.sequel = default_board("Echoes Ep2")
+        self.mara = default_character("Mara", "Long dark hair.")
+        self.sequel["characters"] = [self.mara]
+        self.other = [{"slug": "echoes-ep2", "name": "Echoes Ep2", "shots": 0},
+                      {"slug": "falcon", "name": "Falcon", "shots": 6}]
+        self.slugs = {b["slug"] for b in self.other}
+        self.boards = {"echoes-ep2": self.sequel}
+
+    def validate(self, actions):
+        return validate_actions(actions, self.board, self.slugs, "echoes-ep1",
+                                load_board=self.boards.__getitem__)
+
+    def test_create_board_carries_continuity_and_checks_cast_ids(self):
+        [action] = self.validate([{
+            "tool": "create_board", "name": "Echoes Ep3",
+            "carryOver": ["cast", "style", "settings", "bogus"],
+            "fields": {"sceneDescription": "New city.", "shots": "nope"},
+            "characters": [{"name": "Kessler"}, {"description": "no name"}],
+            "shots": [{"title": "Wake", "characterIds": [self.elias["id"], "c-made-up"],
+                       "outputs": ["must not pass"]}],
+        }])
+        self.assertEqual(action["carryOver"], ["cast", "style", "settings"])
+        self.assertNotIn("from", action)
+        self.assertEqual(action["fields"], {"sceneDescription": "New city."})
+        self.assertEqual(action["characters"], [{"name": "Kessler"}])
+        self.assertEqual(action["shots"], [{"title": "Wake", "characterIds": [self.elias["id"]]}])
+
+    def test_all_expands_and_cast_ids_need_cast_carried(self):
+        [all_of_it] = self.validate([{"tool": "create_board", "name": "A", "carryOver": "all"}])
+        self.assertEqual(all_of_it["carryOver"], ["cast", "style", "settings"])
+        [no_cast] = self.validate([{"tool": "create_board", "name": "B", "carryOver": ["style"],
+                                    "shots": [{"title": "x", "characterIds": [self.elias["id"]]}]}])
+        self.assertEqual(no_cast["shots"], [{"title": "x", "characterIds": []}])
+
+    def test_create_board_from_another_board_checks_that_boards_cast(self):
+        [action] = self.validate([{
+            "tool": "create_board", "name": "Ep3", "from": "echoes-ep2", "carryOver": ["cast"],
+            "shots": [{"title": "x", "characterIds": [self.mara["id"], self.elias["id"]]}],
+        }])
+        self.assertEqual(action["from"], "echoes-ep2")
+        self.assertEqual(action["shots"][0]["characterIds"], [self.mara["id"]])
+        self.assertEqual(self.validate([{"tool": "create_board", "name": "x", "from": "nowhere"}]), [])
+
+    def test_slug_actions_need_a_known_board(self):
+        self.assertEqual(self.validate([
+            {"tool": "open_board", "slug": "falcon"},
+            {"tool": "open_board", "slug": "../etc"},
+            {"tool": "delete_board", "slug": "echoes-ep1"},
+            {"tool": "delete_board", "slug": "missing"},
+            {"tool": "copy_from_board", "slug": "echoes-ep2", "carryOver": ["cast"]},
+            {"tool": "copy_from_board", "slug": "echoes-ep2", "carryOver": []},
+            {"tool": "rename_board", "name": "  Echoes Pilot  "},
+            {"tool": "rename_board", "name": ""},
+        ]), [
+            {"tool": "open_board", "slug": "falcon"},
+            {"tool": "delete_board", "slug": "echoes-ep1"},
+            {"tool": "copy_from_board", "slug": "echoes-ep2", "carryOver": ["cast"]},
+            {"tool": "rename_board", "name": "Echoes Pilot"},
+        ])
+
+    def test_board_action_always_applies_alone(self):
+        model = FakeLLM(json.dumps({"message": "New episode.", "actions": [
+            {"tool": "add_shot", "shot": {"title": "Stray"}},
+            {"tool": "create_board", "name": "Ep3", "carryOver": "all"},
+            {"tool": "open_board", "slug": "falcon"},
+            {"tool": "start_render"},
+        ]}))
+        result = chat(model, self.board, "Start episode 3", slug="echoes-ep1",
+                      other_boards=self.other, load_board=self.boards.__getitem__)
+        self.assertEqual([a["tool"] for a in result["actions"]], ["create_board"])
+
+    def test_other_boards_are_listed_and_can_be_read(self):
+        model = FakeLLM([
+            json.dumps({"message": "Reading.", "actions": [], "read": ["echoes-ep2", "../secret"]}),
+            json.dumps({"message": "Mara is in Ep2.", "actions": [], "read": ["falcon"]}),
+        ])
+        result = chat(model, self.board, "Who is in Ep2?", slug="echoes-ep1",
+                      other_boards=self.other, load_board=self.boards.__getitem__)
+        self.assertIn("OTHER STORYBOARDS", model.calls[0][1])
+        self.assertIn('"slug":"falcon"', model.calls[0][1])
+        self.assertEqual(len(model.calls), 2)          # no second read round
+        followup = model.calls[1][1]
+        self.assertIn("BOARD echoes-ep2 (compact JSON)", followup)
+        self.assertIn("Long dark hair.", followup)
+        self.assertIn("BOARD ../secret: not one of OTHER STORYBOARDS.", followup)
+        self.assertEqual(result["message"], "Mara is in Ep2.")
+
+    def test_an_empty_model_reply_is_retried_once(self):
+        model = FakeLLM(["", json.dumps({"message": "Four options.", "actions": []})])
+        result = chat(model, self.board, "Pitch me storylines")
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(result["message"], "Four options.")
+
+    def test_prompt_knows_how_to_develop_storylines_from_a_board(self):
+        for idea in ("Story developer", "open threads", "logline",
+                     "pitch before building", "never retcon"):
+            self.assertIn(idea, CHAT_SYSTEM_PROMPT)
+
+    def test_prompt_no_longer_says_board_management_is_impossible(self):
+        self.assertNotIn("renaming or deleting the board", CHAT_SYSTEM_PROMPT)
+        for tool in ("create_board", "copy_from_board", "open_board", "rename_board", "delete_board"):
+            self.assertIn(f'"tool":"{tool}"', CHAT_SYSTEM_PROMPT)
+
+
 class ConversationMemoryTests(unittest.TestCase):
     """Older turns fold into a cached summary; recent ones stay verbatim."""
 
