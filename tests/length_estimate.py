@@ -144,6 +144,28 @@ class OnlyThisLineTests(unittest.TestCase):
         self.assertIn("never what they say", p)                 # cloned voice clip
         self.assertIn("about 3 seconds of this 10-second clip", p)
 
+    def test_non_speaking_cast_is_told_to_stay_silent(self):
+        from server.backends.vpipe_backend import _resolved_prompt
+        from server.store import default_board, default_character, default_shot
+        board = default_board("B")
+        doc = default_character("Ray", "wild white hair")
+        sam = default_character("Sam", "red puffer vest")
+        board["characters"] = [doc, sam]
+        s = default_shot(board["defaults"])
+        s.update(prompt="Ray leans over.", characterIds=[doc["id"], sam["id"]],
+                 speakerId=doc["id"], dialogue="Come on, get in!", dialogueSource="native")
+        board["shots"] = [s]
+        p = _resolved_prompt(s, board, with_audio=True, model="ref2va")
+        self.assertIn("Sam is on screen but silent", p)
+        self.assertNotIn("Ray is on screen but silent", p)
+        self.assertIn("Sam: red puffer vest", p)               # still cast for the picture
+        self.assertNotIn("previous scene's dialogue has already ended", p)
+
+    def test_chained_shot_opens_without_speech(self):
+        p = self.prompt(dialogueSource="native", frames=124,
+                        startRef={"kind": "chain", "from": "x", "resolved": "b/shots/01/frames/frame-0123.png"})
+        self.assertIn("this clip opens with no speech at all, and nobody talks until Ray starts the line", p)
+
     def test_dubbed_line_is_not_told_to_speak(self):
         p = self.prompt(dialogueSource="recording", frames=124)
         self.assertNotIn("speaks only this one line", p)
