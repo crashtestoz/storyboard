@@ -26,7 +26,9 @@ Responsibilities, in order of how much they matter:
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import json
 import random
 import threading
 import time
@@ -113,6 +115,34 @@ class ShotRun:
         }
 
 
+def _progress_handler(run: ShotRun) -> Callable[[ProgressEvent], None]:
+    """Fold a backend's progress events into *run*'s live state."""
+    def on_event(ev: ProgressEvent) -> None:
+        if ev.percent:
+            run.progress = max(run.progress, ev.percent)
+        now = time.time()
+        if ev.phase and ev.phase_percent is not None:
+            if ev.phase != run.phase or run.phase_started_at is None:
+                run.phase_started_at = now
+            run.phase_reported_at = now
+            run.phase_percent = ev.phase_percent
+        if ev.phase:
+            run.phase = ev.phase
+        if ev.eta_seconds is not None:
+            run.eta_seconds = ev.eta_seconds
+        if ev.log_line:
+            run.last_output_at = now
+            run.log.append({"level": ev.log_level, "text": ev.log_line})
+            if len(run.log) > MAX_LOG_LINES * 2:
+                del run.log[:-MAX_LOG_LINES]
+    return on_event
+
+
+SEED_TAKES_DIR = "seed-takes"
+SEED_TAKE_FILE = "take.json"
+MAX_SEED_TAKES = 8
+
+
 class Orchestrator:
     def __init__(self, backend: Backend, store: Store, workspace: Path,
                  data_dir: Path | None = None,
@@ -179,6 +209,10 @@ class Orchestrator:
         self._project_queue_errors: dict[str, str] = {}
         self._project_batch_active: bool = False
 
+        # Seed comparison — one shot rendered at several seeds into takes
+        # beside it, never over its own clip (see start_seed_sweep).
+        self._seed_sweep: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------ #
     # status
     # ------------------------------------------------------------------ #
@@ -208,6 +242,7 @@ class Orchestrator:
                 "cancelRequested": self._cancel.is_set(),
                 "queuedBecause": dict(self._queued_because),
                 "assembly": self._assembly,
+                "seedSweep": dict(self._seed_sweep) if self._seed_sweep else None,
                 "stills": {
                     "busy": self.stills_busy,
                     "shotId": self._stills_shot_id,
@@ -260,6 +295,7 @@ class Orchestrator:
         board = self.store.load(slug)
         self._cancel.clear()
         self._operation = "dialogue"
+        self._seed_sweep = None
         self._slug = slug
         self._order = [s["id"] for s in board["shots"] if (s.get("dialogue") or "").strip()]
         self._runs = {sid: ShotRun(shot_id=sid) for sid in self._order}
@@ -297,6 +333,7 @@ class Orchestrator:
         either way. Returns ``whole_board`` (whether to assemble after).
         """
         self._operation = "render"
+        self._seed_sweep = None
         board = self.store.load(slug)
         shots = board.get("shots") or []
         # An explicit list is exactly that — the user asked for these shots.
@@ -830,26 +867,7 @@ class Orchestrator:
             self.store.save(slug, fresh_board)
 
         # ---- run -------------------------------------------------------
-        def on_event(ev: ProgressEvent) -> None:
-            if ev.percent:
-                run.progress = max(run.progress, ev.percent)
-            now = time.time()
-            if ev.phase and ev.phase_percent is not None:
-                if ev.phase != run.phase or run.phase_started_at is None:
-                    run.phase_started_at = now
-                run.phase_reported_at = now
-                run.phase_percent = ev.phase_percent
-            if ev.phase:
-                run.phase = ev.phase
-            if ev.eta_seconds is not None:
-                run.eta_seconds = ev.eta_seconds
-            if ev.log_line:
-                run.last_output_at = now
-                run.log.append({"level": ev.log_level, "text": ev.log_line})
-                if len(run.log) > MAX_LOG_LINES * 2:
-                    del run.log[:-MAX_LOG_LINES]
-
-        result = self.backend.run(spec, on_event, self._cancel.is_set)
+        result = self.backend.run(spec, _progress_handler(run), self._cancel.is_set)
         run.ended_at = time.time()
 
         # ---- validate --------------------------------------------------
@@ -947,6 +965,278 @@ class Orchestrator:
         run.log.append(
             {"level": level, "text": f"{validation.verdict}: {validation.reason or 'all checks passed'}"}
         )
+
+    # ------------------------------------------------------------------ #
+    # seed comparison
+    # ------------------------------------------------------------------ #
+
+    def seed_takes_dir(self, slug: str, shot_id: str) -> Path:
+        """Where one shot's seed takes live: keyed by shot id, not position,
+        so reordering the board never hands a shot another shot's takes."""
+        if not shot_id or "/" in shot_id or shot_id.startswith("."):
+            raise ValueError("bad shot id")
+        return self.store.project_dir(slug) / SEED_TAKES_DIR / shot_id
+
+    def _read_take(self, take_dir: Path) -> dict[str, Any] | None:
+        try:
+            return json.loads((take_dir / SEED_TAKE_FILE).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def start_seed_sweep(self, slug: str, shot_id: str, count: int = 4,
+                         seeds: list[int] | None = None) -> dict[str, Any]:
+        """Render one shot at several seeds, each into its own take folder.
+
+        Everything but the seed stays as the board says, so the takes differ
+        only by the starting noise — which is what makes them comparable.
+        None of it touches the shot's own clip, frames or status; a take
+        becomes the shot's clip only when picked (``adopt_seed_take``).
+        Unless *seeds* are given, picks the lowest seeds that are neither the
+        shot's current one nor already a take.
+        """
+        if self.busy:
+            raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("still previews are generating — one GPU job at a time")
+        ok, msg = self.backend.health()
+        if not ok:
+            raise RuntimeError(msg)
+        board = self.store.load(slug)
+        shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+        if shot is None:
+            raise ValueError("no such shot")
+        if seeds:
+            seeds = list(dict.fromkeys(int(n) for n in seeds if 0 <= int(n) < 2**31))
+        else:
+            count = max(1, min(int(count or 0), MAX_SEED_TAKES))
+            taken = {int(shot.get("seed") or 0)}
+            root = self.seed_takes_dir(slug, shot_id)
+            if root.is_dir():
+                taken |= {int(t["seed"]) for d in root.iterdir()
+                          if (t := self._read_take(d)) and "seed" in t}
+            seeds, n = [], 0
+            while len(seeds) < count:
+                if n not in taken:
+                    seeds.append(n)
+                n += 1
+        seeds = seeds[:MAX_SEED_TAKES]
+        if not seeds:
+            raise ValueError("no seeds to render")
+
+        self._cancel.clear()
+        self._operation = "seeds"
+        self._slug = slug
+        self._order = [f"{shot_id}:seed:{n}" for n in seeds]
+        self._runs = {rid: ShotRun(shot_id=rid) for rid in self._order}
+        self._seed_sweep = {"shotId": shot_id, "seeds": seeds, "slug": slug}
+        self._error = ""
+        self._assembly = None
+        self._queued_because = {rid: f"seed comparison — seed {n}" for rid, n in zip(self._order, seeds)}
+        self._batch_started = time.time()
+        self._batch_ended = None
+
+        def work() -> None:
+            try:
+                for rid, n in zip(self._order, seeds):
+                    if self._cancel.is_set():
+                        break
+                    self._run_seed_take(slug, shot_id, n, self._runs[rid])
+                for run in self._runs.values():
+                    if run.status == "queued":
+                        run.status, run.reason = "interrupted", "Stopped before this seed began"
+            except Exception as exc:  # noqa: BLE001 - reported to the UI
+                with self._lock:
+                    self._error = f"{type(exc).__name__}: {exc}"
+            finally:
+                with self._lock:
+                    self._current = None
+                    self._batch_ended = time.time()
+
+        self._thread = threading.Thread(target=work, name="seed-sweep", daemon=True)
+        self._thread.start()
+        return self.status()
+
+    def _run_seed_take(self, slug: str, shot_id: str, seed: int, run: ShotRun) -> None:
+        board = self.store.load(slug)
+        shots = board["shots"]
+        idx = next((i for i, s in enumerate(shots) if s["id"] == shot_id), None)
+        if idx is None:
+            run.status, run.reason = "failed", "the shot was deleted"
+            return
+        # A copy: the board's own shot keeps its seed and its chain refs as
+        # they were — only this take renders with the new seed.
+        shot = copy.deepcopy(shots[idx])
+        shot["seed"] = seed
+        with self._lock:
+            self._current = run.shot_id
+        problem = self._resolve_chain(shot, shots, slug)
+        if problem:
+            run.status, run.reason = "blocked", problem
+            run.log.append({"level": "WARN", "text": problem})
+            return
+
+        take_dir = self.seed_takes_dir(slug, shot_id) / f"seed-{seed}"
+        if take_dir.exists():
+            shutil.rmtree(take_dir)
+        take_dir.mkdir(parents=True)
+        # A dubbed line's take lives with the shot; the take needs its own
+        # copy for the render to find it.
+        shot_dir = self.data_dir / self.store.shot_rel_dir(slug, idx + 1)
+        if (shot_dir / "dialogue.wav").is_file():
+            shutil.copy2(shot_dir / "dialogue.wav", take_dir / "dialogue.wav")
+        paths = ShotPaths(
+            workspace=self.workspace,
+            abs_dir=take_dir,
+            rel_dir=str(take_dir.relative_to(self.data_dir)),
+            data_dir=self.data_dir,
+        )
+        try:
+            spec = self.backend.prepare(shot, board, paths)
+        except Exception as exc:  # noqa: BLE001
+            run.status, run.reason = "failed", f"could not prepare: {exc}"
+            run.log.append({"level": "ERROR", "text": run.reason})
+            return
+        spec.expected_seconds = self._expected_seconds(spec) or 0.0
+        spec.started_at = time.time()
+        run.summary = f"seed {seed} · {spec.summary}"
+        run.status = "running"
+        run.started_at = time.time()
+        result = self.backend.run(spec, _progress_handler(run), self._cancel.is_set)
+        run.ended_at = time.time()
+
+        if result.cancelled or self._cancel.is_set():
+            run.status, run.reason = "interrupted", "Stopped before completion."
+            shutil.rmtree(take_dir, ignore_errors=True)
+            return
+        validation = self.backend.validate(spec, result)
+        if self.timings is not None and validation.verdict in ("done", "review"):
+            g = self._geometry(spec)
+            if g:
+                self.timings.record(**g, seconds=result.seconds)
+        run.validation = validation.to_json()
+        run.status, run.reason = validation.verdict, validation.reason
+        run.progress = 100.0 if validation.ok else run.progress
+        self._write_log(take_dir, run, spec, result)
+        run.outputs = [self._as_url(p) for p in spec.expected_outputs if p.exists()]
+        take = {
+            "shotId": shot_id,
+            "seed": seed,
+            "status": validation.verdict,
+            "reason": validation.reason or "",
+            "runtimeSeconds": round(result.seconds, 1),
+            "renderedAt": time.time(),
+            "renderedAs": "draft" if spec.payload.get("draft") else "final",
+            "nativeDialogueSpoken": bool(spec.payload.get("nativeDialogueSpoken")),
+            "fingerprint": render_fingerprint(shot, board),
+            "validation": run.validation,
+            "outputs": [p.name for p in spec.expected_outputs if p.exists()],
+        }
+        (take_dir / SEED_TAKE_FILE).write_text(json.dumps(take, indent=2) + "\n")
+        run.log.append({"level": "OK" if validation.ok else "ERROR",
+                        "text": f"seed {seed}: {validation.verdict}: {validation.reason or 'all checks passed'}"})
+
+    def seed_takes(self, slug: str, shot_id: str) -> list[dict[str, Any]]:
+        """This shot's finished seed takes, lowest seed first.
+
+        ``current`` says whether a take still matches what the board says
+        now, apart from its seed — a take of an older prompt is still worth
+        seeing, but not worth mistaking for a comparison of this one.
+        """
+        board = self.store.load(slug)
+        shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
+        root = self.seed_takes_dir(slug, shot_id)
+        if shot is None or not root.is_dir():
+            return []
+        out = []
+        for d in root.iterdir():
+            take = self._read_take(d)
+            if not take or "seed" not in take:
+                continue
+            probe = dict(shot, seed=take["seed"])
+            clip = next((d / n for n in take.get("outputs") or [] if (d / n).is_file()), None)
+            frames = sorted((d / "frames").glob("*.png")) if (d / "frames").is_dir() else []
+            out.append({
+                **{k: take.get(k) for k in ("seed", "status", "reason", "runtimeSeconds",
+                                            "renderedAt", "renderedAs")},
+                "current": take.get("fingerprint") == render_fingerprint(probe, board),
+                "clipUrl": self._as_url(clip) if clip else None,
+                "thumbUrl": self._as_url(frames[len(frames) // 2]) if frames else None,
+                "logUrl": self._as_url(d / "run.log") if (d / "run.log").is_file() else None,
+            })
+        return sorted(out, key=lambda t: t["seed"])
+
+    def delete_seed_takes(self, slug: str, shot_id: str) -> int:
+        if self.busy and (self._seed_sweep or {}).get("shotId") == shot_id:
+            raise RuntimeError("this shot's seeds are still rendering")
+        root = self.seed_takes_dir(slug, shot_id)
+        n = sum(1 for d in root.iterdir() if d.is_dir()) if root.is_dir() else 0
+        shutil.rmtree(root, ignore_errors=True)
+        return n
+
+    def adopt_seed_take(self, slug: str, shot_id: str, seed: int) -> dict[str, Any]:
+        """Make one seed take the shot's own clip, as if it had rendered there.
+
+        Copies its clip, frames and log into the shot's folder and sets the
+        shot's seed, so the pick costs a file copy rather than another
+        render. The take's fingerprint carries over: if the board has moved
+        on since the take rendered, the shot shows as out of date, exactly
+        as a normal render would. Shots chained from this one see a new last
+        frame and go stale for the same reason.
+        """
+        if self.busy:
+            raise RuntimeError("wait for the current render to finish")
+        take_dir = self.seed_takes_dir(slug, shot_id) / f"seed-{int(seed)}"
+        take = self._read_take(take_dir)
+        if not take:
+            raise ValueError(f"no take for seed {seed}")
+        if take.get("status") not in ("done", "review"):
+            raise ValueError(f"seed {seed} did not render successfully")
+        clip = next((take_dir / n for n in take.get("outputs") or []
+                     if (take_dir / n).suffix == ".mp4" and (take_dir / n).is_file()), None)
+        if clip is None:
+            raise ValueError(f"seed {seed}'s clip is missing")
+        board = self.store.load(slug)
+        idx = next((i for i, s in enumerate(board["shots"]) if s["id"] == shot_id), None)
+        if idx is None:
+            raise ValueError("no such shot")
+        shot = board["shots"][idx]
+        shot_dir = self.data_dir / self.store.shot_rel_dir(slug, idx + 1)
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_scene_stills(shot_dir)
+        dest = shot_dir / "clip.mp4"
+        shutil.copy2(clip, dest)
+        frames = sorted((take_dir / "frames").glob("*.png")) if (take_dir / "frames").is_dir() else []
+        if frames:
+            (shot_dir / "frames").mkdir(exist_ok=True)
+            for f in frames:
+                shutil.copy2(f, shot_dir / "frames" / f.name)
+        log_url = None
+        if (take_dir / "run.log").is_file():
+            shutil.copy2(take_dir / "run.log", shot_dir / "run.log")
+            log_url = self._as_url(shot_dir / "run.log")
+        named = self._publish_named_artifact(dest, board, idx + 1)
+        copied = sorted((shot_dir / "frames").glob("*.png")) if frames else []
+        native = bool(take.get("nativeDialogueSpoken"))
+        shot.update(
+            seed=int(take["seed"]),
+            status=take["status"],
+            reason=take.get("reason") or "",
+            progress=100,
+            runtimeSeconds=take.get("runtimeSeconds"),
+            outputs=[self._as_url(named)],
+            validation=take.get("validation"),
+            thumb=self._as_url(copied[len(copied) // 2]) if copied else None,
+            logUrl=log_url,
+            stills={},
+            renderedAs=take.get("renderedAs") or "final",
+            renderFingerprint=take.get("fingerprint"),
+            renderedDialogueSource="native" if native else "recording",
+        )
+        if native:
+            shot["dubUrl"] = None
+        else:
+            self._relay_speech(shot, shot_dir, ShotRun(shot_id=shot_id))
+        return self.store.save(slug, board)
 
     # ------------------------------------------------------------------ #
     # after the render

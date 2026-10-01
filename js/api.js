@@ -150,6 +150,17 @@ const API = {
   render: (slug, shotIds, board) =>
     req("POST", "/api/render", { slug, shotIds, board }),
 
+  // Seed comparison: the same shot at several seeds, rendered into takes
+  // beside it — never over its own clip until one is picked.
+  renderSeeds: (slug, shotId, count, board) =>
+    req("POST", "/api/render-seeds", { slug, shotId, count, board }),
+  seedTakes: (slug, shotId) =>
+    req("GET", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes`),
+  adoptSeedTake: (slug, shotId, seed) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes/${seed}/adopt`),
+  deleteSeedTakes: (slug, shotId) =>
+    req("DELETE", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes`),
+
   // Start/mid/end Krea-2 stills for one shot — a fast preview, not a render.
   stills: (slug, shotId) => req("POST", "/api/stills", { slug, shotId }),
 

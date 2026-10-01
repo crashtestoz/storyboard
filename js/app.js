@@ -584,6 +584,17 @@ function view(shot) {
    skipped even though their prompts had been rewritten — and built no video
    at all, while reporting success. A summary has to say what came out. */
 function batchOutcome(status) {
+  if (status.operation === "seeds") {
+    const runs = Object.values(status.runs || {});
+    const ok = runs.filter((r) => r.status === "done" || r.status === "review").length;
+    const bad = runs.length - ok;
+    return {
+      msg: status.cancelRequested
+        ? `Seed comparison stopped — ${ok} take(s) finished.`
+        : `Seed comparison finished — ${ok} of ${runs.length} takes rendered${bad ? `, ${bad} did not` : ""}.`,
+      kind: bad && !status.cancelRequested ? "warn" : "info",
+    };
+  }
   if (status.operation === "dialogue") {
     return {msg: status.error ? `Dialogue preparation failed: ${status.error}` : status.cancelRequested ? "Dialogue preparation stopped." : "Dialogue takes are ready to preview. Video clips were not regenerated.", kind: status.error ? "error" : "info"};
   }
@@ -1459,6 +1470,20 @@ function wireChrome() {
   $("#btnExport").addEventListener("click", () => {
     if (state.slug) window.location.href = API.exportUrl(state.slug);
   });
+  $("#seedClose").addEventListener("click", closeSeedDialog);
+  $("#seedDialog").addEventListener("click", (e) => {
+    if (e.target === $("#seedDialog")) closeSeedDialog();
+  });
+  $("#seedDelete").addEventListener("click", deleteSeedTakes);
+  $("#seedPlayAll").addEventListener("click", () => {
+    const vids = [...$("#seedGrid").querySelectorAll("video")];
+    vids.forEach((v) => { v.pause(); v.currentTime = 0; });
+    vids.forEach((v) => v.play().catch(() => {}));
+  });
+  $("#seedPauseAll").addEventListener("click", () => {
+    $("#seedGrid").querySelectorAll("video").forEach((v) => v.pause());
+  });
+
   $("#btnExportFolder").addEventListener("click", () => {
     if (state.slug) window.location.href = API.exportZipUrl(state.slug);
   });
@@ -2998,7 +3023,24 @@ async function refreshStatus() {
       state.board = res.board;
       const done = wasProjectBatch ? projectBatchOutcome(s) : batchOutcome(s);
       toast(done.msg, done.kind);
+      if (s.operation === "seeds" && s.seedSweep) {
+        await reloadSeedTakes(s.seedSweep.shotId).catch(() => {});
+        // Started from this tab: put the takes in front of whoever asked.
+        if (state.seedSweepWatch === s.seedSweep.shotId && $("#seedDialog").hidden) {
+          openSeedDialog(s.seedSweep.shotId);
+        }
+        state.seedSweepWatch = null;
+      }
     }
+    // A take finishing mid-sweep is worth showing straight away.
+    if (s.busy && s.operation === "seeds" && s.seedSweep) {
+      const doneNow = Object.values(s.runs || {}).filter((r) => !["queued", "running"].includes(r.status)).length;
+      if (doneNow !== state.seedDoneCount) {
+        state.seedDoneCount = doneNow;
+        if (doneNow) await reloadSeedTakes(s.seedSweep.shotId).catch(() => {});
+      }
+    }
+    paintSeedDialog(false);
     if (wasStillsBusy && !stillsBusy) {
       if (!s.busy) stopPolling();
       // the stills, once done, are saved onto the shot server-side
@@ -3037,9 +3079,14 @@ function structuralSig() {
   const busy = !!(state.status && state.status.busy);
   const a = state.status && state.status.assembly;
   const st = state.status && state.status.stills;
+  const sw = state.status && state.status.seedSweep;
   return JSON.stringify([
     busy,
     state.selectedId,
+    sw && state.status.operation === "seeds"
+      ? [sw.shotId, Object.values(state.status.runs || {}).map((r) => r.status),
+         ((state.seedTakes || {})[sw.shotId] || []).length]
+      : null,
     st ? [st.busy, st.shotId, st.phase, st.error] : null,
     // The assembly pass runs after the last shot, so its state moves while
     // nothing else does — without it the final panel would sit on "Joining
@@ -3074,6 +3121,13 @@ function paintLive() {
   $("#btnBatchRender").disabled = busy || stillsBusy || !state.info.backend.healthy;
   $("#btnAssemble").disabled = busy || stillsBusy;
   $("#btnStop").disabled = !busy && !stillsBusy;
+  document.querySelectorAll(".seed-progress").forEach((line) => {
+    const sweep = seedSweepFor(line.dataset.shot);
+    if (!sweep) return;
+    const i = sweep.runs.findIndex(([, r]) => r.status === "running");
+    const done = sweep.runs.filter(([, r]) => !["queued", "running"].includes(r.status)).length;
+    line.textContent = seedProgressText(sweep, i, done);
+  });
   paintMeta();
   paintRenderHint();
 
@@ -5653,6 +5707,7 @@ function renderEditor() {
     params.appendChild(el("div", "inline-warn", `⚠ ${cap.unavailableReason}`));
   }
   host.appendChild(params);
+  if (!isImage) host.appendChild(troubleshootingPanel(raw));
 }
 
 /** The one resolution every shot renders at — a storyboard makes one video. */
@@ -6640,6 +6695,279 @@ function forumSummaryText(shot) {
       (renderSecs && unrendered ? ` (${unrendered} clip${unrendered === 1 ? "" : "s"} not rendered)` : ""),
   );
   return lines.join("\n");
+}
+
+/* ==========================================================================
+   Troubleshooting — seed comparison
+   ========================================================================== */
+
+/* The seed sweep running now, if it is this shot's: {seeds, runs: [[seed, run]]}. */
+function seedSweepFor(shotId) {
+  const st = state.status;
+  const sw = st && st.seedSweep;
+  if (!sw || sw.shotId !== shotId || sw.slug !== state.slug || st.operation !== "seeds") return null;
+  const runs = sw.seeds.map((n) => [n, (st.runs || {})[`${shotId}:seed:${n}`] || { status: "queued" }]);
+  return { seeds: sw.seeds, runs, busy: !!st.busy };
+}
+
+function seedTakesCached(shotId) {
+  const cache = (state.seedTakes = state.seedTakes || {});
+  if (!(shotId in cache)) {
+    cache[shotId] = null;   // in flight
+    API.seedTakes(state.slug, shotId)
+      .then((r) => { cache[shotId] = r.takes || []; renderEditor(); })
+      .catch(() => { cache[shotId] = []; });
+  }
+  return cache[shotId] || [];
+}
+
+async function reloadSeedTakes(shotId) {
+  const r = await API.seedTakes(state.slug, shotId);
+  (state.seedTakes = state.seedTakes || {})[shotId] = r.takes || [];
+  return state.seedTakes[shotId];
+}
+
+function troubleshootingPanel(raw) {
+  const panel = el("div", "panel");
+  panel.style.marginTop = "var(--sp-3)";
+  panel.appendChild(cardHeading("Troubleshooting", "is a problem the prompt, or just this seed?"));
+
+  const takes = seedTakesCached(raw.id);
+  const sweep = seedSweepFor(raw.id);
+  const busy = !!(state.status && state.status.busy);
+  const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
+  const count = state.seedCount || 4;
+
+  const row = el("div", "seed-row");
+  const pick = select([2, 3, 4, 6, 8].map((n) => [String(n), `${n} seeds`]), String(count), (v) => {
+    state.seedCount = Number(v);
+    go.textContent = `Render ${v} seeds`;
+  });
+  const go = el("button", "btn btn-sm", `Render ${count} seeds`);
+  go.disabled = busy || stillsBusy || !state.info.backend.healthy;
+  go.addEventListener("click", () => startSeedSweep(raw));
+  row.append(pick, go);
+  if (takes.length || sweep) {
+    const view = el("button", "btn btn-sm btn-primary",
+      `Compare takes${takes.length ? ` (${takes.length})` : ""}`);
+    view.addEventListener("click", () => openSeedDialog(raw.id));
+    row.appendChild(view);
+  }
+
+  const mins = raw.runtimeSeconds ? Math.round(raw.runtimeSeconds / 60) : 0;
+  panel.appendChild(field("Compare seeds", row,
+    null,
+    `Renders this shot again at other seeds, changing nothing else (its own seed is ${raw.seed || 0}). ` +
+    `If most takes show the problem, fix the prompt; if only some do, pick a good take. ` +
+    (mins ? `Each take takes about as long as a normal render (~${mins} min). ` : "") +
+    `Takes are kept beside the shot — its own clip is not touched until you pick one.`));
+
+  if (sweep) {
+    const i = sweep.runs.findIndex(([, r]) => r.status === "running");
+    const done = sweep.runs.filter(([, r]) => !["queued", "running"].includes(r.status)).length;
+    const line = el("div", "field-note seed-progress");
+    line.dataset.shot = raw.id;
+    line.textContent = seedProgressText(sweep, i, done);
+    panel.appendChild(line);
+  }
+  return panel;
+}
+
+function seedProgressText(sweep, i, done) {
+  if (!sweep.busy) return `Seed comparison finished — ${done} of ${sweep.seeds.length} takes.`;
+  if (i < 0) return `Seed comparison starting — ${sweep.seeds.length} takes queued.`;
+  const [n, r] = sweep.runs[i];
+  return `Rendering seed ${n} (${i + 1} of ${sweep.seeds.length}) — ${Math.round(r.progress || 0)}%` +
+    (r.phase ? ` · ${r.phase}` : "");
+}
+
+async function startSeedSweep(raw) {
+  const issue = dialogueReadiness(raw);
+  try {
+    if (issue && issue.blocking !== false) {
+      if (!canAutoPrepareDialogue(raw)) {
+        showRenderDialogueBlocker([{ raw, issue }]);
+        return;
+      }
+      await prepareDialogueRecordings([{ raw, issue }]);
+    }
+    await saveNow();
+    state.status = await API.renderSeeds(state.slug, raw.id, state.seedCount || 4, state.board);
+    state.seedSweepWatch = raw.id;
+    startPolling();
+    render();
+    openSeedDialog(raw.id);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function openSeedDialog(shotId) {
+  state.seedDialogShot = shotId;
+  $("#seedDialog").hidden = false;
+  try { await reloadSeedTakes(shotId); } catch (err) { toast(err.message, "error"); }
+  paintSeedDialog(true);
+}
+
+function closeSeedDialog() {
+  $("#seedDialog").hidden = true;
+  $("#seedGrid").querySelectorAll("video").forEach((v) => v.pause());
+  state.seedDialogShot = null;
+}
+
+/* Rebuild the grid when the set of takes or a take's status moved; otherwise
+   only the progress text changes, so a playing video is left alone. */
+function paintSeedDialog(force) {
+  const shotId = state.seedDialogShot;
+  if (!shotId || $("#seedDialog").hidden) return;
+  const raw = shotById(shotId);
+  if (!raw) return closeSeedDialog();
+  const takes = (state.seedTakes || {})[shotId] || [];
+  const sweep = seedSweepFor(shotId);
+  const pending = sweep
+    ? sweep.runs.filter(([n, r]) => ["queued", "running"].includes(r.status) ||
+        !takes.some((t) => t.seed === n) && sweep.busy)
+    : [];
+  const sig = JSON.stringify([raw.seed, (raw.outputs || []).join("|"),
+    takes.map((t) => [t.seed, t.status, t.clipUrl, t.current]), pending.map(([n, r]) => [n, r.status])]);
+  const grid = $("#seedGrid");
+  const idx = shots().indexOf(raw);
+  $("#seedDialogTitle").textContent = `Seed comparison — Shot ${idx + 1}${raw.title ? `: ${raw.title}` : ""}`;
+  $("#seedDelete").disabled = !takes.length || !!(sweep && sweep.busy);
+  if (!force && grid.dataset.sig === sig) {
+    pending.forEach(([n, r]) => {
+      const p = grid.querySelector(`[data-pending-seed="${n}"]`);
+      if (p) p.textContent = r.status === "running"
+        ? `Rendering — ${Math.round(r.progress || 0)}%${r.phase ? ` · ${r.phase}` : ""}`
+        : "Queued";
+    });
+    return;
+  }
+  grid.dataset.sig = sig;
+  grid.querySelectorAll("video").forEach((v) => v.pause());
+  grid.textContent = "";
+  const busy = !!(state.status && state.status.busy);
+
+  const tile = (title, status) => {
+    const t = el("div", "seed-tile");
+    const head = el("div", "seed-tile-head");
+    head.appendChild(el("span", null, title));
+    if (status) {
+      const chip = el("span", "chip", STATUS_LABELS[status] || status);
+      chip.dataset.status = status;
+      head.appendChild(chip);
+    }
+    t.appendChild(head);
+    return t;
+  };
+  const player = (t, url, poster) => {
+    const v = el("video");
+    v.src = url;
+    if (poster) v.poster = poster;
+    v.controls = true;
+    v.loop = true;
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    t.appendChild(v);
+    const listen = el("button", "btn btn-sm btn-ghost", "🔈 Listen");
+    listen.title = "Hear this take; every other take is muted";
+    listen.addEventListener("click", () => {
+      grid.querySelectorAll(".seed-tile").forEach((other) => {
+        const ov = other.querySelector("video");
+        const on = other === t && (ov.muted || other.dataset.listening !== "true");
+        if (ov) ov.muted = !on;
+        other.dataset.listening = String(on);
+      });
+      if (!v.muted && v.paused) v.play().catch(() => {});
+    });
+    return listen;
+  };
+
+  const currentVideo = (raw.renderedDialogueSource !== "native" && raw.dubUrl) ||
+    (raw.outputs || []).find((u) => hasExt(u, "mp4"));
+  if (currentVideo) {
+    const t = tile(`Current clip · seed ${raw.seed || 0}`, raw.status);
+    const actions = el("div", "seed-tile-actions");
+    actions.appendChild(player(t, currentVideo, raw.thumb));
+    actions.appendChild(el("span", "field-note", "the shot's own clip"));
+    t.appendChild(actions);
+    grid.appendChild(t);
+  }
+
+  takes.forEach((take) => {
+    const t = tile(`Seed ${take.seed}`, take.status);
+    if (take.clipUrl) {
+      const actions = el("div", "seed-tile-actions");
+      actions.appendChild(player(t, take.clipUrl, take.thumbUrl));
+      const use = el("button", "btn btn-sm btn-primary", "Use this take");
+      use.disabled = busy || !["done", "review"].includes(take.status);
+      use.title = "Make this the shot's clip and seed — no re-render";
+      use.addEventListener("click", () => adoptSeedTake(raw.id, take.seed, use));
+      actions.appendChild(use);
+      if (take.logUrl) {
+        const log = el("a", "btn btn-sm btn-ghost", "Log");
+        log.href = take.logUrl;
+        log.target = "_blank";
+        actions.appendChild(log);
+      }
+      t.appendChild(actions);
+    } else {
+      const ph = el("div", "seed-placeholder", take.reason || "No clip");
+      t.appendChild(ph);
+    }
+    if (!take.current) {
+      t.appendChild(el("div", "seed-tile-note",
+        "⚠ Rendered from older settings — the prompt or references have changed since."));
+    }
+    if (take.renderedAs === "draft") {
+      t.appendChild(el("div", "seed-tile-note", "Draft render — a draft's seed does not carry over to a final render."));
+    }
+    grid.appendChild(t);
+  });
+
+  pending.forEach(([n, r]) => {
+    const t = tile(`Seed ${n}`, r.status);
+    const ph = el("div", "seed-placeholder", r.status === "running"
+      ? `Rendering — ${Math.round(r.progress || 0)}%` : "Queued");
+    ph.dataset.pendingSeed = String(n);
+    t.appendChild(ph);
+    grid.appendChild(t);
+  });
+
+  if (!grid.children.length) {
+    grid.appendChild(el("div", "field-note", "No takes yet — use Render seeds in the Troubleshooting panel."));
+  }
+}
+
+async function adoptSeedTake(shotId, seed, button) {
+  button.disabled = true;
+  try {
+    await saveNow();
+    const res = await API.adoptSeedTake(state.slug, shotId, seed);
+    takeStale(res);
+    state.board = res.board;
+    toast(`Seed ${seed} is now this shot's clip. Shots that continue from it will need re-rendering.`, "info");
+    render();
+    paintSeedDialog(true);
+  } catch (err) {
+    button.disabled = false;
+    toast(err.message, "error");
+  }
+}
+
+async function deleteSeedTakes() {
+  const shotId = state.seedDialogShot;
+  if (!shotId) return;
+  if (!window.confirm("Delete this shot's seed takes? The shot's own clip is kept.")) return;
+  try {
+    await API.deleteSeedTakes(state.slug, shotId);
+    await reloadSeedTakes(shotId);
+    paintSeedDialog(true);
+    renderEditor();
+  } catch (err) {
+    toast(err.message, "error");
+  }
 }
 
 function forumSummaryBox(shot) {
