@@ -963,6 +963,60 @@ class Store:
         board.pop("_slug", None)
         return json.dumps(board, indent=2) + "\n"
 
+    # Rendered output, left out of a folder export: every video file, and
+    # the per-shot folders a render writes its frames and preview stills to.
+    EXPORT_SKIP_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+    EXPORT_SKIP_DIRS = {"frames", "stills", "sketch-refs"}
+
+    def export_zip(self, slug: str, out) -> str:
+        """Write the project folder as a ZIP to the binary file *out*.
+
+        Everything a board is made of — storyboard.json, reference images
+        and voice clips, prompts, logs and job files — but none of the
+        rendered video, which is most of a project's size and can be
+        rendered again. A rendered frame the board itself points at (a
+        chained Start frame) is kept, since the board needs it to re-render.
+        Entries sit under ``<slug>/`` so the archive unpacks into a folder
+        that can be dropped straight into a projects folder.
+
+        Returns the download name, ``storyboard - <project name>.zip``.
+        """
+        import zipfile
+
+        board = self.load(slug)
+        folder = self.project_dir(slug)
+        safe = folder.name
+        root = folder.resolve()
+        referenced: set[Path] = set()
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for v in value.values():
+                    walk(v)
+            elif isinstance(value, list):
+                for v in value:
+                    walk(v)
+            elif isinstance(value, str) and value.startswith(safe + "/"):
+                path = (self.root / value.split("?", 1)[0]).resolve()
+                if path.is_file():
+                    referenced.add(path)
+
+        walk(board)
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(folder.rglob("*")):
+                if not path.is_file() or path.name == ".DS_Store":
+                    continue
+                rel = path.relative_to(folder)
+                if path.resolve() not in referenced and (
+                    path.suffix.lower() in self.EXPORT_SKIP_EXTS
+                    or any(part in self.EXPORT_SKIP_DIRS for part in rel.parts[:-1])
+                ):
+                    continue
+                zf.write(path, f"{safe}/{rel.as_posix()}")
+        # Only what a filename cannot hold on macOS/Windows is replaced.
+        name = re.sub(r'[\\/:*?"<>|]+', "-", (board.get("name") or safe)).strip() or safe
+        return f"storyboard - {name}.zip"
+
     def import_board(self, raw: str | dict, *, name: str | None = None) -> tuple[str, dict]:
         board = json.loads(raw) if isinstance(raw, str) else dict(raw)
         if not isinstance(board.get("shots"), list):

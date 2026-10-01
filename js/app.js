@@ -1459,6 +1459,9 @@ function wireChrome() {
   $("#btnExport").addEventListener("click", () => {
     if (state.slug) window.location.href = API.exportUrl(state.slug);
   });
+  $("#btnExportFolder").addEventListener("click", () => {
+    if (state.slug) window.location.href = API.exportZipUrl(state.slug);
+  });
 
   $("#btnOpen").addEventListener("click", openDialog);
   $("#openClose").addEventListener("click", () => ($("#openDialog").hidden = true));

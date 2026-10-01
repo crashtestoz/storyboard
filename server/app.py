@@ -19,6 +19,8 @@ Routes
                                 beats and its dialogue ``{slug, shotId, prompt?}``
 ``POST /api/chat``             discuss the board and propose reviewed edits
 ``GET  /api/boards/<slug>/export``   download the board as JSON
+``GET  /api/boards/<slug>/export.zip``  download the project folder as a ZIP,
+                                 without rendered video
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
@@ -540,6 +542,30 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/soundtrack", path)
         if m:
             return self._send_json(self._soundtrack_status(m.group(1)))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/export\.zip", path)
+        if m:
+            import tempfile
+            with tempfile.TemporaryFile() as tmp:
+                try:
+                    filename = ctx.store.export_zip(m.group(1), tmp)
+                except FileNotFoundError:
+                    return self._err(404, "no such storyboard")
+                size = tmp.tell()
+                tmp.seek(0)
+                ascii_name = filename.encode("ascii", "replace").decode().replace("?", "_")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{urllib.parse.quote(filename)}",
+                )
+                self.send_header("Content-Length", str(size))
+                self.end_headers()
+                while chunk := tmp.read(64 * 1024):
+                    self.wfile.write(chunk)
+            return None
 
         m = re.fullmatch(r"/api/boards/([^/]+)/export", path)
         if m:

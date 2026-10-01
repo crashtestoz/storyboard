@@ -277,6 +277,38 @@ def test_library_delete(tmp: Path) -> None:
     check("unused image is deleted", not unused.exists())
 
 
+def test_export_zip(tmp: Path) -> None:
+    """The folder export keeps the board and its references, not renders."""
+    import io
+    import zipfile
+    st = Store(workspace=tmp, data_dir=tmp)
+    slug, board = st.create("Export Me")
+    d = st.project_dir(slug)
+    (d / "refs").mkdir(parents=True, exist_ok=True)
+    (d / "refs" / "doc.png").write_bytes(b"png")
+    shot_dir = d / "shots" / "01"
+    (shot_dir / "frames").mkdir(parents=True)
+    (shot_dir / "frames" / "frame-0000.png").write_bytes(b"f0")
+    (shot_dir / "frames" / "frame-0123.png").write_bytes(b"f1")
+    (shot_dir / "clip.mp4").write_bytes(b"mp4")
+    (shot_dir / "run.log").write_text("log")
+    (d / "final.mp4").write_bytes(b"mp4")
+    shot = default_shot(board["defaults"])
+    shot["startRef"] = {"kind": "chain", "resolved": f"{slug}/shots/01/frames/frame-0123.png"}
+    board["shots"] = [shot]
+    st.save(slug, board)
+    buf = io.BytesIO()
+    name = st.export_zip(slug, buf)
+    names = set(zipfile.ZipFile(buf).namelist())
+    check("export zip name", name == "storyboard - Export Me.zip", name)
+    check("export keeps board, refs and logs",
+          {f"{slug}/storyboard.json", f"{slug}/refs/doc.png", f"{slug}/shots/01/run.log"} <= names, str(names))
+    check("export drops video and unused frames",
+          not any(n.endswith(".mp4") or n.endswith("frame-0000.png") for n in names), str(names))
+    check("export keeps a frame the board points at",
+          f"{slug}/shots/01/frames/frame-0123.png" in names, str(names))
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="sbv-store-test-"))
     try:
@@ -284,6 +316,7 @@ def main() -> int:
         test_independent_data_dir(tmp / "b")
         test_legacy_paths_migrate(tmp / "c")
         test_library_delete(tmp / "d")
+        test_export_zip(tmp / "e")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
