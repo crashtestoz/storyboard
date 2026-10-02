@@ -2606,3 +2606,32 @@ textarea.ta-compact {
 .seed-tile-note { font-size: var(--fs-xs); color: var(--warn); }
 .seed-row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
 .seed-row select { width: auto; }
+
+/* --- field versions (shot prompt) --------------------------------------- */
+.version-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  min-width: 0;
+}
+.version-pick {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+}
+.version-stars { display: flex; gap: 1px; }
+.version-star {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font-size: var(--fs-md);
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.version-star[data-on="true"] { color: var(--warn); }
+.version-star:not(:disabled):hover { color: var(--warn); }
+.version-star:disabled { cursor: default; opacity: 0.4; }
+.version-del:disabled { visibility: hidden; }
