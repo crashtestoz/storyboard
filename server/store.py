@@ -390,6 +390,10 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         "id": new_id(),
         "title": "New shot",
         "prompt": "",
+        # Earlier wordings of the prompt, oldest first: {id, at (ms), rating
+        # 0-3, values: {"prompt": ...}, renderedAt?}. Kept and recalled by the
+        # editor only; never an input to a render or its fingerprint.
+        "promptVersions": [],
         "soundNote": "",
         "characterIds": [],
         "dialogue": "",           # the spoken line, synthesised separately
@@ -1138,6 +1142,8 @@ class Store:
             seen.add(shot["id"])
             shot.setdefault("title", "Untitled shot")
             shot.setdefault("prompt", "")
+            if not isinstance(shot.get("promptVersions"), list):
+                shot["promptVersions"] = []
             shot.setdefault("soundNote", "")
             shot.setdefault("characterIds", [])
             shot.setdefault("speakerId", "")

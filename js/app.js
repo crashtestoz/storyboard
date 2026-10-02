@@ -1436,6 +1436,7 @@ async function runStartRender(shotIds) {
     throw new Error("Some shots need dialogue prepared manually before rendering.");
   }
   if (blockers.length) await prepareDialogueRecordings(blockers);
+  snapshotRenderedPrompts(targets);
   await saveNow();
   state.status = await API.render(state.slug, shotIds && shotIds.length ? shotIds : undefined, state.board);
   state.awaitingBatch = true;
@@ -5461,11 +5462,23 @@ function renderEditor() {
   ta.value = raw.prompt || "";  ta.placeholder =
     "What happens in THIS shot — action, camera move, mood.\n" +
     "The scene description is prepended automatically; don't restate the subject.";
+  const setPrompt = (text) => {
+    ta.value = text;
+    live().prompt = text;
+    markDirty();
+    updateResolvedPreview();
+    syncTabDots();
+  };
+  const versions = versionBar({
+    owner: live, key: "promptVersions", fields: ["prompt"], noun: "shot prompt",
+    apply: (values) => setPrompt(values.prompt),
+  });
   ta.addEventListener("input", () => {
     live().prompt = ta.value;
     markDirty();
     updateResolvedPreview();
     syncTabDots();
+    versions.refresh();
   });
 
   const promptPane = el("div");
@@ -5480,16 +5493,16 @@ function renderEditor() {
       slot: () => promptPane.querySelector(".proposal-slot"),
       rewrite: () => API.rewrite(state.slug, { shotId: raw.id, text: ta.value }),
       onUse: (text) => {
-        ta.value = text;
-        live().prompt = text;
-        markDirty();
-        updateResolvedPreview();
-        syncTabDots();
-        toast("Shot prompt replaced. Undo by editing it back — the old text is above.");
+        const kept = snapshotVersion(live(), "promptVersions", ["prompt"]);
+        setPrompt(text);
+        versions.refresh();
+        toast(kept
+          ? "Shot prompt replaced. The old one is kept in Versions."
+          : "Shot prompt replaced.");
       },
     })
   );
-  promptPane.append(promptHead, ta, el("div", "proposal-slot"));
+  promptPane.append(promptHead, versions, ta, el("div", "proposal-slot"));
   pane("prompt", promptPane);
 
   if (!cap || cap.supportsAudio) {
@@ -5646,7 +5659,6 @@ function renderEditor() {
   pane("resolved", rp);
 
   panel.appendChild(panes);
-  ta.dataset.fkey = "shot-prompt";
   showTab(state.tab);
   // Only reachable when the shot carries a line but its model has no audio,
   // so there is no Dialogue tab to hold it — usually a line left behind by a
@@ -6979,6 +6991,7 @@ async function startSeedSweep(raw) {
       }
       await prepareDialogueRecordings([{ raw, issue }]);
     }
+    snapshotRenderedPrompts([raw]);
     await saveNow();
     state.status = await API.renderSeeds(state.slug, raw.id, state.seedCount || 4, state.board);
     state.seedSweepWatch = raw.id;
@@ -7382,6 +7395,7 @@ function diagnostic(raw, shot) {
   const again = el("button", "btn btn-sm", "Re-run this shot");
   again.disabled = busy;
   again.addEventListener("click", async () => {
+    snapshotRenderedPrompts([shotById(raw.id) || raw]);
     await saveNow();
     try {
       state.status = await API.render(state.slug, [raw.id], state.board);
@@ -7546,6 +7560,175 @@ function proposalBox(r, onUse, slot) {
   acts.append(use, drop);
   box.appendChild(acts);
   return box;
+}
+
+/* --- field versions ------------------------------------------------------
+
+   A prompt that is nearly right gets tweaked, the render comes back worse,
+   and the good words are gone. Versions keep them: an ordered list on the
+   owning object (a shot today), saved in the board like any other field.
+
+   Generic over the owner and its fields so the scene description, render
+   style, background sound, or dialogue + voice direction (two fields, one
+   version) can take the same control later. Only `values` is ever written
+   back; a version never touches anything else on the owner. */
+const VERSION_CAP = 30;
+
+function versionValues(owner, fields) {
+  return Object.fromEntries(fields.map((f) => [f, owner[f] || ""]));
+}
+
+function versionMatches(version, values, fields) {
+  return fields.every((f) =>
+    ((version.values || {})[f] || "").trim() === (values[f] || "").trim());
+}
+
+/** The version whose words are on screen now, or null for unsaved edits. */
+function currentVersion(owner, key, fields) {
+  const values = versionValues(owner, fields);
+  return (owner[key] || []).find((v) => versionMatches(v, values, fields)) || null;
+}
+
+/* Keep what is on the owner now as a version, unless it is empty or already
+   kept. Returns the version that holds it. Over the cap, the oldest unrated
+   version goes first — a starred one is only dropped once every version is
+   starred, and then the lowest-rated, oldest one. */
+function snapshotVersion(owner, key, fields, { rendered = false } = {}) {
+  const values = versionValues(owner, fields);
+  if (!fields.some((f) => values[f].trim())) return null;
+  if (!Array.isArray(owner[key])) owner[key] = [];
+  const list = owner[key];
+  let v = list.find((x) => versionMatches(x, values, fields));
+  if (!v) {
+    v = { id: `v${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+          at: Date.now(), rating: 0, values };
+    list.push(v);
+    while (list.length > VERSION_CAP) {
+      // Never the one just kept — it is the reason for the snapshot.
+      const victim = list.slice(0, -1).reduce((worst, x, i) =>
+        (x.rating || 0) < (list[worst].rating || 0) ? i : worst, 0);
+      list.splice(victim, 1);
+    }
+  }
+  if (rendered) v.renderedAt = Date.now();
+  return v;
+}
+
+/** Every render keeps the shot prompt it was given, so a good clip can
+    always be traced back to its words. */
+function snapshotRenderedPrompts(list) {
+  for (const raw of list) snapshotVersion(raw, "promptVersions", ["prompt"], { rendered: true });
+}
+
+function stars(n) {
+  return "★".repeat(n) + "☆".repeat(3 - n);
+}
+
+function versionLabel(v, fields) {
+  const when = new Date(v.at).toLocaleString(undefined, {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+  const text = fields.map((f) => (v.values || {})[f] || "").join(" · ")
+    .replace(/\s+/g, " ").trim();
+  const gist = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  return `${stars(v.rating || 0)}  ${when}${v.renderedAt ? " ▶" : ""} — ${gist}`;
+}
+
+/* The control: a dropdown of versions, newest first, three stars that rate
+   the version on screen, Save version, and delete. Picking a version never
+   loses unsaved words — they are kept as a version of their own first.
+
+   owner()  -> the live object holding the fields (re-read every time, since
+               the board object can be replaced under the editor)
+   apply(values) -> put restored values into the owner AND its inputs */
+function versionBar({ owner, key, fields, apply, noun = "prompt" }) {
+  const bar = el("div", "version-bar");
+  const pick = el("select", "version-pick");
+  pick.setAttribute("aria-label", `Saved ${noun} versions`);
+  const rate = el("div", "version-stars");
+  rate.setAttribute("role", "group");
+  rate.setAttribute("aria-label", "Rate this version");
+  const save = el("button", "btn btn-sm", "Save version");
+  save.title = `Keep the ${noun} as it is now, so you can come back to it. ` +
+    `Every render also keeps the ${noun} it rendered (marked ▶).`;
+  const del = el("button", "btn btn-sm btn-ghost version-del", "✕");
+
+  const refresh = () => {
+    const o = owner();
+    const list = o[key] || [];
+    const cur = currentVersion(o, key, fields);
+    pick.innerHTML = "";
+    if (!cur) {
+      const opt = el("option", null,
+        list.length ? "Unsaved edits — not a saved version" : "No saved versions yet");
+      opt.value = "";
+      pick.appendChild(opt);
+    }
+    [...list].reverse().forEach((v) => {
+      const opt = el("option", null, versionLabel(v, fields));
+      opt.value = v.id;
+      pick.appendChild(opt);
+    });
+    pick.value = cur ? cur.id : "";
+    pick.disabled = !list.length;
+    pick.title = list.length
+      ? `${list.length} saved version${list.length === 1 ? "" : "s"} (up to ${VERSION_CAP}; ` +
+        "the oldest unstarred goes first). ▶ = rendered."
+      : `Save a version, or render, to start a history of this ${noun}.`;
+
+    rate.innerHTML = "";
+    for (let n = 1; n <= 3; n++) {
+      const s = el("button", "version-star", (cur && cur.rating >= n) ? "★" : "☆");
+      s.type = "button";
+      s.disabled = !cur;
+      s.dataset.on = String(!!cur && cur.rating >= n);
+      s.title = cur
+        ? (cur.rating === n ? "Clear the rating" : `Rate ${n} of 3`)
+        : "Save this as a version to rate it";
+      s.addEventListener("click", () => {
+        const v = currentVersion(owner(), key, fields);
+        if (!v) return;
+        v.rating = v.rating === n ? 0 : n;
+        markDirty();
+        refresh();
+      });
+      rate.appendChild(s);
+    }
+    save.disabled = !!cur || !fields.some((f) => (o[f] || "").trim());
+    del.disabled = !cur;
+    del.title = cur ? "Delete this saved version (the text stays in the box)" : "";
+  };
+
+  pick.addEventListener("change", () => {
+    const o = owner();
+    const v = (o[key] || []).find((x) => x.id === pick.value);
+    if (!v) return refresh();
+    snapshotVersion(o, key, fields);   // unsaved words survive the switch
+    apply({ ...versionValues(o, fields), ...v.values });
+    markDirty();
+    refresh();
+    toast(`Restored the ${noun} from ${new Date(v.at).toLocaleString()}.`);
+  });
+  save.addEventListener("click", () => {
+    snapshotVersion(owner(), key, fields);
+    markDirty();
+    refresh();
+    toast(`${noun[0].toUpperCase()}${noun.slice(1)} saved as a version.`);
+  });
+  del.addEventListener("click", () => {
+    const o = owner();
+    const v = currentVersion(o, key, fields);
+    if (!v) return;
+    if (v.rating && !confirm(`Delete this ${stars(v.rating)} version?`)) return;
+    o[key] = (o[key] || []).filter((x) => x !== v);
+    markDirty();
+    refresh();
+  });
+
+  bar.append(pick, rate, save, del);
+  bar.refresh = refresh;
+  refresh();
+  return bar;
 }
 
 function currentLLM() {
