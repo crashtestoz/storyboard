@@ -74,6 +74,7 @@ from .llm import board_outline
 from .llm import load_services as load_llm_services
 from .llm import load_config as load_llm_config
 from .llm import KNOWN_KINDS as LLM_KINDS
+from .llm import THINKING_LEVELS
 from .local_config import ensure_local_configs
 from . import services as local_services
 from .dubbing import speaker_for
@@ -1226,6 +1227,11 @@ class Handler(BaseHTTPRequestHandler):
                 entry.update({"id": sid, "label": str(item.get("label") or sid), "kind": kind,
                               "url": str(item["url"]), "model": str(item.get("model") or "")})
                 entry["requiresKey"] = bool(item.get("requiresKey"))
+                if "thinking" in item:
+                    thinking = str(item.get("thinking") or "none")
+                    if thinking not in THINKING_LEVELS:
+                        raise ValueError(f"thinking must be one of {', '.join(THINKING_LEVELS)}")
+                    entry["thinking"] = thinking
                 clean.append(entry)
             config = ctx.ui_root / "llm-services.json"
             tmp = config.with_suffix(".json.tmp")

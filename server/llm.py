@@ -622,6 +622,9 @@ class LLMService:
     key_env: str = ""           # the apiKeyEnv variable name, if any
     needs_key: bool = False     # requiresKey / apiKeyEnv declared
     supports_key: bool = False  # an HTTP service a token could be sent to
+    # How hard a thinking model reasons before replying (Settings → Prompt
+    # rewriting). "none" switches thinking off, as every request did before.
+    thinking: str = "none"
 
     def health(self) -> tuple[bool, str]:
         return True, ""
@@ -743,6 +746,10 @@ class OllamaLLM(LLMService):
         self.model = model
         self.num_ctx = num_ctx
 
+    def _think(self) -> bool | str:
+        # Ollama takes a level ("low"/"medium"/"high") as well as true/false.
+        return False if self.thinking == "none" else self.thinking
+
     def health(self) -> tuple[bool, str]:
         if not self.model:
             return False, f"{self.id}: no model set in {CONFIG_NAME}"
@@ -773,7 +780,9 @@ class OllamaLLM(LLMService):
     def complete(self, system: str, user: str, *, timeout: float = 300.0,
                  max_tokens: int | None = None) -> str:
         options = {"temperature": 0.7, "top_p": 0.9, "num_ctx": self.num_ctx}
-        if max_tokens is not None:
+        # The cap counts thinking tokens too; with thinking on it would cut
+        # the reasoning off before any reply is written.
+        if max_tokens is not None and self.thinking == "none":
             options["num_predict"] = max_tokens
         body = json.dumps(
             {
@@ -785,9 +794,10 @@ class OllamaLLM(LLMService):
                 "stream": False,
                 # A rewrite should be a rewrite, not a reinvention.
                 "options": options,
-                # Qwen3 thinking models otherwise return their reasoning, and
-                # the reply here is used verbatim as the prompt.
-                "think": False,
+                # Off by default: Qwen3 thinking models otherwise reason at
+                # length first. When on, Ollama returns the reasoning in its
+                # own "thinking" field, so the content is still the reply.
+                "think": self._think(),
             }
         ).encode()
         req = urllib.request.Request(
@@ -822,7 +832,7 @@ class OllamaLLM(LLMService):
                 "stream": False,
                 "options": {"temperature": 0.4, "top_p": 0.9,
                             "num_ctx": self.num_ctx},
-                "think": False,
+                "think": self._think(),
             }
         ).encode()
         req = urllib.request.Request(
@@ -854,7 +864,7 @@ class OllamaLLM(LLMService):
             "stream": False,
             "options": {"temperature": 0.4, "top_p": 0.9,
                         "num_ctx": self.num_ctx},
-            "think": False,
+            "think": self._think(),
         }).encode()
         req = urllib.request.Request(
             f"{self.url}/api/chat", data=body,
@@ -863,6 +873,20 @@ class OllamaLLM(LLMService):
         with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
         return ((doc.get("message") or {}).get("content") or "").strip()
+
+
+def _reply(doc: dict[str, Any]) -> str:
+    """The reply text of a chat-completions response. A thinking model on a
+    server that doesn't split its reasoning out leaves it inline, ending in
+    </think>; only what follows is the reply."""
+    choices = doc.get("choices") or [{}]
+    text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1].strip()
+    return text
+
+
+THINKING_LEVELS = ("none", "low", "medium", "high")
 
 
 # Service types offered in Settings. Every kind but "ollama" and "anthropic"
@@ -904,6 +928,17 @@ class OpenAICompatLLM(LLMService):
         """JSON for a chat request, trimmed for hosted APIs: they reject the
         local-server thinking switch, and several of their models accept only
         the default temperature."""
+        # Qwen3's hybrid thinking mode otherwise runs in full before the
+        # actual reply -- burning thousands of unseen tokens and, on a local
+        # model, minutes. enable_thinking is the vLLM/SGLang/llama.cpp server
+        # convention for that switch, reasoning_effort OpenAI's for its level;
+        # a server that doesn't recognize either ignores the unknown field.
+        body["chat_template_kwargs"] = {"enable_thinking": self.thinking != "none"}
+        if self.thinking != "none":
+            body["reasoning_effort"] = self.thinking
+            # max_tokens counts the reasoning too; keep the reply from being
+            # cut off before it starts.
+            body.pop("max_tokens", None)
         if self.kind in CLOUD_KINDS:
             body = {k: v for k, v in body.items()
                     if k not in ("chat_template_kwargs", "temperature")}
@@ -945,13 +980,6 @@ class OpenAICompatLLM(LLMService):
             ],
             "temperature": 0.7,
             "stream": False,
-            # Qwen3's hybrid thinking mode otherwise runs in full before the
-            # actual reply -- burning thousands of unseen tokens and, on a
-            # local model, minutes -- exactly what OllamaLLM's "think": False
-            # heads off for that backend. This is the vLLM/SGLang/llama.cpp
-            # server convention for the same switch; a server that doesn't
-            # recognize it ignores the unknown field.
-            "chat_template_kwargs": {"enable_thinking": False},
         }
         if max_tokens is not None:
             body_dict["max_tokens"] = max_tokens
@@ -960,8 +988,7 @@ class OpenAICompatLLM(LLMService):
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
-        choices = doc.get("choices") or [{}]
-        return ((choices[0].get("message") or {}).get("content") or "").strip()
+        return _reply(doc)
 
     def complete_with_image(
         self,
@@ -993,17 +1020,13 @@ class OpenAICompatLLM(LLMService):
                 ],
                 "temperature": 0.4,
                 "stream": False,
-                # Same thinking-off switch as complete(): without it a Qwen3
-                # hybrid model reasons at length before every description.
-                "chat_template_kwargs": {"enable_thinking": False},
             }
         ).encode()
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
             doc = json.loads(r.read().decode())
-        choices = doc.get("choices") or [{}]
-        return ((choices[0].get("message") or {}).get("content") or "").strip()
+        return _reply(doc)
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
@@ -1030,9 +1053,6 @@ class OpenAICompatLLM(LLMService):
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": content}],
             "temperature": 0.4, "stream": False,
-            # Every rewrite goes through here (with or without media), so
-            # this is the switch that keeps a Qwen3 model from thinking first.
-            "chat_template_kwargs": {"enable_thinking": False},
         }).encode()
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
@@ -1068,8 +1088,7 @@ class OpenAICompatLLM(LLMService):
                 f"{self.label} rejected the multimodal request "
                 f"(HTTP {exc.code}): {detail or exc.reason}"
             ) from exc
-        choices = doc.get("choices") or [{}]
-        return ((choices[0].get("message") or {}).get("content") or "").strip()
+        return _reply(doc)
 
 
 class AnthropicLLM(LLMService):
@@ -1218,14 +1237,19 @@ def build_one(entry: dict[str, Any], saved_key: str = "") -> LLMService:
     label = str(entry.get("label") or sid)
     url = str(entry.get("url") or "")
     model = str(entry.get("model") or "")
+    thinking = str(entry.get("thinking") or "none")
+    if thinking not in THINKING_LEVELS:
+        thinking = "none"
 
     if kind == "ollama":
-        return _apply_key(OllamaLLM(sid, label, url, model,
-                                    num_ctx=int(entry.get("numCtx") or 8192)),
-                          entry, saved_key)
+        svc: LLMService = OllamaLLM(sid, label, url, model,
+                                    num_ctx=int(entry.get("numCtx") or 8192))
+        svc.thinking = thinking
+        return _apply_key(svc, entry, saved_key)
     if kind in LOCAL_OPENAI_KINDS or kind in CLOUD_KINDS:
-        return _apply_key(OpenAICompatLLM(sid, label, url, model, kind=kind),
-                          entry, saved_key)
+        svc = OpenAICompatLLM(sid, label, url, model, kind=kind)
+        svc.thinking = thinking
+        return _apply_key(svc, entry, saved_key)
     if kind == "anthropic":
         return _apply_key(AnthropicLLM(sid, label, url, model), entry, saved_key)
     if kind == "broken":

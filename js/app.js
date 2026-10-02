@@ -2210,6 +2210,7 @@ function initializeSettingsTabs() {
     openLlmEditor(id);
   };
   $("#btnSaveLlmService").onclick = saveLlmServiceFromForm;
+  $("#llmThinking").onchange = saveLlmThinking;
   $("#btnCancelLlmService").onclick = () => paintLlmServiceManager();
   $("#btnDeleteLlmService").onclick = deleteLlmService;
   $("#llmServiceAuth").onchange = (e) => { $("#llmServiceKeyWrap").hidden = !e.target.checked; };
@@ -2834,6 +2835,20 @@ async function saveLlmServiceFromForm() {
     toast(editing ? "LLM service updated." : "LLM service added.");
   } catch (err) { toast(err.message, "error"); }
   finally { button.disabled = false; }
+}
+
+// The thinking level belongs to the service (llm-services.json), so it applies
+// in every project that uses it. Saved as soon as it is picked.
+async function saveLlmThinking(e) {
+  const id = $("#llmService").value;
+  const thinking = e.target.value;
+  const entries = llmConfigs().map((s) => (s.id === id ? { ...s, thinking } : { ...s }));
+  e.target.disabled = true;
+  try {
+    await applyLlmServices(entries);
+    toast(thinking === "none" ? "Thinking off." : `Thinking set to ${thinking}.`);
+  } catch (err) { toast(err.message, "error"); }
+  finally { e.target.disabled = false; render(); }
 }
 
 async function deleteLlmService() {
@@ -3916,6 +3931,14 @@ function renderRail() {
     chip.textContent = sv?.healthy ? "Online" : "Offline";
     chip.title = sv && !sv.healthy ? sv.message || "" : "";
     paintStartButton($("#btnStartLlm"), "llm", sv);
+    // Ollama and OpenAI-compatible services only; Claude has no switch here.
+    const cfg = llmConfigs().find((c) => c.id === chosenLlm);
+    const thinkingField = $("#llmThinkingField");
+    thinkingField.hidden = !cfg || cfg.kind === "anthropic";
+    const thinkingSel = $("#llmThinking");
+    if (document.activeElement !== thinkingSel) thinkingSel.value = cfg?.thinking || "none";
+  } else {
+    $("#llmThinkingField").hidden = true;
   }
   $("#btnEditLlmService").disabled = !llmSel.value || llmSel.value === "none";
 

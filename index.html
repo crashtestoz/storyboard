@@ -319,6 +319,16 @@
           </div>
           <div class="field-note" id="llmNote"></div>
         </div>
+        <div class="field" id="llmThinkingField" hidden>
+          <label for="llmThinking">Thinking <span class="hint-inline">for the service above · how long the model reasons before it answers</span></label>
+          <select id="llmThinking">
+            <option value="none">None — answer straight away</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+          <div class="field-note">Thinking can improve rewrites and AD replies, but each request takes longer — on a local model, often minutes at High. Models that can't think ignore it.</div>
+        </div>
         <div class="llm-editor" id="llmEditor" hidden>
           <div class="llm-editor-title" id="llmEditorTitle">New service</div>
           <div class="field-row">
