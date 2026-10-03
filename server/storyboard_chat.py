@@ -436,6 +436,7 @@ Allowed actions:
 {"tool":"update_character","characterId":"existing id","fields":{"name":"...","description":"..."}}
 {"tool":"add_shot","shot":{"title":"...","prompt":"...","soundNote":"...","dialogue":"...","dialogueStyle":"...","characterIds":["existing id"],"frames":124,"steps":8,"seed":0}}
 {"tool":"update_shot","shotId":"existing id","fields":{"title":"...","prompt":"...","soundNote":"...","dialogue":"...","dialogueStyle":"...","characterIds":["existing id"],"frames":124,"steps":8,"seed":0}}
+{"tool":"replace_text","find":"exact existing words","replace":"new words","scope":["shots","board","cast"],"shotIds":["existing id"]}
 {"tool":"start_render","shotIds":["existing id", ...]}
 {"tool":"dub_shot","shotId":"existing id"}
 {"tool":"stop_render"}
@@ -491,6 +492,23 @@ depends on what it contains, rather than guessing from its name.
 Rules:
 - Use only the allowed tools and fields. Never invent IDs.
 - Prefer updating an existing shot when it represents the same story beat.
+- To change a word or phrase while leaving the rest of the text alone —
+  renaming a prop, swapping a detail, trimming a repeated description — use
+  replace_text instead of rewriting whole prompts with update_shot. The app
+  replaces every exact occurrence for you and shows each changed shot for
+  review. find is case-sensitive and must be copied character for character
+  from the CURRENT STORYBOARD context; when the same thing is worded
+  differently in different shots, propose one replace_text per wording.
+  replace may be empty to delete the words. scope limits where it looks
+  (shot text fields, the board's sceneDescription/renderStyle/soundscape,
+  cast descriptions; all three when omitted) and shotIds limits it to those
+  shots alone. It only reaches the open board.
+- sceneDescription and Cast descriptions are sent with every shot, so a shot
+  prompt only needs to name what they describe ("his headset", "her coat"),
+  not restate how it looks. When you change sceneDescription or a Cast
+  description, and whenever you review the board, check every shot prompt
+  for wording that restates or contradicts what those descriptions now say,
+  flag it, and propose replace_text to cut it back to the plain name.
 - Write video prompts in the three-section shape from the "Shot prompt
   shape" note below — "Camera Direction & Framing:", then "Clothing /
   Appearance:" only if a character in the shot looks different from their
@@ -608,6 +626,10 @@ SHOT_FIELDS = {
     "title", "prompt", "soundNote", "dialogue", "dialogueStyle",
     "characterIds", "frames", "steps", "seed",
 }
+#: Where replace_text looks: the board's own fields, cast descriptions, and
+#: the text fields of shots.
+REPLACE_SCOPES = ("board", "cast", "shots")
+REPLACE_SHOT_FIELDS = {"title", "prompt", "soundNote", "dialogue", "dialogueStyle"}
 #: What create_board / copy_from_board can carry from one board to another
 #: for show continuity. The browser does the copying (js/app.js
 #: carryOverBoard), so the two lists must name the same groups.
@@ -837,6 +859,63 @@ def _clean_fields(value: Any, allowed: set[str]) -> dict[str, Any]:
     return out
 
 
+def _expand_replace_text(raw: dict[str, Any], board: dict[str, Any],
+                         clean: list[dict[str, Any]]) -> int:
+    """Turn a replace_text proposal into ordinary edit actions, in place.
+
+    The model names the words; the exact replacement happens here, so a
+    small model never has to copy whole prompts back out to change a phrase
+    (and reword them on the way). Each touched shot, cast member or the
+    board becomes one update_shot / update_character / set_board_fields
+    action, merged into one already proposed for the same target so a
+    phrase replaced in a prompt the model also rewrote lands in that
+    rewrite. Returns how many places matched.
+    """
+    find, replace = raw.get("find"), raw.get("replace", "")
+    if not isinstance(find, str) or not find or not isinstance(replace, str):
+        return 0
+    only = raw.get("shotIds")
+    only = {v for v in only if isinstance(v, str)} if isinstance(only, list) else None
+    scope = raw.get("scope")
+    if isinstance(scope, list):
+        scope = set(scope) & set(REPLACE_SCOPES)
+    else:
+        # Naming shots means just those shots, not the board and cast too.
+        scope = {"shots"} if only is not None else set(REPLACE_SCOPES)
+
+    def pending(tool: str, key: str | None, target: str | None) -> dict[str, Any]:
+        for action in clean:
+            if action["tool"] == tool and (key is None or action.get(key) == target):
+                return action["fields"]
+        action = {"tool": tool, "fields": {}}
+        if key:
+            action[key] = target
+        clean.append(action)
+        return action["fields"]
+
+    targets: list[tuple[str, str | None, str | None, dict[str, Any], set[str]]] = []
+    if "board" in scope:
+        targets.append(("set_board_fields", None, None, board, BOARD_FIELDS))
+    if "cast" in scope:
+        targets.extend(("update_character", "characterId", c.get("id"), c, {"description"})
+                       for c in board.get("characters") or [])
+    if "shots" in scope:
+        targets.extend(("update_shot", "shotId", s.get("id"), s, REPLACE_SHOT_FIELDS)
+                       for s in board.get("shots") or []
+                       if only is None or s.get("id") in only)
+    matched = 0
+    for tool, key, target, source, fields in targets:
+        for field in sorted(fields):
+            proposed = next((a["fields"].get(field) for a in clean
+                             if a["tool"] == tool and (key is None or a.get(key) == target)
+                             and isinstance(a["fields"].get(field), str)), None)
+            text = proposed if proposed is not None else source.get(field)
+            if isinstance(text, str) and find in text:
+                matched += text.count(find)
+                pending(tool, key, target)[field] = text.replace(find, replace)
+    return matched
+
+
 def _clean_name(value: Any) -> str:
     return value.strip()[:120] if isinstance(value, str) else ""
 
@@ -887,6 +966,7 @@ def _validate_create_board(raw: dict[str, Any], character_ids: set,
 def validate_actions(
     actions: Any, board: dict[str, Any], board_slugs: set[str] | None = None,
     current_slug: str | None = None, load_board=None,
+    notes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Allow-list model proposals before they reach browser state.
 
@@ -894,7 +974,8 @@ def validate_actions(
     one. Without them, open_board, delete_board and copying from another
     board have nothing valid to point at and are dropped. *load_board*
     (slug -> board) resolves another board's cast, so a new board's shots
-    copied from it can be checked against real character ids.
+    copied from it can be checked against real character ids. A replace_text
+    that matched nothing adds a line to *notes*, for the user to see.
     """
     if not isinstance(actions, list):
         return []
@@ -914,11 +995,16 @@ def validate_actions(
     shot_ids = {s.get("id") for s in board.get("shots") or []}
     character_ids = {c.get("id") for c in board.get("characters") or []}
     clean: list[dict[str, Any]] = []
+    replacements: list[dict[str, Any]] = []
     for raw in actions[:24]:
         if not isinstance(raw, dict):
             continue
         tool = raw.get("tool")
-        if tool == "create_board":
+        if tool == "replace_text":
+            # After everything else, so it lands in any rewrite of the same
+            # shot proposed alongside it, whichever order the model wrote.
+            replacements.append(raw)
+        elif tool == "create_board":
             source = raw.get("from") if raw.get("from") != current_slug else None
             cast = source_cast(source)
             action = (_validate_create_board(raw, cast, source)
@@ -978,6 +1064,10 @@ def validate_actions(
             clean.append({"tool": tool, "shotId": raw["shotId"]})
         elif tool in ("stop_render", "assemble"):
             clean.append({"tool": tool})
+    for raw in replacements:
+        if not _expand_replace_text(raw, board, clean) and notes is not None \
+                and isinstance(raw.get("find"), str) and raw["find"]:
+            notes.append(f'No text matched "{raw["find"][:80]}", so nothing was replaced.')
     return clean
 
 
@@ -1198,13 +1288,16 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
                      "so plainly if it didn't help. Do not request another search "
                      "or board read.")
         parsed = ask(followup)
+    notes: list[str] = []
     actions = validate_actions(
         parsed.get("actions"), board,
         board_slugs={b.get("slug") for b in other_boards},
-        current_slug=slug, load_board=load_board,
+        current_slug=slug, load_board=load_board, notes=notes,
     )
     actions, render_removed = _separate_render_from_edits(actions)
     response_message = parsed["message"] or "I prepared the requested storyboard changes."
+    for note in notes:
+        response_message += " " + note
     if render_removed:
         response_message += (
             " Rendering is not included with edit proposals; ask to render "

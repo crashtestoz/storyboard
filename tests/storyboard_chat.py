@@ -252,6 +252,68 @@ class StoryboardChatTests(unittest.TestCase):
         self.assertEqual(result["message"], "Still not sure.")
 
 
+class ReplaceTextTests(unittest.TestCase):
+    """replace_text edits exact words without the model copying prompts out."""
+
+    def setUp(self):
+        self.board = default_board("Sample Board 1")
+        self.board["sceneDescription"] = "Boston at night. The visor headset is matte black."
+        self.alex = default_character("Alex", "Wears the visor headset on his brow.")
+        self.board["characters"] = [self.alex]
+        self.shots = [default_shot(self.board["defaults"]) for _ in range(3)]
+        self.shots[0]["prompt"] = "Alex tears the visor headset off. The visor headset sparks."
+        self.shots[1]["prompt"] = "Alex stares at the bench."
+        self.shots[2]["prompt"] = "Alex taps the visor headset."
+        self.board["shots"] = self.shots
+
+    def test_each_matching_shot_becomes_one_exact_update(self):
+        actions = validate_actions([{"tool": "replace_text", "find": "the visor headset",
+                                     "replace": "his headset", "scope": ["shots"]}], self.board)
+        self.assertEqual(actions, [
+            {"tool": "update_shot", "shotId": self.shots[0]["id"], "fields": {
+                "prompt": "Alex tears his headset off. The visor headset sparks."}},
+            {"tool": "update_shot", "shotId": self.shots[2]["id"], "fields": {
+                "prompt": "Alex taps his headset."}},
+        ])
+
+    def test_scope_defaults_to_board_cast_and_shots(self):
+        actions = validate_actions([{"tool": "replace_text", "find": "visor headset",
+                                     "replace": "headset"}], self.board)
+        self.assertEqual([a["tool"] for a in actions],
+                         ["set_board_fields", "update_character", "update_shot", "update_shot"])
+        self.assertEqual(actions[0]["fields"],
+                         {"sceneDescription": "Boston at night. The headset is matte black."})
+
+    def test_shot_ids_limit_it_and_it_merges_into_a_rewrite_of_the_same_shot(self):
+        sid = self.shots[2]["id"]
+        actions = validate_actions([
+            {"tool": "replace_text", "find": "visor headset", "replace": "headset",
+             "shotIds": [sid]},
+            {"tool": "update_shot", "shotId": sid,
+             "fields": {"prompt": "Alex slowly taps the visor headset.", "frames": 96}},
+        ], self.board)
+        self.assertEqual(actions, [{"tool": "update_shot", "shotId": sid, "fields": {
+            "prompt": "Alex slowly taps the headset.", "frames": 96}}])
+
+    def test_a_miss_is_reported_rather_than_silently_dropped(self):
+        notes = []
+        actions = validate_actions([{"tool": "replace_text", "find": "VISOR",
+                                     "replace": "x"}], self.board, notes=notes)
+        self.assertEqual(actions, [])
+        self.assertEqual(notes, ['No text matched "VISOR", so nothing was replaced.'])
+
+    def test_chat_appends_the_miss_to_the_reply(self):
+        llm = FakeLLM(json.dumps({"message": "Trimmed.", "actions": [
+            {"tool": "replace_text", "find": "nowhere", "replace": ""}]}))
+        reply = chat(llm, self.board, "trim it")
+        self.assertEqual(reply["actions"], [])
+        self.assertIn('No text matched "nowhere"', reply["message"])
+
+    def test_prompt_offers_it_and_the_restated_description_check(self):
+        self.assertIn('"tool":"replace_text"', CHAT_SYSTEM_PROMPT)
+        self.assertIn("restates or contradicts", CHAT_SYSTEM_PROMPT)
+
+
 class BoardManagementTests(unittest.TestCase):
     """The AD can see, read, create, copy, open, rename and delete boards."""
 
