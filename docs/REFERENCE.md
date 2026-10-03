@@ -10,11 +10,13 @@ shows the assembled result, so nothing about the composition is hidden.
 
 **Style references and the media library.** Style reference images are
 project-wide and are sent to vpipe's `video-ref-encoder` with each shot's own
-references and selected Cast media when the shot uses Ref2VA. A shot with a
-Start frame or End frame automatically uses FL2VA, whose images are hard
-first/last-frame anchors; separate Cast, style and shot-reference images are
-not sent on that path. With no anchors, Ref2VA carries that reference set and
-the model's nine-image/three-audio limits are enforced before rendering.
+references and selected Cast media. Every H3 shot renders through Ref2VA,
+including chained shots: a Start or End frame (manual, or chained from the
+previous shot's last frame) is sent first in that ordered reference set as
+soft guidance, not a hard-pinned keyframe, and counts toward the model's
+nine-image/three-audio limits, which are enforced before rendering. FL2VA is
+no longer auto-selected; only an explicitly chosen Wan 2.2 or LTX-2.5 engine
+wires Start/End frames as hard anchors.
 
 The image picker scans project `refs/` folders and rendered stills, groups
 exact duplicate images by content hash, and shows where used files are
