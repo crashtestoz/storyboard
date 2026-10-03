@@ -197,8 +197,9 @@
       <div class="modal-head">
         <span id="seedDialogTitle">Seed comparison</span>
         <div class="header-spacer"></div>
+        <button class="btn btn-sm btn-danger" id="seedStop" type="button" title="Abort the seed comparison — stops the take rendering now and skips the queued ones. Finished takes are kept." hidden>■ Stop rendering</button>
         <button class="btn btn-ghost btn-sm" id="seedPlayAll" type="button" title="Start every take from the beginning, together">▶ Play all from start</button>
-        <button class="btn btn-ghost btn-sm" id="seedPauseAll" type="button">⏸ Pause all</button>
+        <button class="btn btn-ghost btn-sm" id="seedPauseAll" type="button" title="Pause playback of the takes (does not stop rendering)">⏸ Pause all</button>
         <button class="btn btn-ghost btn-sm" id="seedDelete" type="button" title="Delete this shot's seed takes to free disk space. The shot's own clip is kept.">Delete takes</button>
         <button class="btn btn-ghost btn-sm" id="seedClose" type="button">Close</button>
       </div>
