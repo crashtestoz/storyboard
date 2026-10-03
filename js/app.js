@@ -1621,6 +1621,19 @@ function wireChrome() {
     vids.forEach((v) => { v.pause(); v.currentTime = 0; });
     vids.forEach((v) => v.play().catch(() => {}));
   });
+  $("#seedStop").addEventListener("click", async () => {
+    const btn = $("#seedStop");
+    btn.disabled = true;
+    btn.textContent = "Stopping…";
+    try {
+      await runStopRender();
+      paintSeedDialog(true);
+    } catch (err) {
+      toast(err.message, "error");
+      btn.disabled = false;
+      btn.textContent = "■ Stop rendering";
+    }
+  });
   $("#seedPauseAll").addEventListener("click", () => {
     $("#seedGrid").querySelectorAll("video").forEach((v) => v.pause());
   });
@@ -7035,6 +7048,11 @@ function paintSeedDialog(force) {
   const idx = shots().indexOf(raw);
   $("#seedDialogTitle").textContent = `Seed comparison — Shot ${idx + 1}${raw.title ? `: ${raw.title}` : ""}`;
   $("#seedDelete").disabled = !takes.length || !!(sweep && sweep.busy);
+  const stopBtn = $("#seedStop");
+  const stopping = !!(state.status && state.status.cancelRequested);
+  stopBtn.hidden = !(sweep && sweep.busy);
+  stopBtn.disabled = stopping;
+  stopBtn.textContent = stopping ? "Stopping…" : "■ Stop rendering";
   if (!force && grid.dataset.sig === sig) {
     pending.forEach(([n, r]) => {
       const p = grid.querySelector(`[data-pending-seed="${n}"]`);
