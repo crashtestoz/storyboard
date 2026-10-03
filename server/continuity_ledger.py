@@ -37,6 +37,11 @@ LEDGER_FILE = "continuity-ledger.json"
 EXTRACT_VERSION = 2
 
 SIDES = ("left", "right")
+RANK = {"left": 0, "centre": 1, "right": 2}
+#: What the frame-side rules apply to. A set piece (a table, a pillar, a wind
+#: machine) stays put, so it flipping sides is as telling as a person doing
+#: it; a portable prop's frame side follows whoever carries it and is noise.
+PLACED = {"character", "set"}
 GROUNDED = {"seated", "lying", "kneeling"}
 UPRIGHT = {"standing", "moving"}
 
@@ -397,6 +402,31 @@ def _rule_issues(name: str, carried: dict[str, Any], start: dict[str, Any],
     return issues
 
 
+def _order_issues(entities: list[dict[str, Any]], state: dict[str, Any],
+                  found: list[dict[str, Any]], shot: int) -> list[dict[str, Any]]:
+    """The 180-degree rule proper: who is left of whom. A new framing can
+    slide everyone along the frame (centre to left is not a break), but two
+    characters or set pieces swapping their left-to-right order means the
+    camera crossed the line. Pairs already flagged by a side flip are left
+    out, so one break is reported once."""
+    flagged = {i["problem"].split(" is frame ", 1)[0] for i in found}
+    placed = [e for e in entities if e["kind"] in PLACED and e["start"]["side"]
+              and (state.get(e["name"]) or {}).get("side") and e["label"] not in flagged]
+    issues = []
+    for i, a in enumerate(placed):
+        for b in placed[i + 1:]:
+            was_a, was_b = state[a["name"]]["side"], state[b["name"]]["side"]
+            before = RANK[was_a[0]] - RANK[was_b[0]]
+            after = RANK[a["start"]["side"]] - RANK[b["start"]["side"]]
+            if before * after < 0:
+                left, right = (a, b) if before < 0 else (b, a)
+                issues.append({"cut": [shot - 1, shot], "source": "rule", "problem": (
+                    f"{left['label']} is left of {right['label']} at the cut (shot "
+                    f"{max(was_a[1], was_b[1])}) but right of it in shot {shot}, with no "
+                    "camera crossing the line.")})
+    return issues
+
+
 def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
     """Walk the shots in order. Returns, per shot (1-based, index 0 = shot
     1): whether it continues the previous shot's scene, the carried state of
@@ -421,13 +451,14 @@ def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
             state = {}
         at_start = {name: json.loads(json.dumps(s)) for name, s in state.items()}
         if same:
+            found = []
             for e in f["entities"]:
-                # Props and set pieces are read for reappearance, not
-                # frame-side or pose rules: an object's frame side moves with
-                # every camera angle and usually means nothing.
-                if e["kind"] == "character" and e["name"] in state:
-                    issues.extend(_rule_issues(e["label"], state[e["name"]], e["start"],
-                                               f["cameraCrossesLine"], number))
+                if e["kind"] in PLACED and e["name"] in state:
+                    found.extend(_rule_issues(e["label"], state[e["name"]], e["start"],
+                                              f["cameraCrossesLine"], number))
+            issues.extend(found)
+            if not f["cameraCrossesLine"]:
+                issues.extend(_order_issues(f["entities"], state, found, number))
         earlier = {}
         for e in f["entities"]:
             last = seen.get(e["name"])
