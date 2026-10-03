@@ -106,10 +106,43 @@ class CarryTests(unittest.TestCase):
         self.assertTrue(carried["shots"][1]["sameScene"])
         self.assertEqual(len(carried["issues"]), 1)
 
-    def test_props_and_set_pieces_get_no_frame_side_rule(self):
+    def test_portable_props_get_no_frame_side_rule(self):
         carried = cl.carry([
             facts(entity("headset", state("right"), kind="prop")),
             facts(entity("headset", state("left"), kind="prop"), continues=True),
+        ])
+        self.assertEqual(carried["issues"], [])
+
+    def test_a_set_piece_flipping_sides_is_flagged(self):
+        carried = cl.carry([
+            facts(entity("Arnold", state("centre")), entity("wind machine", state("right"), kind="set")),
+            facts(entity("Arnold", state("left")), entity("wind machine", state("left"), kind="set"),
+                  continues=True),
+        ])
+        [issue] = carried["issues"]
+        self.assertIn("wind machine is frame right at the cut", issue["problem"])
+
+    def test_two_characters_swapping_order_is_flagged_once(self):
+        carried = cl.carry([
+            facts(entity("Anna", state("left")), entity("Elias", state("centre"))),
+            facts(entity("Anna", state("centre")), entity("Elias", state("left")), continues=True),
+        ])
+        [issue] = carried["issues"]
+        self.assertIn("Anna is left of Elias at the cut (shot 1) but right of it in shot 2",
+                      issue["problem"])
+
+    def test_sliding_along_the_frame_in_the_same_order_is_fine(self):
+        carried = cl.carry([
+            facts(entity("Anna", state("left")), entity("Elias", state("right"))),
+            facts(entity("Anna", state("left")), entity("Elias", state("centre")), continues=True),
+        ])
+        self.assertEqual(carried["issues"], [])
+
+    def test_an_order_swap_after_crossing_the_line_is_fine(self):
+        carried = cl.carry([
+            facts(entity("Anna", state("left")), entity("Elias", state("centre"))),
+            facts(entity("Anna", state("centre")), entity("Elias", state("left")),
+                  continues=True, crosses=True),
         ])
         self.assertEqual(carried["issues"], [])
 
