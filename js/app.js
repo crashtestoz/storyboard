@@ -7667,7 +7667,7 @@ function versionBar({ owner, key, fields, apply, noun = "prompt" }) {
   rate.setAttribute("role", "group");
   rate.setAttribute("aria-label", "Rate this version");
   const save = el("button", "btn btn-sm", "Save version");
-  save.title = `Keep the ${noun} as it is now, so you can come back to it. ` +
+  const saveTitle = `Keep the ${noun} as it is now, so you can come back to it. ` +
     `Every render also keeps the ${noun} it rendered (marked ▶).`;
   const del = el("button", "btn btn-sm btn-ghost version-del", "✕");
 
@@ -7713,6 +7713,12 @@ function versionBar({ owner, key, fields, apply, noun = "prompt" }) {
       rate.appendChild(s);
     }
     save.disabled = !!cur || !fields.some((f) => (o[f] || "").trim());
+    // A greyed-out "Save version" reads as broken; say why there is nothing to save.
+    save.textContent = cur ? "Saved ✓" : "Save version";
+    save.title = cur
+      ? `This ${noun} is already a saved version` +
+        (cur.renderedAt ? " (kept automatically when it rendered)." : ".")
+      : saveTitle;
     del.disabled = !cur;
     del.title = cur ? "Delete this saved version (the text stays in the box)" : "";
   };
