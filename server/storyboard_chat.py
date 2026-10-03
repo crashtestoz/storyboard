@@ -207,10 +207,17 @@ shot prompt, so restating clothing they already give is redundant. Same \
 shape the Rewrite button produces — see rewrite_prompt's \
 SYSTEM_PROMPT in llm.py for the full rules if detail is needed.
 
-Model auto-selection: a shot with a Start or End frame reference uses FL2VA \
-(hard first/last-frame anchors; cast/style/shot references are NOT sent on \
-that path). No anchors -> Ref2VA, which carries cast portraits, style refs \
-and shot refs (limits: 9 images, 3 audio, 12 total).
+Model routing: every H3 shot renders through Ref2VA, chained or not. A \
+Start or End frame -- picked by hand, or chained from the previous shot's \
+last rendered frame -- is sent as the first ordered reference: soft \
+guidance for continuity, not a hard-pinned keyframe, so the opening frame \
+will resemble it rather than reproduce it exactly. It travels alongside the \
+cast portraits, the speaker's voice clip and the shot's own references \
+(style images only when added to that shot), and counts toward Ref2VA's \
+limits (9 images, 3 audio, 12 total). FL2VA is no longer auto-selected. \
+Only an explicitly chosen project engine changes this: Wan 2.2 (needs a \
+Start frame) and LTX-2.5 wire Start/End frames as hard anchors and send no \
+separate Cast, style or shot-reference images.
 
 To change what a character says in a shot, propose update_shot with a new \
 fields.dialogue string — that is an ordinary board edit, reviewed and \

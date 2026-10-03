@@ -46,11 +46,11 @@ tags when those images are supplied in every affected shot.
 Selected Cast portraits are attached and named automatically; mentioning the
 character by name is sufficient. Project style images are a library, not an
 automatic input: a style image is only sent for a shot once it's also added to
-that shot's own reference images. A Start frame or End frame automatically selects FL2VA and wires those images
-as hard first/last-frame anchors; separate Ref2VA images are not sent on that
-path. With no anchors, Ref2VA receives the combined ordered reference set and
-its nine-image limit applies. A chained Start frame resolves to the previous
-shot's last saved frame before the FL2VA request is generated.
+that shot's own reference images. A Start frame or End frame stays on Ref2VA:
+it leads the combined ordered reference set as soft guidance, not a hard
+first/last-frame anchor, and the nine-image limit covers it too. A chained
+Start frame resolves to the previous shot's last saved frame before the
+Ref2VA request is generated.
 
 ### Reference continuity
 
