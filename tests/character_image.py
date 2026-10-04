@@ -61,15 +61,15 @@ class CharacterImage(unittest.TestCase):
                                 "image": None, "voice": None, "voiceText": ""}]
         self.store.save("cast-test", board)
 
-    def run_job(self, name, description):
-        self.orch.create_character_image("cast-test", name, description)
+    def run_job(self, name, description, kind="character"):
+        self.orch.create_character_image("cast-test", name, description, kind)
         self.orch._stills_thread.join(30)
         return self.orch.status()["stills"]
 
     def test_image_is_filed_in_refs_and_returned(self):
         st = self.run_job("Maya", "A young widow in a grey shawl.")
         self.assertEqual(st["error"], "")
-        self.assertEqual(st["kind"], "character")
+        self.assertEqual(st["kind"], "reference")
         image = st["results"]["image"]
         self.assertEqual(image["path"], "cast-test/refs/maya-portrait.jpeg")
         self.assertEqual(image["url"], "/media/cast-test/refs/maya-portrait.jpeg")
@@ -99,6 +99,27 @@ class CharacterImage(unittest.TestCase):
         after = self.store.load("cast-test")
         self.assertEqual(after["characters"], before["characters"])
         self.assertEqual(after.get("styleRefs"), before.get("styleRefs"))
+
+    def test_prop_is_the_object_alone(self):
+        st = self.run_job("Headset", "A thin, flat band of matte black material.", "prop")
+        self.assertEqual(st["results"]["image"]["path"], "cast-test/refs/headset-prop.jpeg")
+        shot, project = self.backend.prepared[0]
+        self.assertIn("Headset: A thin, flat band of matte black material.", shot["prompt"])
+        self.assertIn("No people", shot["prompt"])
+        self.assertIn("no face", shot["prompt"])
+        self.assertNotIn("portrait", shot["prompt"].lower())
+        self.assertEqual(shot["characterIds"], [])
+        self.assertNotEqual(project["defaults"]["resolution"], "544x960")
+
+    def test_location_has_nobody_in_it(self):
+        st = self.run_job("Lab", "A cluttered basement workshop.", "location")
+        self.assertEqual(st["results"]["image"]["path"], "cast-test/refs/lab-location.jpeg")
+        shot, _ = self.backend.prepared[0]
+        self.assertIn("No people", shot["prompt"])
+
+    def test_unknown_kind_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "kind"):
+            self.orch.create_character_image("cast-test", "X", "Y", "vehicle")
 
     def test_no_description_is_refused(self):
         with self.assertRaisesRegex(ValueError, "description"):

@@ -166,10 +166,11 @@ const API = {
   // Start/mid/end Krea-2 stills for one shot — a fast preview, not a render.
   stills: (slug, shotId) => req("POST", "/api/stills", { slug, shotId }),
 
-  // A reference portrait made from a cast member's name and description.
+  // A reference image made from a description -- kind "character" (a
+  // portrait), "prop" (the object alone) or "location" (an empty place).
   // Runs as an image job; status().stills.results.image is the new ref.
-  characterImage: (slug, { name, description }) =>
-    req("POST", "/api/character-image", { slug, name, description }),
+  characterImage: (slug, { name, description, kind }) =>
+    req("POST", "/api/character-image", { slug, name, description, kind }),
 
   // Render several projects in sequence, each with its own saved settings.
   renderBatch: (slugs) => req("POST", "/api/render-batch", { slugs }),

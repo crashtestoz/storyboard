@@ -1815,9 +1815,15 @@ def _voice_direction(shot: dict, project: dict, clones_voice: bool) -> str:
     if not style:
         return ""
     speaker = _speaker_name(shot, project)
-    override = (" This direction overrides the tone, volume and pace of the "
+    # The Dialogue tab is where delivery is decided. A word like "whispers"
+    # left in the scene's action text otherwise competes with it -- and won,
+    # in Sample scene 1, over a direction to scream.
+    authority = (" How the line sounds comes only from this direction: any "
+                 "wording about the voice in the scene action above describes "
+                 "the action, not the delivery.")
+    override = (" It also overrides the tone, volume and pace of the "
                 "reference voice clip." if clones_voice else "")
-    return f"Voice direction for {speaker}'s line: {style}.{override}"
+    return f"Voice direction for {speaker}'s line: {style}.{authority}{override}"
 
 
 def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
@@ -1988,7 +1994,12 @@ def _reference_bindings(shot: dict, project: dict, model: str) -> list[dict]:
                 candidates.append((start, "Start frame", "opening frame and composition"))
         if shot.get("endRef"):
             candidates.append((shot["endRef"], "End frame", "closing frame and composition"))
-        candidates.extend((r, "Shot reference", "environment and composition") for r in (shot.get("referenceImages") or []))
+        # Named by its tag when it has one ("vr-headset reference"), not
+        # the generic "Shot reference", which also doubled up as "Shot
+        # reference reference" in the prompt.
+        candidates.extend((r, (r.get("tag") or "").strip().lstrip("@") if isinstance(r, dict) and r.get("tag") else "Shot",
+                           "environment and composition")
+                          for r in (shot.get("referenceImages") or []))
         candidates.extend((c["image"], c.get("name") or "Character", "character identity")
                           for c in _shot_characters(shot, project) if c.get("image"))
         # Project style refs are a library, not an automatic input: a shot

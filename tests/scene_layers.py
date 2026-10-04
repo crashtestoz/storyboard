@@ -46,9 +46,16 @@ class SceneLayers(unittest.TestCase):
         prompt = _resolved_prompt(self.shot, self.board, model='ref2va')
         direction = prompt.rindex('Voice direction for')
         self.assertGreater(direction, prompt.rindex('reference voice clip sets only who they sound like'))
-        self.assertTrue(prompt.endswith('This direction overrides the tone, volume and pace of the reference voice clip.'))
-        self.assertIn('Anxious, voice breaking with disappointment. This', prompt)
+        self.assertIn('How the line sounds comes only from this direction', prompt)
+        self.assertTrue(prompt.endswith('It also overrides the tone, volume and pace of the reference voice clip.'))
+        self.assertIn('Anxious, voice breaking with disappointment. How the line', prompt)
         self.assertNotIn('sets how they sound', prompt)
+
+    def test_tagged_reference_is_named_by_its_tag(self):
+        self.shot['referenceImages'].append(dict(path='headset.png', tag='vr-headset'))
+        prompt = _resolved_prompt(self.shot, self.board, model='ref2va')
+        self.assertIn('vr-headset reference;', prompt)
+        self.assertNotIn('reference reference', prompt)
 
     def test_no_direction_no_override_line(self):
         self.shot['dialogueStyle'] = ''

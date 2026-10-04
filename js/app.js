@@ -14,6 +14,8 @@
 "use strict";
 
 const state = {
+  // Scene "Generate image…" forms, by shot id: {open, kind, name, description}.
+  sceneRefGen: {},
   slug: null,
   board: null,
   boards: [],
@@ -225,9 +227,36 @@ function dialogueReadiness(raw) {
   return null;
 }
 
+/* Words in a shot prompt that describe how someone speaks. Delivery belongs
+   in the Dialogue tab's voice direction (it is what H3 is told decides it);
+   these in the action text compete with it, and once outvoted it. */
+const PROMPT_VOICE_WORDS = /\b(?:whisper(?:s|ed|ing)?|murmur(?:s|ed|ing)?|mutter(?:s|ed|ing)?|mumbl(?:es|ed|ing)|shout(?:s|ed|ing)?|scream(?:s|ed|ing)?|yell(?:s|ed|ing)?|shriek(?:s|ed|ing)?|sob(?:s|bed|bing)?|stammer(?:s|ed|ing)?|growl(?:s|ed|ing)?|bark(?:s|ed|ing)? (?:out|at)|cries out|cried out|(?:speaks|says|asks|answers|replies|calls|talks|pleads|begs)\s+\w+ly)\b/gi;
+
+// The words found, with a speech verb's adverb reported as the phrase
+// ("speaks urgently"), so the note quotes what is actually in the prompt.
+function promptVoiceWords(raw) {
+  const found = ((raw && raw.prompt) || "").match(PROMPT_VOICE_WORDS) || [];
+  return [...new Set(found.map((w) => w.toLowerCase().replace(/\s+/g, " ")))];
+}
+
 function dialogueGuide(host, raw) {
   if (!host) return;
+  dialogueReadinessNote(host, raw);
+  const voiceWords = (raw.dialogue || "").trim() ? promptVoiceWords(raw) : [];
+  if (voiceWords.length) {
+    const note = el("div", "field-note dialogue-voice-words");
+    note.append(
+      el("strong", null, `Voice words in the shot prompt: ${voiceWords.map((w) => `“${w}”`).join(", ")}. `),
+      el("span", null, "How the line sounds is set by the Voice direction here. The prompt's words " +
+        "still shape the action (face and mouth), so keep them in agreement with it or take them out.")
+    );
+    host.appendChild(note);
+  }
+}
+
+function dialogueReadinessNote(host, raw) {
   host.innerHTML = "";
+  host.className = "dialogue-guide";
   const issue = dialogueReadiness(raw);
   if (!issue) {
     if ((raw.dialogue || "").trim()) {
@@ -3237,12 +3266,15 @@ async function refreshStatus() {
     paintSeedDialog(false);
     if (wasStillsBusy && !stillsBusy) {
       if (!s.busy) stopPolling();
-      // the stills, once done, are saved onto the shot server-side
-      const res = await API.getBoard(state.slug);
-      takeStale(res);
-      state.board = res.board;
-      // The Cast editor reports on its own character images.
-      if (s.stills.kind !== "character") {
+      // Create Image saves its stills onto the shot server-side, so the board
+      // is re-read. A reference image is not on the board until the page
+      // that asked for it adds it (Cast editor, scene Reference images) --
+      // re-reading then raced that edit and could replace the board with
+      // one from just before it, so the new image vanished from the page.
+      if (s.stills.kind !== "reference") {
+        const res = await API.getBoard(state.slug);
+        takeStale(res);
+        state.board = res.board;
         toast(
           s.stills.error ? `Image failed: ${s.stills.error}` : "Image ready.",
           s.stills.error ? "error" : "info"
@@ -4758,22 +4790,14 @@ async function editCharacter(existing) {
     genBtn.disabled = true;
     genNote.textContent = "Generating…";
     try {
-      state.status = await API.characterImage(state.slug, { name, description });
-      startPolling();
-      let st = state.status.stills || {};
-      while (st.busy) {
-        await new Promise((r) => setTimeout(r, 1500));
-        st = (await API.status()).stills || {};
-        if (st.busy && st.progress) genNote.textContent = `Generating… ${Math.round(st.progress)}%`;
-      }
-      if (st.kind !== "character" || !(st.results && st.results.image)) {
-        throw new Error(st.error || "no image came back");
-      }
+      const image = await generateReferenceImage(
+        { name, description, kind: "character" },
+        (pct) => { genNote.textContent = `Generating… ${pct}%`; });
       if (!current()) {
-        toast(`Generated ${st.results.image.label} — it is in refs/ to pick from the image slot.`);
+        toast(`Generated ${image.label} — it is in refs/ to pick from the image slot.`);
         return;
       }
-      draft.image = st.results.image;
+      draft.image = image;
       descProposal.innerHTML = "";
       genNote.textContent = "Set as the reference image — Save to keep it.";
     } catch (err) {
@@ -5974,6 +5998,7 @@ function renderEditorBody() {
     refPanel.style.marginTop = "var(--sp-3)";
     refPanel.appendChild(paneHint("Reference images", null));
     refPanel.appendChild(shotReferenceImages(raw));
+    refPanel.appendChild(sceneReferenceGenerator(raw));
 
     const noteModel = effectiveShotModel(raw);
     const note = noteModel === "wan-i2v"
@@ -6617,7 +6642,7 @@ function openLightbox(src, alt) {
 function renderStillsPane(raw) {
   const wrap = el("div", "stills-pane");
   const st0 = state.status && state.status.stills;
-  const st = st0 && st0.kind !== "character" ? st0 : null;
+  const st = st0 && st0.kind !== "reference" ? st0 : null;
   const runningHere = !!(st && st.busy && st.shotId === raw.id);
   const failedHere = !!(st && st.error && st.shotId === raw.id && !st.busy);
 
@@ -8076,6 +8101,115 @@ function refSlot(label, shot, key, pickerTitle = null) {
     await saveNow();
   });
   return slot;
+}
+
+/* Start a reference-image job and wait for it: resolves with the new ref
+   ({path, url, label}), filed in refs/ by the server. kind: "character",
+   "prop" or "location". */
+async function generateReferenceImage({ name, description, kind }, onProgress) {
+  state.status = await API.characterImage(state.slug, { name, description, kind });
+  startPolling();
+  let st = state.status.stills || {};
+  while (st.busy) {
+    await new Promise((r) => setTimeout(r, 1500));
+    st = (await API.status()).stills || {};
+    if (st.busy && st.progress && onProgress) onProgress(Math.round(st.progress));
+  }
+  if (st.kind !== "reference" || !(st.results && st.results.image)) {
+    throw new Error(st.error || "no image came back");
+  }
+  return st.results.image;
+}
+
+/* Generate a prop or location image straight into this scene's reference
+   images, tagged by its name (@headset) so the prompt can point at it. The
+   same file can then be added to other scenes and keeps its tag. */
+function sceneReferenceGenerator(shot) {
+  const draft = (state.sceneRefGen[shot.id] ||= { open: false, kind: "prop", name: "", description: "" });
+  const box = el("div", "scene-refgen");
+  if (!draft.open) {
+    const open = el("button", "btn btn-sm", "Generate image…");
+    open.type = "button";
+    open.title = "Make a reference image of a prop or a location from a description";
+    open.addEventListener("click", () => { draft.open = true; renderEditor(); });
+    box.appendChild(open);
+    return box;
+  }
+
+  const kind = select([["prop", "Prop / object"], ["location", "Location"]], draft.kind,
+    (v) => { draft.kind = v; });
+  kind.setAttribute("aria-label", "Kind of reference image");
+  const name = el("input");
+  name.type = "text";
+  name.placeholder = "Name, e.g. headset (becomes its @tag)";
+  name.value = draft.name;
+  name.dataset.fkey = `scene-refgen-name-${shot.id}`;
+  name.addEventListener("input", () => { draft.name = name.value; });
+  const desc = el("textarea");
+  desc.rows = 3;
+  desc.placeholder = "What it looks like, e.g. a thin, flat band of matte black material, about two fingers tall, curved like wraparound sunglasses with no lenses, faint cold-blue glow along its lower edge";
+  desc.value = draft.description;
+  desc.dataset.fkey = `scene-refgen-desc-${shot.id}`;
+  desc.addEventListener("input", () => { draft.description = desc.value; });
+
+  const note = el("span", "field-note", draft.running ? "Generating…" : "");
+  const go = el("button", "btn btn-sm btn-primary", "Generate");
+  go.type = "button";
+  const gpuBusy = !!(state.status && (state.status.busy ||
+    (state.status.stills && state.status.stills.busy)));
+  go.disabled = !!draft.running || gpuBusy;
+  go.title = gpuBusy ? "Wait for the current render or image to finish" : "";
+  const close = el("button", "btn btn-ghost btn-sm", "Close");
+  close.type = "button";
+  close.addEventListener("click", () => { draft.open = false; renderEditor(); });
+
+  go.addEventListener("click", async () => {
+    if (!draft.description.trim()) {
+      toast("Describe it first — the image is made from the description.", "error");
+      return;
+    }
+    const slug = state.slug;
+    draft.running = true;
+    go.disabled = true;
+    note.textContent = "Generating…";
+    try {
+      const image = await generateReferenceImage(
+        { name: draft.name.trim(), description: draft.description.trim(), kind: draft.kind },
+        (pct) => { note.textContent = `Generating… ${pct}%`; });
+      const current = shotById(shot.id);
+      if (state.slug !== slug || !current) {
+        toast(`Generated ${image.label} — it is in refs/ to add from Reference images.`);
+        return;
+      }
+      if (!Array.isArray(current.referenceImages)) current.referenceImages = [];
+      const tag = draft.name.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "").toLowerCase();
+      const taken = current.referenceImages.some((r) => r.tag === tag);
+      current.referenceImages.push({
+        kind: "upload", ...image,
+        tag: tag && !taken ? tag : "",
+        role: draft.kind === "prop" ? "object appearance" : "environment",
+      });
+      draft.open = false;
+      draft.name = draft.description = "";
+      markDirty();
+      await saveNow();
+      toast(tag && !taken
+        ? `Added ${image.label} as @${tag} — refer to it in the prompt as @${tag}.`
+        : `Added ${image.label} to this scene's reference images.`);
+    } catch (err) {
+      toast(`Could not generate an image: ${err.message}`, "error");
+    } finally {
+      draft.running = false;
+      render();
+    }
+  });
+
+  const row = el("div", "scene-refgen-row");
+  row.append(kind, name);
+  const actions = el("div", "scene-refgen-row");
+  actions.append(go, close, note);
+  box.append(row, desc, actions);
+  return box;
 }
 
 function shotReferenceImages(shot) {

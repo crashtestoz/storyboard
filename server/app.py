@@ -1163,7 +1163,8 @@ class Handler(BaseHTTPRequestHandler):
             if not payload.get("slug"):
                 raise ValueError("slug is required")
             return self._send_json(ctx.orch.create_character_image(
-                payload["slug"], payload.get("name") or "", payload.get("description") or ""))
+                payload["slug"], payload.get("name") or "", payload.get("description") or "",
+                payload.get("kind") or "character"))
 
         if path == "/api/stop":
             return self._send_json(ctx.orch.stop())

@@ -187,7 +187,7 @@ class Orchestrator:
         # reusing _runs/_order, which are shaped around a whole render batch.
         self._stills_thread: threading.Thread | None = None
         self._stills_shot_id: str | None = None
-        self._stills_kind = "still"   # "still" (Create Image) or "character"
+        self._stills_kind = "still"   # "still" (Create Image) or "reference"
         # Shot ids are only unique within a board, and the phone view has to
         # say which project the stills belong to.
         self._stills_slug: str | None = None
@@ -625,56 +625,78 @@ class Orchestrator:
         return self.status()
 
     # ------------------------------------------------------------------ #
-    # a cast member's reference image, from their description
+    # reference images made from a description
     # ------------------------------------------------------------------ #
 
-    def create_character_image(self, slug: str, name: str, description: str) -> dict[str, Any]:
-        """A reference portrait of a cast member, made from their description.
+    #: What each kind of generated reference shows, and what it must not. A
+    #: prop or a place must have nobody in it: Ref2VA uses every picture it
+    #: is given, so a stray face on a headset becomes a face in the scene.
+    REFERENCE_KINDS = {
+        "character": ("portrait",
+                      "Character reference portrait. {who}. The whole figure in view, "
+                      "standing, centred and facing the camera, against a plain neutral "
+                      "studio background with clear even lighting. One person only, no "
+                      "scenery, no props beyond what they wear or carry, no text."),
+        "prop": ("prop",
+                 "Product reference photograph of an object: {who}. The object alone, "
+                 "isolated, centred and entirely in view, on a plain neutral studio "
+                 "background with clear even lighting. No people, no person wearing "
+                 "or holding it, no face, no head, no hands, no mannequin, no body "
+                 "parts, no text."),
+        "location": ("location",
+                     "Location reference: {who}. An empty establishing view of the "
+                     "place, showing its layout, materials and lighting. No people, no "
+                     "characters, no figures, no text."),
+    }
 
-        For a character with no picture yet: the still engine renders the
-        description on its own, in the board's render style, and the image is
-        filed in the project's refs/ like an upload. The Cast editor then sets
-        it as the character's reference image (status ``results.image``).
-        Works for a character not saved yet, so it takes the text, not an id.
+    def create_character_image(self, slug: str, name: str, description: str,
+                               kind: str = "character") -> dict[str, Any]:
+        """A reference image made from a description: a cast member's
+        portrait, a prop on its own, or an empty location.
+
+        The still engine renders the description in the board's render style
+        and the image is filed in the project's refs/ like an upload; the
+        caller (Cast editor, or a scene's Reference images) puts it to use
+        from status ``results.image``. Takes text, not an id, so it works
+        for a character not saved yet.
         """
+        if kind not in self.REFERENCE_KINDS:
+            raise ValueError(f"unknown kind of reference image: {kind}")
         if self.busy:
             raise RuntimeError("a render is already running")
         if self.stills_busy:
             raise RuntimeError("an image is already generating — one GPU job at a time")
         name, description = (name or "").strip(), (description or "").strip()
         if not description:
-            raise ValueError("write the character's description first — the image is made from it")
+            raise ValueError("write a description first — the image is made from it")
         board = self.store.load(slug)
         self._check_still_engine(board)
-        return self._start_stills_job(slug, None, "character", self._run_character_image,
-                                      (slug, name, description))
+        return self._start_stills_job(slug, None, "reference", self._run_character_image,
+                                      (slug, name, description, kind))
 
-    def _run_character_image(self, slug: str, name: str, description: str) -> None:
+    def _run_character_image(self, slug: str, name: str, description: str,
+                             kind: str = "character") -> None:
         try:
             board = self.store.load(slug)
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            work_rel = f"{slugify(slug)}/character-images/{stamp}"
+            work_rel = f"{slugify(slug)}/reference-images/{stamp}"
             work_abs = self.data_dir / work_rel
             work_abs.mkdir(parents=True, exist_ok=True)
 
             description = description.rstrip(" .")
             who = f"{name}: {description}" if name else description
-            prompt = (
-                f"Character reference portrait. {who}. The whole figure in view, "
-                "standing, centred and facing the camera, against a plain neutral "
-                "studio background with clear even lighting. One person only, no "
-                "scenery, no props beyond what they wear or carry, no text."
-            )
-            # Only the character and the look: the scene description would
-            # put a location around them, and other cast would join them.
+            suffix, template = self.REFERENCE_KINDS[kind]
+            prompt = template.format(who=who)
+            # Only the subject and the look: the scene description would put
+            # a location (and its people) around it.
             project = dict(board)
             project["sceneDescription"] = ""
             project["soundscape"] = ""
             project["defaults"] = {**(board.get("defaults") or {}), "draft": False, "sketch": False}
             # A standing figure wants a tall frame: the project's size, turned
-            # to portrait if it is landscape.
+            # to portrait if it is landscape. Props and places keep its shape.
             w, _, h = str(project["defaults"].get("resolution") or "960x544").partition("x")
-            if w.isdigit() and h.isdigit() and int(w) > int(h):
+            if kind == "character" and w.isdigit() and h.isdigit() and int(w) > int(h):
                 project["defaults"]["resolution"] = f"{h}x{w}"
             still_model = self._still_model(board)
             steps, seed = still_params(board.get("defaults") or {}, True)
@@ -691,7 +713,7 @@ class Orchestrator:
             def on_event(ev: ProgressEvent) -> None:
                 if ev.log_line:
                     with self._lock:
-                        self._stills_log.append({"level": ev.log_level, "text": f"[character] {ev.log_line}"})
+                        self._stills_log.append({"level": ev.log_level, "text": f"[{kind}] {ev.log_line}"})
 
             result = self.backend.run(spec, on_event, self._cancel.is_set)
             if result.cancelled or self._cancel.is_set():
@@ -708,11 +730,11 @@ class Orchestrator:
             # Filed in refs/ like an upload, so the picker offers it too.
             refs = self.store.refs_dir(slug)
             refs.mkdir(parents=True, exist_ok=True)
-            base = slugify(name or description)[:40] or "character"
-            dest = refs / f"{base}-portrait{out.suffix}"
+            base = slugify(name or description)[:40] or kind
+            dest = refs / f"{base}-{suffix}{out.suffix}"
             n = 2
             while dest.exists():
-                dest = refs / f"{base}-portrait-{n}{out.suffix}"
+                dest = refs / f"{base}-{suffix}-{n}{out.suffix}"
                 n += 1
             shutil.copy2(out, dest)
             rel = str(dest.relative_to(self.data_dir)).replace("\\", "/")
