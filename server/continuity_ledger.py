@@ -228,11 +228,33 @@ def _complete_json(service, system: str, user: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def chain_sources(board: dict[str, Any]) -> list[int | None]:
+    """Per shot, the 1-based number of the earlier shot its Start frame is
+    chained from, or None. A chain may skip shots (shot 3 picking up from
+    shot 1 with a cutaway between), and then that source, not the shot
+    before, is what the shot continues from."""
+    shots = board.get("shots") or []
+    index = {s.get("id"): i for i, s in enumerate(shots)}
+    out: list[int | None] = []
+    for i, shot in enumerate(shots):
+        ref = shot.get("startRef")
+        src = index.get(ref.get("from")) if isinstance(ref, dict) and ref.get("kind") == "chain" else None
+        out.append(src + 1 if src is not None and src < i else None)
+    return out
+
+
+def _previous_number(sources: list[int | None] | None, number: int) -> int:
+    """The shot that shot *number* (1-based) continues from."""
+    src = sources[number - 1] if sources and number <= len(sources) else None
+    return src or number - 1
+
+
 def _extract_input(board: dict[str, Any], index: int) -> str:
     shots = board.get("shots") or []
     shot = shots[index]
     cast = [c.get("name") for c in board.get("characters") or [] if c.get("name")]
-    previous = shots[index - 1].get("prompt") if index > 0 else None
+    prev = _previous_number(chain_sources(board), index + 1)
+    previous = shots[prev - 1].get("prompt") if prev > 0 else None
     return (
         "SCENE DESCRIPTION (applies to every shot):\n"
         + (board.get("sceneDescription") or "(none)")
@@ -371,11 +393,12 @@ def _apply(state: dict[str, Any], moment: dict[str, Any], shot: int) -> None:
 
 
 def _rule_issues(name: str, carried: dict[str, Any], start: dict[str, Any],
-                 crosses: bool, shot: int) -> list[dict[str, Any]]:
+                 crosses: bool, shot: int, prev: int | None = None) -> list[dict[str, Any]]:
     issues = []
+    cut = [shot - 1 if prev is None else prev, shot]
 
     def issue(problem: str) -> None:
-        issues.append({"cut": [shot - 1, shot], "source": "rule", "problem": problem})
+        issues.append({"cut": list(cut), "source": "rule", "problem": problem})
 
     side = carried.get("side")
     if side and side[0] in SIDES and start["side"] in SIDES \
@@ -403,7 +426,8 @@ def _rule_issues(name: str, carried: dict[str, Any], start: dict[str, Any],
 
 
 def _order_issues(entities: list[dict[str, Any]], state: dict[str, Any],
-                  found: list[dict[str, Any]], shot: int) -> list[dict[str, Any]]:
+                  found: list[dict[str, Any]], shot: int,
+                  prev: int | None = None) -> list[dict[str, Any]]:
     """The 180-degree rule proper: who is left of whom. A new framing can
     slide everyone along the frame (centre to left is not a break), but two
     characters or set pieces swapping their left-to-right order means the
@@ -420,18 +444,24 @@ def _order_issues(entities: list[dict[str, Any]], state: dict[str, Any],
             after = RANK[a["start"]["side"]] - RANK[b["start"]["side"]]
             if before * after < 0:
                 left, right = (a, b) if before < 0 else (b, a)
-                issues.append({"cut": [shot - 1, shot], "source": "rule", "problem": (
+                issues.append({"cut": [shot - 1 if prev is None else prev, shot],
+                               "source": "rule", "problem": (
                     f"{left['label']} is left of {right['label']} at the cut (shot "
                     f"{max(was_a[1], was_b[1])}) but right of it in shot {shot}, with no "
                     "camera crossing the line.")})
     return issues
 
 
-def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
+def carry(facts: list[dict[str, Any] | None],
+          sources: list[int | None] | None = None) -> dict[str, Any]:
     """Walk the shots in order. Returns, per shot (1-based, index 0 = shot
     1): whether it continues the previous shot's scene, the carried state of
     every entity at its start, earlier looks of whatever reappears in it
-    after a gap, and the rule issues found at the cut into it."""
+    after a gap, and the rule issues found at the cut into it.
+
+    *sources* (from chain_sources) lets a shot continue from an earlier shot
+    than the one before it: it then starts from the state that source ended
+    in, and its cut is checked against that source."""
     shots = []
     issues: list[dict[str, Any]] = []
     state: dict[str, dict[str, Any]] = {}
@@ -439,10 +469,17 @@ def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
     seen: dict[str, int] = {}
     places: dict[str, dict[str, Any]] = {}
     previous = None
+    ends: dict[int, tuple[dict[str, Any], dict[str, Any] | None]] = {}
     for number, f in enumerate(facts, 1):
+        prev = _previous_number(sources, number)
+        if prev != number - 1:
+            # Resume the chained source's thread; the shots between are a
+            # cutaway whose positions and props do not carry into this one.
+            state, previous = copy.deepcopy(ends.get(prev, ({}, None)))
         if f is None:
             shots.append({"number": number, "unread": True})
             state, previous = {}, None
+            ends[number] = ({}, None)
             continue
         same = _same_scene(f, previous)
         if not same:
@@ -455,20 +492,20 @@ def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
             for e in f["entities"]:
                 if e["kind"] in PLACED and e["name"] in state:
                     found.extend(_rule_issues(e["label"], state[e["name"]], e["start"],
-                                              f["cameraCrossesLine"], number))
+                                              f["cameraCrossesLine"], number, prev))
             issues.extend(found)
             if not f["cameraCrossesLine"]:
-                issues.extend(_order_issues(f["entities"], state, found, number))
+                issues.extend(_order_issues(f["entities"], state, found, number, prev))
         earlier = {}
         for e in f["entities"]:
             last = seen.get(e["name"])
-            if last is not None and last < number - 1 and e["name"] in looks:
+            if last is not None and last != prev and e["name"] in looks:
                 earlier[e["name"]] = {"look": looks[e["name"]][0], "shot": looks[e["name"]][1]}
         place = places.get(f.get("location") or "")
-        if place and place["shot"] < number - 1:
+        if place and place["shot"] != prev:
             earlier["location: " + f["location"]] = place
-        shots.append({"number": number, "sameScene": same, "stateAtStart": at_start,
-                      "earlier": earlier})
+        shots.append({"number": number, "previous": prev, "sameScene": same,
+                      "stateAtStart": at_start, "earlier": earlier})
         for e in f["entities"]:
             s = state.setdefault(e["name"], {})
             _apply(s, e["start"], number)
@@ -481,13 +518,15 @@ def carry(facts: list[dict[str, Any] | None]) -> dict[str, Any]:
                 "look": "; ".join(v for v in (f.get("timeOfDay"), f.get("lighting")) if v),
                 "shot": number}
         previous = f
+        ends[number] = (copy.deepcopy(state), f)
     return {"shots": shots, "issues": issues}
 
 
-def state_before(facts: list[dict[str, Any] | None], number: int) -> dict[str, Any]:
+def state_before(facts: list[dict[str, Any] | None], number: int,
+                 sources: list[int | None] | None = None) -> dict[str, Any]:
     """The carried state where shot *number* (1-based) starts — what a new or
     rewritten shot at that point has to agree with."""
-    return carry(facts[:number])["shots"][number - 1] if number <= len(facts) else {}
+    return carry(facts[:number], sources)["shots"][number - 1] if number <= len(facts) else {}
 
 
 # --------------------------------------------------------------------------- #
@@ -519,9 +558,10 @@ def _board_context(board: dict[str, Any]) -> str:
 def _cut_input(context: str, shots: list[dict[str, Any]], info: dict[str, Any],
                rules: list[dict[str, Any]]) -> str:
     b = info["number"]
+    a = info.get("previous") or b - 1
     return (
         context
-        + f"\n\nSHOT A (shot {b - 1}):\n" + (shots[b - 2].get("prompt") or "")
+        + f"\n\nSHOT A (shot {a}):\n" + (shots[a - 1].get("prompt") or "")
         + f"\n\nSHOT B (shot {b}):\n" + (shots[b - 1].get("prompt") or "")
         + "\n\nSAME SCENE: " + ("yes, B follows straight on from A" if info["sameScene"]
                                else "no, B cuts to another place or time")
@@ -543,7 +583,8 @@ def check_cuts(board: dict[str, Any], carried: dict[str, Any], services: list[An
     for r in carried["issues"]:
         rules_at.setdefault(r["cut"][1], []).append(r)
     cuts = [info for info in carried["shots"][1:]
-            if not info.get("unread") and not carried["shots"][info["number"] - 2].get("unread")]
+            if not info.get("unread")
+            and not carried["shots"][(info.get("previous") or info["number"] - 1) - 1].get("unread")]
     context = _board_context(board)
     results = run_parallel(
         lambda service, info: _complete_json(
@@ -553,10 +594,11 @@ def check_cuts(board: dict[str, Any], carried: dict[str, Any], services: list[An
     out: list[dict[str, Any]] = []
     for info, result in zip(cuts, results):
         b = info["number"]
+        a = info.get("previous") or b - 1
         rules = [dict(r) for r in rules_at.get(b, [])]
         if not isinstance(result, dict):
             out.extend(rules)
-            out.append({"cut": [b - 1, b], "source": "error",
+            out.append({"cut": [a, b], "source": "error",
                         "problem": f"Could not check this cut: {result}"})
             continue
         for raw in result.get("rules") or []:
@@ -572,15 +614,15 @@ def check_cuts(board: dict[str, Any], carried: dict[str, Any], services: list[An
                 continue
             if reason:
                 target["reason"] = reason
-            fix = _fix(shots, b, raw)
+            fix = _fix(shots, a, b, raw)
             if fix:
                 target["fix"] = fix
         for raw in result.get("issues") or []:
             if not isinstance(raw, dict):
                 continue
-            fix = _fix(shots, b, raw)
+            fix = _fix(shots, a, b, raw)
             if _text(raw.get("problem")):
-                out.append({"cut": [b - 1, b], "source": "review",
+                out.append({"cut": [a, b], "source": "review",
                             "problem": _text(raw["problem"]),
                             **({"quote": _text(raw.get("quote"))} if _text(raw.get("quote")) else {}),
                             **({"fix": fix} if fix else {})})
@@ -588,10 +630,11 @@ def check_cuts(board: dict[str, Any], carried: dict[str, Any], services: list[An
     return out
 
 
-def _fix(shots: list[dict[str, Any]], b: int, raw: dict[str, Any]) -> dict[str, Any] | None:
+def _fix(shots: list[dict[str, Any]], a: int, b: int,
+         raw: dict[str, Any]) -> dict[str, Any] | None:
     """A model's fix as a replace_text proposal, only if its find text really
     is in that shot's prompt — otherwise it would replace nothing."""
-    number = b - 1 if str(raw.get("shot")).strip().upper() == "A" else b
+    number = a if str(raw.get("shot")).strip().upper() == "A" else b
     shot = shots[number - 1]
     find, replace = raw.get("find"), raw.get("replace")
     if not (isinstance(find, str) and find and isinstance(replace, str) and find != replace
@@ -612,7 +655,7 @@ def check_board(board: dict[str, Any], project_dir: Path, services: list[Any],
     ledger = load_ledger(project_dir)
     facts, fresh = extract(board, services, ledger["shots"], per_service)
     save_ledger(project_dir, ledger)
-    carried = carry(facts)
+    carried = carry(facts, chain_sources(board))
     issues = check_cuts(board, carried, services, per_service)
     issues.sort(key=lambda i: (i["cut"][1], i.get("source") != "rule"))
     return {

@@ -99,6 +99,25 @@ const shots = () => (state.board && state.board.shots) || [];
 const shotById = (id) => shots().find((s) => s.id === id);
 const shotIndex = (id) => shots().findIndex((s) => s.id === id);
 const selectedShot = () => shotById(state.selectedId);
+// A chained Start frame names its source shot by id, and may skip shots
+// (shot 3 picking up from shot 1 across a cutaway). The "shot N" wording is
+// worked out from where the source sits now; a stored label goes stale the
+// moment shots are reordered.
+const chainRef = (from) => ({ kind: "chain", from, label: `last frame of shot ${shotIndex(from) + 1}` });
+const chainLabel = (ref) => {
+  const n = shotIndex(ref.from);
+  return n < 0 ? "source shot was deleted" : `last frame of shot ${n + 1}`;
+};
+// Why a shot's chain cannot render where it sits (the server refuses missing
+// and forward links outright), or null when it is fine.
+function chainProblem(shot, i, list = shots()) {
+  const ref = shot && shot.startRef;
+  if (!ref || ref.kind !== "chain") return null;
+  const src = list.findIndex((s) => s.id === ref.from);
+  if (src < 0) return "Its chain source was deleted — pick another source or clear the chain.";
+  if (src >= i) return `It chains from shot ${src + 1}, which now comes after it — move it back or pick another source.`;
+  return null;
+}
 const modelCap = (id) => state.models.find((m) => m.id === id) || null;
 // Video shots always render through Ref2VA now: Start/End frame images
 // (manually chosen or chained from the previous shot's last rendered frame)
@@ -4407,6 +4426,7 @@ function renderCutSettings(host, busy) {
   music.onclick = () => { openSettings(); document.querySelector('[data-settings-tab="soundtrack"]')?.click(); };
   details.append(el("div", "field-note", "Music for the whole cut is set up in Settings → Soundtrack."), music);
   const chain = el("button", "btn btn-sm", "Chain all scenes from their previous shot");
+  chain.title = "Chains that already skip back to an earlier shot are kept";
   chain.disabled = busy || shots().length < 2;
   chain.onclick = () => {
     const manual = shots().filter((s, i) => i > 0 && s.startRef && s.startRef.kind !== "chain");
@@ -4414,7 +4434,10 @@ function renderCutSettings(host, busy) {
       `${manual.length} shot(s) already have a manually chosen Start frame. Replace them with a chain from the previous shot?`
     )) return;
     shots().forEach((s, i, all) => {
-      s.startRef = i ? { kind: "chain", from: all[i - 1].id, label: `last frame of shot ${i}` } : null;
+      // A chain that deliberately skips back past a cutaway is kept.
+      const src = s.startRef && s.startRef.kind === "chain" ? shotIndex(s.startRef.from) : -1;
+      if (src >= 0 && src < i - 1) return;
+      s.startRef = i ? chainRef(all[i - 1].id) : null;
     });
     markDirty(); render();
   };
@@ -5061,8 +5084,12 @@ function renderStrip() {
       thumb.appendChild(b);
     }
     if (raw.startRef && raw.startRef.kind === "chain") {
-      const b = el("span", "chain-badge");
-      b.append(el("span", null, "⛓"), el("span", null, "chained"));
+      const problem = chainProblem(raw, i);
+      const src = shotIndex(raw.startRef.from);
+      const b = el("span", problem ? "chain-badge broken" : "chain-badge");
+      b.append(el("span", null, "⛓"), el("span", null,
+        problem ? "broken chain" : src === i - 1 ? "chained" : `from ${src + 1}`));
+      b.title = problem || `Start frame: ${chainLabel(raw.startRef)}`;
       thumb.appendChild(b);
     }
     card.appendChild(thumb);
@@ -5192,6 +5219,14 @@ function moveShot(dragId, targetId = null, after = false) {
   const [moved] = next.splice(from, 1);
   next.splice(to, 0, moved);
   if (refuseLockedShift(next)) return false;
+  const was = state.board.shots;
+  const broken = next.filter((s, i) => !chainProblem(s, was.indexOf(s), was) && chainProblem(s, i, next));
+  if (broken.length && !confirm(
+    `This move puts ${broken.length === 1 ? "a shot" : `${broken.length} shots`} before the shot ` +
+    `${broken.length === 1 ? "its" : "their"} Start frame is chained from ` +
+    `(${broken.map((s) => `“${s.title || "Untitled"}”`).join(", ")}). ` +
+    "Those chains will not render until fixed. Move anyway?"
+  )) return false;
   state.board.shots = next;
   markDirty();
   render();
@@ -5271,9 +5306,13 @@ function wireDragList(list) {
   });
 }
 
+// A new shot starts from the three headings every shot prompt is written in.
+const SHOT_PROMPT_TEMPLATE =
+  "Camera Direction & Framing: \n\nClothing / Appearance: \n\nPose / Action: ";
+
 async function addShot() {
   try {
-    const { board, shot } = await API.addShot(state.slug, {});
+    const { board, shot } = await API.addShot(state.slug, { prompt: SHOT_PROMPT_TEMPLATE });
     state.board = board;
     state.selectedId = shot.id;
     // Adding a shot is an explicit editing action. Do not let an in-flight
@@ -5924,24 +5963,47 @@ function renderEditorBody() {
     refPanel.appendChild(slots);
 
     if (idx > 0) {
-      const prev = shots()[idx - 1];
       const wrap = el("div");
       wrap.style.marginTop = "var(--sp-3)";
-      const t = el("label", "toggle");
-      const cb = el("input");
-      cb.type = "checkbox";
-      cb.checked = !!(raw.startRef && raw.startRef.kind === "chain");
-      cb.addEventListener("change", () => {
+      const chained = raw.startRef && raw.startRef.kind === "chain" ? raw.startRef : null;
+      const t = el("label", "field-note", "Chain start frame from ");
+      const pick = el("select");
+      pick.setAttribute("aria-label", "Chain start frame from");
+      const none = el("option", null, chained || !raw.startRef ? "No chain" : "No chain (keeps the picked Start frame)");
+      none.value = "";
+      pick.appendChild(none);
+      // Earlier shots only, nearest first: the usual pick is the shot just
+      // before, and the server refuses a chain to a later shot.
+      for (let j = idx - 1; j >= 0; j--) {
+        const s = shots()[j];
+        const o = el("option", null,
+          `Shot ${j + 1} · ${s.title || "Untitled"}${j === idx - 1 ? " (previous)" : ""} — last frame`);
+        o.value = s.id;
+        pick.appendChild(o);
+      }
+      const problem = chainProblem(raw, idx);
+      if (chained && problem) {
+        const o = el("option", null, "⚠ broken chain");
+        o.value = chained.from;
+        pick.appendChild(o);
+      }
+      pick.value = chained ? chained.from : "";
+      pick.addEventListener("change", () => {
         const current = live();
-        current.startRef = cb.checked
-          ? { kind: "chain", from: prev.id, label: `last frame of shot ${idx}` }
-          : null;
+        if (pick.value) current.startRef = chainRef(pick.value);
+        else if (current.startRef && current.startRef.kind === "chain") current.startRef = null;
         markDirty();
         render();
       });
-      t.append(cb, el("span", "toggle-track"),
-               el("span", null, `Chain start frame from shot ${idx}'s last rendered frame`));
+      t.appendChild(pick);
       wrap.appendChild(t);
+      if (problem) wrap.appendChild(el("div", "field-note warn", problem));
+      else if (chained && shotIndex(chained.from) !== idx - 1) {
+        wrap.appendChild(el("div", "field-note",
+          `Skips shot${idx - shotIndex(chained.from) > 2 ? "s" : ""} ${shotIndex(chained.from) + 2}` +
+          `${idx - shotIndex(chained.from) > 2 ? `–${idx}` : ""}: this shot picks up where shot ` +
+          `${shotIndex(chained.from) + 1} ends, and the continuity check treats the shots between as a cutaway.`));
+      }
       wrap.appendChild(el("div", "field-note",
         modelNow === "wan-i2v" || modelNow === "ltx-2.5"
           ? `Sent to ${modelNow === "wan-i2v" ? "Wan 2.2" : "LTX-2.5"} as a hard-pinned anchor — the opening frame IS that picture, not guidance. Upload a still above instead for a hand-picked opening image.`
@@ -8052,11 +8114,11 @@ function refSlot(label, shot, key, pickerTitle = null) {
         img.src = "/media/" + ref.resolved;
         slot.appendChild(img);
         const chainTag = el("span", "chain-badge");
-        chainTag.append(el("span", null, "⛓"), el("span", null, ref.label || "chained"));
+        chainTag.append(el("span", null, "⛓"), el("span", null, chainLabel(ref)));
         slot.appendChild(chainTag);
       } else {
         const l = el("div", "ref-slot-label");
-        l.append(el("strong", null, "⛓ chained"), el("span", null, ref.label || ""));
+        l.append(el("strong", null, "⛓ chained"), el("span", null, chainLabel(ref)));
         slot.appendChild(l);
       }
       const srcWhy = staleWhy(ref.from);

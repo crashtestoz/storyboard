@@ -489,6 +489,14 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   gap: 4px;
 }
 
+.chain-badge.broken {
+  color: var(--warn, #e0a83a);
+}
+
+.field-note.warn {
+  color: var(--warn, #e0a83a);
+}
+
 .shot-body {
   padding: var(--sp-2) var(--sp-3) var(--sp-3);
   display: flex;

@@ -174,6 +174,29 @@ class CarryTests(unittest.TestCase):
         self.assertTrue(carried["shots"][1]["unread"])
         self.assertEqual(carried["issues"], [])
 
+    def test_a_chain_that_skips_a_cutaway_resumes_its_source(self):
+        # Shot 3 picks up from shot 1; shot 2 is a cutaway elsewhere.
+        f = [facts(entity("Alex", state("left", "standing"))),
+             facts(entity("Maya", state("right")), location="parking deck", continues=False),
+             facts(entity("Alex", state("right", "standing")), continues=True)]
+        carried = cl.carry(f, [None, None, 1])
+        shot3 = carried["shots"][2]
+        self.assertEqual(shot3["previous"], 1)
+        self.assertTrue(shot3["sameScene"])
+        self.assertEqual(shot3["stateAtStart"]["alex"]["side"][0], "left")
+        self.assertNotIn("maya", shot3["stateAtStart"])
+        [issue] = carried["issues"]
+        self.assertEqual(issue["cut"], [1, 3])
+        # Without the chain shot 3 follows the cutaway and nothing carries.
+        self.assertEqual(cl.carry(f)["issues"], [])
+
+    def test_chain_sources_ignore_adjacent_missing_and_forward_links(self):
+        board = {"shots": [{"id": "a"}, {"id": "b", "startRef": {"kind": "chain", "from": "a"}},
+                           {"id": "c", "startRef": {"kind": "chain", "from": "a"}},
+                           {"id": "d", "startRef": {"kind": "chain", "from": "e"}},
+                           {"id": "e", "startRef": {"path": "x.png"}}]}
+        self.assertEqual(cl.chain_sources(board), [None, 1, 1, None, None])
+
     def test_state_before_a_shot(self):
         f = [facts(entity("Alex", state("left", "seated"))),
              facts(entity("Alex", state(), state(pose="standing")), continues=True)]
@@ -267,6 +290,20 @@ class BoardPassTests(unittest.TestCase):
         review = [i for i in issues if i["source"] == "review"]
         self.assertEqual(review[0]["cut"], [2, 3])
         self.assertEqual(review[0]["fix"]["find"], "Alex leaves.")
+
+    def test_a_skipping_chain_is_read_and_checked_against_its_source(self):
+        shots = self.board["shots"]
+        shots[2]["startRef"] = {"kind": "chain", "from": shots[0]["id"]}
+        self.extracts[3] = {"location": "lab", "continues": True,
+                            "entities": [{"name": "Alex", "kind": "character",
+                                          "start": {"side": "right", "pose": "standing"}}]}
+        llm = ScriptedLLM(self.extracts)
+        issues = cl.check_board(self.board, self.dir, [llm])["issues"]
+        self.assertIn([1, 3], [i["cut"] for i in issues])
+        read3 = next(c for c in llm.calls if "\nSHOT 3:" in c)
+        self.assertIn("PREVIOUS SHOT:\n" + shots[0]["prompt"], read3)
+        cut3 = next(c for c in llm.calls if "SHOT B (shot 3)" in c)
+        self.assertIn("SHOT A (shot 1):\n" + shots[0]["prompt"], cut3)
 
     def test_a_failed_read_is_reported_and_not_cached(self):
         class Flaky(ScriptedLLM):

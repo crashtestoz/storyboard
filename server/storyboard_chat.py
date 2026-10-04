@@ -208,8 +208,9 @@ shape the Rewrite button produces — see rewrite_prompt's \
 SYSTEM_PROMPT in llm.py for the full rules if detail is needed.
 
 Model routing: every H3 shot renders through Ref2VA, chained or not. A \
-Start or End frame -- picked by hand, or chained from the previous shot's \
-last rendered frame -- is sent as the first ordered reference: soft \
+Start or End frame -- picked by hand, or chained from an earlier shot's \
+last rendered frame (usually the one before; a chain may skip back past \
+a cutaway) -- is sent as the first ordered reference: soft \
 guidance for continuity, not a hard-pinned keyframe, so the opening frame \
 will resemble it rather than reproduce it exactly. It travels alongside the \
 cast portraits, the speaker's voice clip and the shot's own references \
