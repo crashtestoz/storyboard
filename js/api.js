@@ -111,10 +111,12 @@ const API = {
 
   // Browsers disagree about audio types and sometimes report none at all, so
   // fall back to one derived from the extension rather than sending "".
-  uploadRef: (slug, file) =>
+  // `name` (a file stem, e.g. "alex-voice") saves it under that name; the
+  // extension still comes from the file.
+  uploadRef: (slug, file, name) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/refs`, file, {
       "Content-Type": file.type || guessType(file.name),
-      "X-Filename": file.name,
+      "X-Filename": name ? name + (/\.[^.]+$/.exec(file.name) || [""])[0].toLowerCase() : file.name,
     }),
 
   // kind is "image" or "audio": a voice clip already uploaded to a project
@@ -132,8 +134,8 @@ const API = {
 
   // copy an existing workspace image into this board's refs/ so the project
   // folder stays self-contained
-  adoptRef: (slug, path) =>
-    req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path }),
+  adoptRef: (slug, path, name) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/refs/adopt`, { path, name }),
 
   // `text` is sent so an unsaved line can still be previewed.
   dub: (slug, shotId, text, style, dubMode) =>

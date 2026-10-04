@@ -23,6 +23,7 @@ Routes
                                  without rendered video
 ``POST /api/boards/<slug>/refs``     upload a reference image / voice (raw body)
 ``POST /api/boards/<slug>/refs/adopt``  copy an existing project file in
+                                ``{path, name?}`` (name: file stem to save as)
 ``POST /api/transcribe``        transcribe a reference clip ``{path, engine?}``
 ``POST /api/boards/<slug>/shots/<id>/dub``  speak the shot's dialogue, mux it
 ``POST /api/boards/<slug>/speak``   speak one Storyboard AD reply ``{text}``
@@ -725,7 +726,7 @@ class Handler(BaseHTTPRequestHandler):
             rel = payload.get("path")
             if not rel:
                 raise ValueError("path is required")
-            return self._send_json(ctx.store.adopt(m.group(1), rel), 201)
+            return self._send_json(ctx.store.adopt(m.group(1), rel, payload.get("name") or ""), 201)
 
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/dub", path)
         if m:

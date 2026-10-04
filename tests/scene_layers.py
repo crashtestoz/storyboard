@@ -39,8 +39,21 @@ class SceneLayers(unittest.TestCase):
 
     def test_native_dialogue_overrides_quiet_soundscape(self):
         prompt = _resolved_prompt(self.shot, self.board, model='ref2va')
-        self.assertIn('speaks aloud, in their own voice', prompt)
+        self.assertIn('speaks aloud, with the voice identity of the reference clip', prompt)
         self.assertIn('Dialogue priority:', prompt)
+    def test_voice_direction_comes_last_and_overrides_the_clip(self):
+        self.shot['dialogueStyle'] = 'Anxious, voice breaking with disappointment.'
+        prompt = _resolved_prompt(self.shot, self.board, model='ref2va')
+        direction = prompt.rindex('Voice direction for')
+        self.assertGreater(direction, prompt.rindex('reference voice clip sets only who they sound like'))
+        self.assertTrue(prompt.endswith('This direction overrides the tone, volume and pace of the reference voice clip.'))
+        self.assertIn('Anxious, voice breaking with disappointment. This', prompt)
+        self.assertNotIn('sets how they sound', prompt)
+
+    def test_no_direction_no_override_line(self):
+        self.shot['dialogueStyle'] = ''
+        self.assertNotIn('Voice direction', _resolved_prompt(self.shot, self.board, model='ref2va'))
+
     def test_unknown_and_duplicate_tags(self):
         self.shot['prompt']='Look at @missing.'
         with self.assertRaises(ValueError): _resolved_prompt(self.shot,self.board,model='ref2va')

@@ -548,12 +548,12 @@ class VpipeBackend(Backend):
         seed = int(shot.get("seed") or 0)
 
         if draft:
-            width, height, draft_steps = _draft_geometry(
+            # A draft is the same render at a smaller size: the steps stay
+            # the shot's own (which defaults to the project's), so only the
+            # resolution decides how rough it is.
+            width, height, _ = _draft_geometry(
                 width, height, steps, cap.size_align
             )
-            # Create Stills sets _fixedSteps when the user chose a step count.
-            if not shot.get("_fixedSteps"):
-                steps = draft_steps
         # Full-size too: most of ASPECT_TABLE is a multiple of 32 already, but
         # 640x368 and 960x720 are not, and an un-snapped size costs the anchor.
         width = _align_up(width, cap.size_align)
@@ -1581,7 +1581,10 @@ def _draft_geometry(w: int, h: int, steps: int,
         Up rather than down because generate-video rounds up: a draft that
         rounded the other way would be re-rounded there, and a start-frame
         anchor encoded at this size would stop matching.
-    *   **Steps** — capped at DRAFT_STEPS (8), or the shot's own count if that
+    *   **Steps** — video drafts ignore the count returned here and keep the
+        shot's own (a draft only lowers the resolution). Still images at the
+        Small size still use it unless they set a fixed count: capped at
+        DRAFT_STEPS (8), or the shot's own count if that
         is lower. Drafts used to run at 4, but 8 is truer to the final
         render's motion and composition, and at draft size it still takes
         only a minute or two on an M5 Max.
@@ -1785,7 +1788,7 @@ def _resolved_prompt(
             parts.append(
                 "Dialogue priority: the selected character must speak the "
                 "specified line aloud" +
-                (" in the referenced voice" if clones_voice
+                (" with the reference clip's voice identity" if clones_voice
                  else " in a voice that fits the character and scene") +
                 "; any 'no speech' instruction applies only to background or "
                 "unrelated voices."
@@ -1797,7 +1800,24 @@ def _resolved_prompt(
             # came back as a stream of gibberish). Say what the line is NOT,
             # and roughly where it sits, not only what it is.
             parts.append(_only_this_line(shot, project, clones_voice))
+            parts.append(_voice_direction(shot, project, clones_voice))
     return " ".join(_sentence(p) for p in parts if p)
+
+
+def _voice_direction(shot: dict, project: dict, clones_voice: bool) -> str:
+    """The scene's delivery for the line, said last so it wins.
+
+    A voice clip carries a reading of its own -- calm, upbeat, whatever the
+    sample happened to be -- and H3 drifts toward it unless told plainly
+    that this scene's direction replaces it.
+    """
+    style = " ".join((shot.get("dialogueStyle") or "").split()).rstrip(" .")
+    if not style:
+        return ""
+    speaker = _speaker_name(shot, project)
+    override = (" This direction overrides the tone, volume and pace of the "
+                "reference voice clip." if clones_voice else "")
+    return f"Voice direction for {speaker}'s line: {style}.{override}"
 
 
 def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
@@ -1810,9 +1830,13 @@ def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
         "else: no extra words, no repeats, no ad-libbing, and no other voices."
     )
     if clones_voice:
+        # "Sets how they sound" let H3 copy the clip's calm reading over an
+        # explicit direction to shout (Sample, scenes 1 and 3).
         text += (
-            " The reference voice clip sets how they sound, never what they say; "
-            "do not repeat any words from it."
+            " The reference voice clip sets only who they sound like (timbre, "
+            "pitch and accent), never what they say and never how they say "
+            "it: do not copy its tone, volume, pace or mood, and do not "
+            "repeat any words from it."
         )
     # A cast member who is on screen but not speaking is still a visible
     # face H3 will happily give a voice to — Sample shots 5–7,
@@ -2071,21 +2095,22 @@ def _speaks_line_aloud(shot: dict, project: dict, model: str) -> bool:
 def _dialogue_visual_cue(
     shot: dict, project: dict, clones_voice: bool = False, speaks_aloud: bool = False
 ) -> str:
-    line = (shot.get("dialogue") or "").strip()
+    line = " ".join((shot.get("dialogue") or "").split())
     if not line:
         return ""
     speaker = _speaker_name(shot, project)
-    style = (shot.get("dialogueStyle") or "").strip()
-    delivery = f" Delivery: {style}." if style else ""
+    # The delivery is not given here: it goes last (see _voice_direction),
+    # after everything that mentions the reference clip, so the clip's own
+    # tone cannot have the final word on how the line is said.
     if clones_voice:
         return (
-            f"{speaker} speaks aloud, in their own voice from the reference "
-            f"clip, saying exactly: \"{line}\"{delivery}"
+            f"{speaker} speaks aloud, with the voice identity of the reference "
+            f"clip, saying exactly: \"{line}\""
         )
     if speaks_aloud:
         return (
             f"{speaker} speaks the line aloud, in a voice that fits the "
-            f"character and scene, saying exactly: \"{line}\"{delivery}"
+            f"character and scene, saying exactly: \"{line}\""
         )
     return (
         f"{speaker} speaks the line with natural jaw and lip movement: "
@@ -2231,7 +2256,7 @@ def estimate_render_seconds(shot: dict, project: dict, timings=None) -> float | 
     frames = rule.snap(int(shot.get("frames") or rule.minimum))
     steps = int(shot.get("steps") or 8)
     if defaults.get("draft"):
-        w, h, steps = _draft_geometry(w, h, steps, align)
+        w, h, _ = _draft_geometry(w, h, steps, align)
         if defaults.get("sketch"):
             frames = rule.minimum
     return timings.estimate(model=model, width=_align_up(w, align),

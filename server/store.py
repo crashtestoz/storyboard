@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -323,7 +324,14 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any], *,
         "sketch": bool(defaults.get("draft")) and bool(defaults.get("sketch")),
     }
     if payload["draft"]:
-        payload["draftProfile"] = "384-long-edge-8-step-with-audio"
+        # Drafts used to cap steps at 8 and now keep the shot's own count. A
+        # shot at 8 steps or fewer renders exactly as before, so it keeps the
+        # old profile (and its recorded fingerprint still matches); one set
+        # higher was drafted at fewer steps than it now asks for.
+        payload["draftProfile"] = (
+            "384-long-edge-8-step-with-audio" if 0 < payload["steps"] <= 8
+            else "384-long-edge-shot-steps-with-audio"
+        )
     if payload["sketch"]:
         payload["sketchProfile"] = "min-frames-stretched-silent-pencil-sketch"
     if payload["effectiveModel"] == "ref2va":
@@ -722,6 +730,9 @@ class Store:
         healed = migrated
         healed = self._rehome_media(slug, board) or healed
         healed = self._resolve_chain_previews(slug, board) or healed
+        # Older boards keep voice clips under their download names; save()
+        # files them as <name>-voice.wav.
+        healed = self.voices_need_filing(slug, board) or healed
         audio_refs = [(c.get("voice") or {}) for c in board.get("characters", [])]
         audio_refs.append((board.get("assembly") or {}).get("backgroundAudio") or {})
         for voice in audio_refs:
@@ -760,6 +771,7 @@ class Store:
 
     def save(self, slug: str, board: dict[str, Any]) -> dict[str, Any]:
         board = self.migrate(board)
+        self._canonical_voices(slug, board)
         board["updatedAt"] = time.time()
         d = self.project_dir(slug)
         d.mkdir(parents=True, exist_ok=True)
@@ -770,6 +782,124 @@ class Store:
         tmp.write_text(json.dumps(board, indent=2) + "\n")
         tmp.replace(bp)
         return board
+
+    # -- one voice file per character ------------------------------------- #
+
+    def voice_stems(self, board: dict[str, Any]) -> dict[str, str]:
+        """Character id -> the file stem their voice is kept under.
+
+        ``<name>-voice``, with the id added only if two cast members share a
+        name, so one can never overwrite the other's voice.
+        """
+        stems: dict[str, str] = {}
+        for c in board.get("characters") or []:
+            base = slugify(c.get("name") or "")
+            if not base or base == "untitled" or not c.get("id"):
+                continue
+            stem = f"{base}-voice"
+            if stem in stems.values():
+                stem = f"{base}-{slugify(c['id'])}-voice"
+            stems[c["id"]] = stem
+        return stems
+
+    def _canonical_voices(self, slug: str, board: dict[str, Any]) -> bool:
+        """File each cast member's voice clip as ``refs/<name>-voice.wav``.
+
+        Exactly one voice file per character: a new clip replaces the old
+        one under the same name rather than piling up beside it, whatever
+        its format (everything becomes WAV, which also drops cover art a
+        clip can carry and be misread as an image). The clip it came from is
+        removed if it was this project's own and nothing else uses it.
+
+        Done on save, so picking a clip changes nothing until the Cast editor
+        is saved. A render recorded from the same audio under the old name is
+        re-stamped, so a rename alone never marks a scene CHANGED; a new clip
+        does, as it should. Returns whether anything changed.
+        """
+        if not shutil.which("ffmpeg"):
+            return False
+        refs = self.refs_dir(slug)
+        before = copy.deepcopy(board)
+        replaced: list[Path] = []
+        changed = False
+        for c in board.get("characters") or []:
+            voice = c.get("voice")
+            stem = self.voice_stems(board).get(c.get("id"))
+            if not (isinstance(voice, dict) and voice.get("path") and stem):
+                continue
+            dest = refs / f"{stem}.wav"
+            rel = str(dest.relative_to(self.data_dir)).replace("\\", "/")
+            src = self.data_dir / voice["path"]
+            if voice["path"] == rel and dest.is_file():
+                continue
+            if src.is_file():
+                refs.mkdir(parents=True, exist_ok=True)
+                tmp = refs / f".{stem}.tmp.wav"
+                done = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-v", "error", "-y", "-i", str(src),
+                     "-vn", "-map_metadata", "-1", "-c:a", "pcm_s16le", str(tmp)],
+                    capture_output=True, text=True,
+                )
+                if done.returncode != 0 or not tmp.is_file():
+                    tmp.unlink(missing_ok=True)
+                    continue   # unreadable clip: leave it as it was
+                tmp.replace(dest)
+                if src.resolve() != dest.resolve():
+                    replaced.append(src)
+            elif not dest.is_file():
+                continue       # nothing to file, and nothing filed yet
+            # (src gone but the named file exists: an old tab still holding
+            # the pre-rename path -- point it at the named file.)
+            digest = _file_digest(dest)
+            c["voice"] = {
+                **voice, "kind": "upload", "path": rel, "label": dest.name,
+                "url": f"/media/{rel}?v={digest[:12]}", "contentHash": digest,
+                "originalName": voice.get("originalName") or voice.get("label") or src.name,
+            }
+            changed = True
+        if not changed:
+            return False
+
+        # Same audio under a new name is the same render.
+        for shot, old in zip(board.get("shots") or [], before.get("shots") or []):
+            if shot.get("renderFingerprint") and \
+                    shot["renderFingerprint"] == render_fingerprint(old, before):
+                shot["renderFingerprint"] = render_fingerprint(shot, board)
+            if shot.get("speechFingerprint") and \
+                    shot["speechFingerprint"] == speech_fingerprint(old, before):
+                shot["speechFingerprint"] = speech_fingerprint(shot, board)
+
+        # Drop the clips that were replaced, if they were this project's own
+        # and no board points at them -- this one, or another project's, which
+        # can link straight into this folder (an older board did).
+        if replaced:
+            still_used = [json.dumps(board)] + [
+                bp.read_text(errors="replace")
+                for bp in self.root.glob(f"*/{BOARD_FILE}")
+                if bp.parent.resolve() != self.project_dir(slug).resolve()
+            ]
+        for src in replaced:
+            try:
+                src.resolve().relative_to(refs.resolve())
+            except ValueError:
+                continue
+            rel_src = str(src.relative_to(self.data_dir)).replace("\\", "/")
+            if not any(rel_src in text for text in still_used):
+                src.unlink(missing_ok=True)
+        return True
+
+    def voices_need_filing(self, slug: str, board: dict[str, Any]) -> bool:
+        stems = self.voice_stems(board)
+        refs = self.refs_dir(slug)
+
+        def filed(stem: str) -> str:
+            return str((refs / f"{stem}.wav").relative_to(self.data_dir)).replace("\\", "/")
+
+        return any(
+            isinstance(c.get("voice"), dict) and c["voice"].get("path") and c.get("id") in stems
+            and c["voice"]["path"] != filed(stems[c["id"]])
+            for c in board.get("characters") or []
+        )
 
     def create(self, name: str) -> tuple[str, dict[str, Any]]:
         slug = slugify(name)
@@ -839,7 +969,7 @@ class Store:
         else:
             shutil.rmtree(d)
 
-    def adopt(self, slug: str, rel_path: str) -> dict[str, Any]:
+    def adopt(self, slug: str, rel_path: str, name: str = "") -> dict[str, Any]:
         """Copy an existing file from the projects tree into this project's ``refs/``.
 
         Picking an image from another project would otherwise leave this board
@@ -847,6 +977,11 @@ class Store:
         this one, and an exported board refers to a file its own folder does
         not contain. Copying keeps the promise the layout is built on — a
         project folder holds everything that project needs.
+
+        *name* (a file stem, e.g. "alex-voice") files the copy under that
+        name instead, even from this project's own refs/ — the original stays
+        where it is, since something else may use it. An identical file
+        already under that name is reused rather than copied again.
         """
         src = (self.data_dir / rel_path).resolve()
         # never let a crafted path reach outside the data directory
@@ -856,11 +991,21 @@ class Store:
 
         refs = self.refs_dir(slug)
         refs.mkdir(parents=True, exist_ok=True)
-        dest = refs / src.name
-        if dest.resolve() == src:
+        stem = re.sub(r"[^A-Za-z0-9._-]", "_", name or "")[:48].strip("._")
+        if stem:
+            dest = refs / f"{stem}{src.suffix.lower()}"
+            n = 2
+            while dest.exists() and dest.resolve() != src and \
+                    _file_digest(dest) != _file_digest(src):
+                dest = refs / f"{stem}-{n}{src.suffix.lower()}"
+                n += 1
+            if not dest.exists():
+                shutil.copy2(src, dest)
+        elif (refs / src.name).resolve() == src:
             # already this project's own ref — nothing to copy
-            pass
+            dest = refs / src.name
         else:
+            dest = refs / src.name
             n = 2
             while dest.exists() and dest.stat().st_size != src.stat().st_size:
                 dest = refs / f"{src.stem}-{n}{src.suffix}"
@@ -1137,6 +1282,8 @@ class Store:
         defaults.setdefault("steps", 8)
         defaults.setdefault("draft", False)
         defaults.setdefault("sketch", False)
+        # Briefly a toggle; drafts now always keep each shot's step count.
+        defaults.pop("draftFullSteps", None)
         defaults.setdefault("stillsSize", "small")
         defaults.setdefault("stillsStyle", "global")
         defaults.setdefault("stillsEngine", "auto")

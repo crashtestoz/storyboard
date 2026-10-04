@@ -3665,12 +3665,12 @@ function renderRail() {
   const cap = modelCap(effectiveShotModel(selectedShot())) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
   $("#draftNote").textContent = draftOn
-    ? `Rendering at ${dw}×${dh} and ${DRAFT_STEPS} steps, dialogue and sound effects ` +
-      `included. Clip length and seed are unchanged, so the camera move is ` +
-      `the one you will get.`
-    : `Drafts render at ${dw}×${dh} and ${DRAFT_STEPS} steps to check framing, motion, ` +
-      `dialogue and sound quickly. Full frame dumps are skipped unless ` +
-      `needed for chaining.`;
+    ? `Rendering at ${dw}×${dh}, at each scene's own step count, dialogue and ` +
+      `sound effects included. Clip length and seed are unchanged, so the ` +
+      `camera move is the one you will get.`
+    : `Drafts render at ${dw}×${dh} — only the size drops; steps, clip length ` +
+      `and seed stay as set — to check framing, motion, dialogue and sound ` +
+      `quickly. Full frame dumps are skipped unless needed for chaining.`;
 
   // sketch preview — a draft-only sub-option, so it is disabled without one
   const skt = $("#sketchToggle");
@@ -4665,7 +4665,7 @@ async function editCharacter(existing) {
     const cur = obj[key];
     if (cur) {
       host.classList.add("filled");
-      host.title = "Click to replace";
+      host.title = cur.originalName ? `From ${cur.originalName} — click to replace` : "Click to replace";
       if (kind === "image") {
         const img = el("img");
         img.src = cur.url || cur.path;
@@ -4678,7 +4678,9 @@ async function editCharacter(existing) {
         const l = el("div", "ref-slot-label");
         l.append(
           el("strong", null, "♪ " + (cur.label || "voice clip")),
-          el("span", null, "attached — click to change")
+          el("span", null, cur.originalName
+            ? `from ${cur.originalName} — click to change`
+            : "attached — click to change")
         );
         host.appendChild(l);
         if (cur.url) {
@@ -4714,12 +4716,18 @@ async function editCharacter(existing) {
      dialog, which meant a clip already uploaded into refs/ could never be
      attached — you could only upload it a second time. */
   async function pickMedia(obj, key, kind) {
-    const who = $("#castName").value.trim() || "this character";
+    const typed = $("#castName").value.trim();
+    const who = typed || "this character";
+    // An image is filed under the character's name (alex-portrait.png).
+    // A voice is filed by the server when the character is saved, as the
+    // one alex-voice.wav that a new clip replaces (Store._canonical_voices).
+    const stem = typed.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     const chosen = await chooseMedia(
       kind === "image"
         ? `Choose an image for ${who}`
         : `Choose a reference voice for ${who}`,
-      kind
+      kind,
+      stem && kind === "image" ? `${stem}-portrait` : ""
     );
     if (!chosen) return;
     obj[key] = chosen;
@@ -5039,8 +5047,8 @@ function renderStrip() {
     body.appendChild(el("div", "shot-title", raw.title || "Untitled"));
     const cap = modelCap(effectiveShotModel(raw));
     // What will actually render, not just what's configured: draft mode
-    // shrinks the frame and caps steps at 8 (see draftGeometry / the
-    // backend's own _draft_geometry), so this must track that toggle and
+    // shrinks the frame (see draftGeometry / the backend's own
+    // _draft_geometry), so this must track that toggle and
     // the project resolution live rather than always showing the full-size
     // numbers.
     const draftOn = !!(state.board.defaults && state.board.defaults.draft);
@@ -5049,7 +5057,7 @@ function renderStrip() {
     const resLabel = draftOn
       ? `${draftGeometry(rw, rh, cap ? cap.sizeAlign : 16).join("×")} (${sketchOn ? "sketch" : "draft"})`
       : projectResolution();
-    const stepsLabel = draftOn ? draftSteps(raw.steps) : raw.steps;
+    const stepsLabel = raw.steps;
     // Sketch renders far fewer real frames (see the backend's own comment
     // in prepare()) then stretches the clip back to this same duration, so
     // the length shown here still holds — only the frame count actually
@@ -6464,11 +6472,8 @@ function alignUp(v, align) {
   return Math.ceil(v / align) * align;
 }
 
-// Mirrors the backend's _draft_geometry: drafts run at DRAFT_STEPS, or at
-// the shot's own count when that is lower.
-const DRAFT_STEPS = 8;
-const draftSteps = (steps) => Math.min(steps || DRAFT_STEPS, DRAFT_STEPS);
-
+// Mirrors the backend's _draft_geometry. A draft only shrinks the frame; the
+// steps stay the shot's own.
 function draftGeometry(w, h, align = 16) {
   const scale = Math.min(0.5, 384 / Math.max(w, h));
   return [
@@ -6872,7 +6877,7 @@ function renderPreview() {
     ["Status", STATUS_LABELS[shot.status] || shot.status],
     ["Model", (modelCap(effectiveShotModel(raw)) || {}).label || effectiveShotModel(raw)],
     ["Runtime", dur(shot.runtimeSeconds)],
-    ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge, reduced steps)"
+    ["Rendered", raw.renderedAs === "draft" ? "draft (384px long edge)"
                  : raw.renderedAs === "final" ? "final" : "—"],
     ["Outputs", (shot.outputs || []).length
       ? (shot.outputs || []).map((u) => u.split("/").pop()).join(", ")
@@ -6982,7 +6987,7 @@ function renderPreview() {
 }
 
 /* What a clip was (or will be) rendered at. A rendered clip reports what it
-   actually rendered as — a draft take is draft-sized at draft steps whatever the
+   actually rendered as — a draft take is draft-sized whatever the
    project says now; an unrendered one follows the current draft toggle, the
    same way the shot card's subtitle does. */
 function clipRenderSpec(raw) {
@@ -6996,7 +7001,7 @@ function clipRenderSpec(raw) {
     still: !!cap && cap.kind === "image",
     res: `${rw}×${rh}`,
     mode: draft ? (d.sketch && !raw.renderedAs ? "sketch" : "draft") : "",
-    steps: draft ? draftSteps(raw.steps) : raw.steps,
+    steps: raw.steps,
   };
 }
 
@@ -8316,7 +8321,11 @@ function usageText(item) {
    route images had: without it the only way to attach a voice clip was to
    upload it again from the filesystem, so a clip already sitting in a
    project's refs/ could not be linked to a character at all. */
-async function chooseMedia(title, kind) {
+/* *saveAs* (a file stem) files whatever is picked or uploaded under that
+   name in this project's refs/, keeping the original name as `originalName`
+   for the user's own reference -- the Cast editor names a character's files
+   after the character. */
+async function chooseMedia(title, kind, saveAs = "") {
   const isAudio = kind === "audio";
   const modal = $("#picker");
   const grid = $("#pickerGrid");
@@ -8363,7 +8372,8 @@ async function chooseMedia(title, kind) {
       grid.innerHTML = "";
       grid.appendChild(el("div", "empty-state", `Uploading ${f.name}…`));
       try {
-        finish(await API.uploadRef(state.slug, f));
+        const ref = await API.uploadRef(state.slug, f, saveAs);
+        finish(saveAs ? { ...ref, originalName: f.name } : ref);
       } catch (err) {
         toast(`Upload failed: ${err.message}`, "error");
         finish(null);
@@ -8468,8 +8478,11 @@ async function chooseMedia(title, kind) {
             // copy it into this project rather than pointing at another
             // project's folder, which would break if that project went away
             try {
-              const ref = await API.adoptRef(state.slug, img.path);
-              finish({ kind: "upload", ...ref });
+              const ref = await API.adoptRef(state.slug, img.path, saveAs);
+              finish({
+                kind: "upload", ...ref,
+                ...(saveAs && ref.label !== img.label ? { originalName: img.label } : {}),
+              });
             } catch (err) {
               toast(`Could not use that file: ${err.message}`, "error");
               finish(null);
