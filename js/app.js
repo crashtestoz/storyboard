@@ -3241,10 +3241,13 @@ async function refreshStatus() {
       const res = await API.getBoard(state.slug);
       takeStale(res);
       state.board = res.board;
-      toast(
-        s.stills.error ? `Image failed: ${s.stills.error}` : "Image ready.",
-        s.stills.error ? "error" : "info"
-      );
+      // The Cast editor reports on its own character images.
+      if (s.stills.kind !== "character") {
+        toast(
+          s.stills.error ? `Image failed: ${s.stills.error}` : "Image ready.",
+          s.stills.error ? "error" : "info"
+        );
+      }
     }
     if (s.error) toast(s.error, "error");
 
@@ -3496,7 +3499,7 @@ function render() {
    rendered one shot of three. So the count is stated before the click. */
 function pendingShots() {
   return shots().filter(
-    (raw) => RERUNNABLE.includes(view(raw).status) || !!staleWhy(raw.id)
+    (raw) => !raw.locked && (RERUNNABLE.includes(view(raw).status) || !!staleWhy(raw.id))
   );
 }
 
@@ -4626,8 +4629,24 @@ async function editCharacter(existing) {
   // A function declaration is only hoisted within its own function scope, so
   // defining them in the executor made paint() throw a ReferenceError before
   // the modal was ever unhidden — the dialog simply never appeared.
+  // Each opening of the editor is its own session: an image still generating
+  // from an earlier one must not land in whichever character is open now.
+  const session = (editCharacter.session = (editCharacter.session || 0) + 1);
+  const current = () => editCharacter.session === session && !modal.hidden;
+  const genBtn = $("#castGenerateImage");
+  const genNote = $("#castGenerateNote");
+  genNote.textContent = "";
+  delete genBtn.dataset.running;
+  genBtn.onclick = () => generateCharacterImage();
+
   const paint = () => {
     mediaSlot($("#castImage"), draft, "image", "Image", "image");
+    const gpuBusy = !!(state.status && (state.status.busy ||
+      (state.status.stills && state.status.stills.busy)));
+    genBtn.disabled = gpuBusy || genBtn.dataset.running === "1";
+    genBtn.title = gpuBusy
+      ? "Wait for the current render or image to finish"
+      : "Create a reference image from the name and description, using the project's image engine and render style";
     mediaSlot($("#castVoice"), draft, "voice", "Voice clip", "audio");
     const llm = currentLLM();
     descBtn.disabled = !(draft.image && draft.image.path) || !llm || !llm.healthy;
@@ -4713,6 +4732,54 @@ async function editCharacter(existing) {
       descProposal.innerHTML = "";
     }
     paint();
+  }
+
+  /* Made from the name and description as typed (the character need not be
+     saved yet). The server files it in refs/ and this sets it as the
+     character's image; Save keeps it, like any other change here. */
+  async function generateCharacterImage() {
+    const name = $("#castName").value.trim();
+    const description = $("#castDesc").value.trim();
+    if (!description) {
+      castError("Write the description first — the image is made from it.");
+      return;
+    }
+    castError("");
+    genBtn.dataset.running = "1";
+    genBtn.disabled = true;
+    genNote.textContent = "Generating…";
+    try {
+      state.status = await API.characterImage(state.slug, { name, description });
+      startPolling();
+      let st = state.status.stills || {};
+      while (st.busy) {
+        await new Promise((r) => setTimeout(r, 1500));
+        st = (await API.status()).stills || {};
+        if (st.busy && st.progress) genNote.textContent = `Generating… ${Math.round(st.progress)}%`;
+      }
+      if (st.kind !== "character" || !(st.results && st.results.image)) {
+        throw new Error(st.error || "no image came back");
+      }
+      if (!current()) {
+        toast(`Generated ${st.results.image.label} — it is in refs/ to pick from the image slot.`);
+        return;
+      }
+      draft.image = st.results.image;
+      descProposal.innerHTML = "";
+      genNote.textContent = "Set as the reference image — Save to keep it.";
+    } catch (err) {
+      if (!current()) {
+        toast(`Could not generate an image: ${err.message}`, "error");
+        return;
+      }
+      genNote.textContent = "";
+      castError(`Could not generate an image: ${err.message}`);
+    } finally {
+      if (current()) {
+        delete genBtn.dataset.running;
+        paint();
+      }
+    }
   }
 
   function castError(msg) {
@@ -4945,6 +5012,12 @@ function renderStrip() {
     if (raw.renderedAs === "draft") {
       thumb.appendChild(el("span", "draft-badge", "DRAFT"));
     }
+    if (raw.locked) {
+      const b = el("span", "lock-badge", "🔒 LOCKED");
+      b.title = "Locked: not edited or re-rendered, whatever the project settings say";
+      thumb.appendChild(b);
+      card.classList.add("locked");
+    }
     const staleReason = staleWhy(raw.id);
     if (staleReason && shot.status !== "running") {
       // Not a status: the clip is real and plays. It is just not a clip of
@@ -5048,6 +5121,29 @@ function dropAfter(node, axis, e) {
     : e.clientX > r.left + r.width / 2;
 }
 
+/* Shot folders are numbered by position, so a locked shot that changed
+   position would lose track of its clip (and the server refuses the save).
+   Returns true, after saying why, when *next* would move one. */
+function refuseLockedShift(next) {
+  const moved = shots().find((s, i) => s.locked && next.indexOf(s) !== i);
+  if (!moved) return false;
+  toast(
+    `Shot ${shotIndex(moved.id) + 1} “${moved.title || "Untitled"}” is locked and would change position — ` +
+      "unlock it first, or leave the shots before it where they are.",
+    "warn"
+  );
+  return true;
+}
+
+async function setShotLocked(id, locked) {
+  await saveNow();
+  const r = await API.lockShot(state.slug, id, locked);
+  state.board = r.board;
+  state.stale = r.stale || state.stale;
+  state.dirty = false;
+  render();
+}
+
 function moveShot(dragId, targetId = null, after = false) {
   if (!dragId || !state.board || !Array.isArray(state.board.shots)) return false;
   const from = shotIndex(dragId);
@@ -5059,8 +5155,11 @@ function moveShot(dragId, targetId = null, after = false) {
   if (from < to) to -= 1;
   if (from === to) return false;
 
-  const [moved] = state.board.shots.splice(from, 1);
-  state.board.shots.splice(to, 0, moved);
+  const next = state.board.shots.slice();
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  if (refuseLockedShift(next)) return false;
+  state.board.shots = next;
   markDirty();
   render();
   return true;
@@ -5157,8 +5256,23 @@ async function addShot() {
 /* --- editor -------------------------------------------------------------- */
 
 function renderEditor() {
+  renderEditorBody();
+  const raw = selectedShot();
+  if (!raw || !raw.locked) return;
+  /* Everything that changes the shot is off; the lock button, players and
+     downloads (links, not controls) are left alone. The server holds the
+     line regardless — this is so nothing looks editable that isn't. */
+  const host = $("#editor");
+  host.classList.add("is-locked");
+  host
+    .querySelectorAll("input, select, textarea, button:not([data-lock-exempt])")
+    .forEach((n) => { n.disabled = true; });
+}
+
+function renderEditorBody() {
   const host = $("#editor");
   host.innerHTML = "";
+  host.classList.remove("is-locked");
   const raw = selectedShot();
   if (!raw) {
     host.appendChild(el("div", "empty-state", "No shots yet — add one above."));
@@ -5359,6 +5473,22 @@ function renderEditor() {
     panelDubRow = dubRow;
   }
 
+  const lock = el("button", `btn btn-sm${raw.locked ? " btn-primary" : " btn-ghost"}`,
+    raw.locked ? "🔒 Locked" : "🔓 Lock");
+  lock.dataset.lockExempt = "";
+  lock.title = raw.locked
+    ? "Unlock to edit or re-render this shot. Project settings changed while it was locked will then apply to it."
+    : "Lock this shot: no edits, renders, takes or dubs, and project setting changes leave it alone.";
+  lock.addEventListener("click", async () => {
+    lock.disabled = true;
+    try {
+      await setShotLocked(raw.id, !raw.locked);
+    } catch (err) {
+      toast(err.message, "error");
+      lock.disabled = false;
+    }
+  });
+
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   const one = el("button", "btn btn-sm", "Render this shot");
   one.disabled = !!(state.status && state.status.busy) || stillsBusy;
@@ -5403,13 +5533,21 @@ function renderEditor() {
 
   const del = el("button", "btn btn-ghost btn-sm", "Delete");
   del.addEventListener("click", () => {
-    state.board.shots = state.board.shots.filter((s) => s.id !== raw.id);
+    const next = state.board.shots.filter((s) => s.id !== raw.id);
+    if (refuseLockedShift(next)) return;
+    state.board.shots = next;
     state.selectedId = shots().length ? shots()[0].id : null;
     markDirty();
     render();
   });
   head.appendChild(del);
+  head.appendChild(lock);
   host.appendChild(head);
+  if (raw.locked) {
+    host.appendChild(el("div", "lock-note",
+      "🔒 This shot is locked. Its prompt, settings and clip stay exactly as they are — " +
+      "project setting changes, Render all and the AD all leave it alone. Unlock it to change anything."));
+  }
 
   // prompt panel
   const panel = el("div", "panel");
@@ -6472,7 +6610,8 @@ function openLightbox(src, alt) {
 
 function renderStillsPane(raw) {
   const wrap = el("div", "stills-pane");
-  const st = state.status && state.status.stills;
+  const st0 = state.status && state.status.stills;
+  const st = st0 && st0.kind !== "character" ? st0 : null;
   const runningHere = !!(st && st.busy && st.shotId === raw.id);
   const failedHere = !!(st && st.error && st.shotId === raw.id && !st.busy);
 
@@ -6957,7 +7096,7 @@ function troubleshootingPanel(raw) {
     go.textContent = `Render ${v} seeds`;
   });
   const go = el("button", "btn btn-sm", `Render ${count} seeds`);
-  go.disabled = busy || stillsBusy || !state.info.backend.healthy;
+  go.disabled = busy || stillsBusy || !state.info.backend.healthy || !!raw.locked;
   go.addEventListener("click", () => startSeedSweep(raw));
   row.append(pick, go);
   if (takes.length || sweep) {
@@ -8104,6 +8243,30 @@ function propagateReferenceTag(source, tag) {
  * Picking matters because references usually already exist on disk — having
  * only an upload button means re-uploading a file that is right there.
  */
+/* Open the file dialog and resolve with the chosen file, or null.
+
+   The input is attached to the page until the dialog closes. A detached one
+   (created, clicked, never inserted) is only kept alive by its own handler,
+   so the browser may collect it while the dialog is open, and then picking a
+   file does nothing at all: no event, no request, no error. That is how a
+   voice clip silently failed to upload after four others had worked. */
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const inp = el("input");
+    inp.type = "file";
+    inp.accept = accept;
+    inp.hidden = true;
+    document.body.appendChild(inp);
+    const done = (file) => {
+      inp.remove();
+      resolve(file || null);
+    };
+    inp.addEventListener("change", () => done(inp.files[0]), { once: true });
+    inp.addEventListener("cancel", () => done(null), { once: true });
+    inp.click();
+  });
+}
+
 async function chooseImage(title) {
   return chooseMedia(title, "image");
 }
@@ -8159,10 +8322,10 @@ async function chooseMedia(title, kind) {
   $("#pickerTitle").textContent = title;
   grid.classList.toggle("picker-list", isAudio);
   $("#pickerFoot").textContent = isAudio
-    ? "Audio already in your projects. Uploading adds it to this project's refs/. " +
+    ? "Audio already in your projects. Upload or drop a clip here to add it to this project's refs/. " +
       "Use a clip with no embedded cover art — a file that carries one gets read " +
       "as an image instead of a voice, and the clone is silently skipped."
-    : "Images already in your projects. Per-frame folders are excluded — use “chain from previous shot” for that." +
+    : "Images already in your projects — or upload, or drop one here. Per-frame folders are excluded — use “chain from previous shot” for that." +
       (title === "Choose a style reference"
         ? " Aim for around 1024px on the short edge, any aspect ratio — " +
           "references are downscaled to that before rendering (512px in " +
@@ -8175,6 +8338,7 @@ async function chooseMedia(title, kind) {
 
   return new Promise((resolve) => {
     const finish = (value) => {
+      modal.ondragover = modal.ondrop = null;
       modal.hidden = true;
       grid.innerHTML = "";
       resolve(value);
@@ -8184,23 +8348,32 @@ async function chooseMedia(title, kind) {
     modal.onclick = (e) => {
       if (e.target === modal) finish(null);
     };
-    $("#pickerUpload").onclick = () => {
-      const inp = el("input");
-      inp.type = "file";
-      inp.accept = isAudio
-        ? "audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus"
-        : "image/png,image/jpeg,image/webp";
-      inp.onchange = async () => {
-        const f = inp.files[0];
-        if (!f) return;
-        try {
-          finish(await API.uploadRef(state.slug, f));
-        } catch (err) {
-          toast(`Upload failed: ${err.message}`, "error");
-          finish(null);
-        }
-      };
-      inp.click();
+    const accept = isAudio
+      ? "audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus"
+      : "image/png,image/jpeg,image/webp";
+    const upload = async (f) => {
+      if (!f) return;
+      const ok = isAudio ? /^audio\//.test(f.type) || /\.(wav|mp3|m4a|aac|flac|ogg|opus)$/i.test(f.name)
+                         : /^image\/(png|jpeg|webp)$/.test(f.type);
+      if (!ok) {
+        toast(`${f.name} is not ${isAudio ? "an audio clip" : "a PNG, JPEG or WebP image"} this can use.`, "error");
+        return;
+      }
+      grid.innerHTML = "";
+      grid.appendChild(el("div", "empty-state", `Uploading ${f.name}…`));
+      try {
+        finish(await API.uploadRef(state.slug, f));
+      } catch (err) {
+        toast(`Upload failed: ${err.message}`, "error");
+        finish(null);
+      }
+    };
+    $("#pickerUpload").onclick = async () => upload(await pickFile(accept));
+    // Dropping a file from Finder anywhere on the picker uploads it too.
+    modal.ondragover = (e) => { e.preventDefault(); };
+    modal.ondrop = (e) => {
+      e.preventDefault();
+      upload((e.dataTransfer.files || [])[0]);
     };
 
     API.library(kind)

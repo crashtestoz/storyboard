@@ -49,6 +49,7 @@ Routes
 
 from __future__ import annotations
 
+import copy
 import json
 import mimetypes
 import os
@@ -131,6 +132,51 @@ def _keep_server_render_state(board: dict, current: dict) -> None:
                 shot[key] = server[key]
             else:
                 shot.pop(key, None)
+
+
+def _keep_locked_shots(board: dict, current: dict) -> None:
+    """Hold every locked shot exactly as the server has it, over a page save.
+
+    A locked shot is frozen on disk: whatever the page sends for it -- an
+    edit, an AD proposal, a stale tab that never saw the lock -- is replaced
+    with the stored copy. A save that drops one puts it back. Locking and
+    unlocking go through their own endpoint, so ``locked`` is never taken
+    from a save either. Shot folders are numbered by position, so a save
+    that moves a locked shot would detach it from its clip (and let another
+    shot render over it); that is refused instead.
+    """
+    incoming = board.get("shots") or []
+    for shot in incoming:
+        shot["locked"] = False
+    stored = current.get("shots") or []
+    for index, frozen in enumerate(stored):
+        if not frozen.get("locked"):
+            continue
+        at = next((i for i, s in enumerate(incoming) if s.get("id") == frozen.get("id")), None)
+        if at is None:
+            incoming.insert(min(index, len(incoming)), copy.deepcopy(frozen))
+        else:
+            incoming[at] = copy.deepcopy(frozen)
+    board["shots"] = incoming
+    position = {s.get("id"): i for i, s in enumerate(incoming)}
+    for index, frozen in enumerate(stored):
+        if frozen.get("locked") and position[frozen.get("id")] != index:
+            raise ValueError(
+                f"Shot {index + 1} “{frozen.get('title') or 'Untitled'}” is locked, and this "
+                "change would move it to another position. Unlock it first, or keep "
+                "the shots before it where they are."
+            )
+
+
+def _locked_shot(board: dict, shot_id: str) -> dict | None:
+    return next((s for s in board.get("shots") or []
+                 if s.get("id") == shot_id and s.get("locked")), None)
+
+
+def _refuse_locked(board: dict, shot_id: str, doing: str) -> None:
+    shot = _locked_shot(board, shot_id)
+    if shot is not None:
+        raise RuntimeError(f"“{shot.get('title') or 'This shot'}” is locked — unlock it before {doing}.")
 # Extensions are the reliable signal here: browsers disagree about audio MIME
 # types (Safari says audio/mp3, others audio/mpeg, some send nothing at all or
 # application/octet-stream), and the client is ours. The content type is only
@@ -425,14 +471,7 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self._err(404, "not found")
         try:
-            board = self._read_json()
-            # A stale browser tab must not recreate a deleted storyboard.
-            current = self.ctx.store.load(m.group(1))
-            # Only the server writes the generated soundtrack's record, and it
-            # does so while the page keeps autosaving its own copy of the board.
-            board["soundtrackRender"] = current.get("soundtrackRender")
-            _keep_server_render_state(board, current)
-            saved = self.ctx.store.save(m.group(1), board)
+            saved = self._save_from_page(m.group(1), self._read_json())
             return self._send_json(
                 {
                     "slug": m.group(1),
@@ -488,6 +527,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, str(exc))
         except Exception as exc:  # noqa: BLE001
             return self._err(400, str(exc))
+
+    def _save_from_page(self, slug: str, board: dict) -> dict:
+        """Save the page's copy of a board, keeping what only the server owns."""
+        # A stale browser tab must not recreate a deleted storyboard.
+        current = self.ctx.store.load(slug)
+        # Only the server writes the generated soundtrack's record, and it
+        # does so while the page keeps autosaving its own copy of the board.
+        board["soundtrackRender"] = current.get("soundtrackRender")
+        _keep_server_render_state(board, current)
+        _keep_locked_shots(board, current)
+        return self.ctx.store.save(slug, board)
 
     # -- API: GET -------------------------------------------------------- #
 
@@ -687,6 +737,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/speak", path)
         if m:
             return self._speak_ad(m.group(1))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/lock", path)
+        if m:
+            return self._set_locked(m.group(1), m.group(2), bool((self._read_json() or {}).get("locked")))
 
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/accept", path)
         if m:
@@ -1050,7 +1104,7 @@ class Handler(BaseHTTPRequestHandler):
             if not slug:
                 raise ValueError("slug is required")
             if isinstance(payload.get("board"), dict):
-                ctx.store.save(slug, payload["board"])
+                self._save_from_page(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
 
         if path == "/api/render-seeds":
@@ -1059,7 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
             if not slug or not shot_id:
                 raise ValueError("slug and shotId are required")
             if isinstance(payload.get("board"), dict):
-                ctx.store.save(slug, payload["board"])
+                self._save_from_page(slug, payload["board"])
             return self._send_json(ctx.orch.start_seed_sweep(
                 slug, shot_id, int(payload.get("count") or 4), payload.get("seeds")))
 
@@ -1102,6 +1156,13 @@ class Handler(BaseHTTPRequestHandler):
                 service = ctx.llm((board.get("defaults") or {}).get("llm"))
                 phase_prompts = describe_still_phases(service, shot.get("prompt") or "")
             return self._send_json(ctx.orch.create_stills(slug, shot_id, phase_prompts))
+
+        if path == "/api/character-image":
+            payload = self._read_json() or {}
+            if not payload.get("slug"):
+                raise ValueError("slug is required")
+            return self._send_json(ctx.orch.create_character_image(
+                payload["slug"], payload.get("name") or "", payload.get("description") or ""))
 
         if path == "/api/stop":
             return self._send_json(ctx.orch.stop())
@@ -1393,6 +1454,19 @@ class Handler(BaseHTTPRequestHandler):
             ),
         }
 
+    def _set_locked(self, slug: str, shot_id: str, locked: bool) -> None:
+        """Lock or unlock one shot. The only way ``locked`` changes."""
+        ctx = self.ctx
+        board = ctx.store.load(slug)
+        shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
+        if shot is None:
+            raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+        if locked and ctx.orch.touches(slug, shot_id):
+            raise RuntimeError("This shot is rendering — wait for it to finish, or stop it, before locking it.")
+        shot["locked"] = locked
+        board = ctx.store.save(slug, board)
+        return self._send_json({"slug": slug, "board": board, "stale": self._staleness(slug, board)})
+
     def _accept_take(self, slug: str, shot_id: str) -> None:
         """Record this shot's existing clip as a render of the board as it is.
 
@@ -1410,6 +1484,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         if shot is None:
             raise FileNotFoundError(f"no shot {shot_id} in {slug}")
+        _refuse_locked(board, shot_id, "changing its render record")
         if not shot.get("outputs"):
             return self._err(409, "this shot has nothing rendered to keep")
 
@@ -1540,6 +1615,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dub(self, slug: str, shot_id: str) -> None:
         if self.ctx.orch.busy or self.ctx.orch.stills_busy:
             return self._err(409, "Wait for the render to finish before generating a separate take")
+        _refuse_locked(self.ctx.store.load(slug), shot_id, "re-recording its line")
         from .speech import generate_take
         result = generate_take(self.ctx, slug, shot_id, self._read_json() or {})
         return self._send_json(result, 409 if result.get("error") else 200)

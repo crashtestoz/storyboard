@@ -976,6 +976,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 /* --- stills --------------------------------------------------------------- */
+.cast-generate { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); }
+
 .stills-status {
   color: var(--text-dim);
   font-size: var(--fs-sm);
@@ -2424,6 +2426,31 @@ textarea.ta-compact {
   border-radius: var(--radius-sm);
 }
 
+
+/* --- locked shot --------------------------------------------------------- */
+.lock-badge {
+  position: absolute;
+  top: var(--sp-2);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+.shot-card.locked { outline: 1px solid var(--accent); outline-offset: -1px; }
+.lock-note {
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent-ghost);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  margin-bottom: var(--sp-3);
+}
 
 .stale-note {
   border-radius: var(--radius);

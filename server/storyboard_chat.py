@@ -447,6 +447,11 @@ Allowed actions:
 {"tool":"delete_board","slug":"board slug"}
 {"tool":"copy_from_board","slug":"other board slug","carryOver":["cast","style","settings"]}
 
+A shot with "locked": true is final and frozen. Never propose update_shot,
+replace_text, start_render or dub_shot for it — the app drops them. If the
+user asks to change one, say it is locked and that they can unlock it in the
+shot editor.
+
 Board management — create_board, open_board, rename_board, delete_board and
 copy_from_board act on whole storyboards rather than on the open board's
 contents. Show continuity comes from carryOver, which copies from a source
@@ -682,7 +687,8 @@ def compact_board_context(
                 "@" + r["tag"] if r.get("tag") else (r.get("label") or "image")
                 for r in shot.get("referenceImages") or [] if isinstance(r, dict)
             ],
-            "needsRender": needs_render,
+            "needsRender": needs_render and not shot.get("locked"),
+            "locked": bool(shot.get("locked")),
             "estimatedRenderSeconds": (
                 round(estimated_seconds) if estimated_seconds is not None else None
             ),
@@ -691,7 +697,7 @@ def compact_board_context(
     # every shot of every turn; the prompt says an absent field means empty.
     shots = [
         {k: v for k, v in shot.items()
-         if not (v in ("", []) or (v is False and k.startswith("has")))}
+         if not (v in ("", []) or (v is False and (k.startswith("has") or k == "locked")))}
         for shot in shots
     ]
     return {
@@ -902,7 +908,7 @@ def _expand_replace_text(raw: dict[str, Any], board: dict[str, Any],
     if "shots" in scope:
         targets.extend(("update_shot", "shotId", s.get("id"), s, REPLACE_SHOT_FIELDS)
                        for s in board.get("shots") or []
-                       if only is None or s.get("id") in only)
+                       if (only is None or s.get("id") in only) and not s.get("locked"))
     matched = 0
     for tool, key, target, source, fields in targets:
         for field in sorted(fields):
@@ -992,7 +998,8 @@ def validate_actions(
         except Exception:  # noqa: BLE001 — an unreadable board is not a source
             return None
 
-    shot_ids = {s.get("id") for s in board.get("shots") or []}
+    shot_ids = {s.get("id") for s in board.get("shots") or [] if not s.get("locked")}
+    locked_ids = {s.get("id") for s in board.get("shots") or [] if s.get("locked")}
     character_ids = {c.get("id") for c in board.get("characters") or []}
     clean: list[dict[str, Any]] = []
     replacements: list[dict[str, Any]] = []
@@ -1041,6 +1048,9 @@ def validate_actions(
                 fields["characterIds"] = [v for v in fields["characterIds"] if v in character_ids]
             if fields:
                 clean.append({"tool": tool, "shot": fields})
+        elif tool in ("update_shot", "dub_shot") and raw.get("shotId") in locked_ids:
+            if notes is not None:
+                notes.append("A proposed change to a locked shot was dropped — unlock it first.")
         elif tool == "update_shot" and raw.get("shotId") in shot_ids:
             fields = _clean_fields(raw.get("fields"), SHOT_FIELDS)
             if "characterIds" in fields:
@@ -1059,6 +1069,12 @@ def validate_actions(
                 wanted = [v for v in requested if isinstance(v, str) and v in shot_ids]
                 if wanted:
                     action["shotIds"] = wanted
+                elif any(v in locked_ids for v in requested):
+                    # Only locked shots were named: render nothing, not
+                    # (by omission) the whole board.
+                    if notes is not None:
+                        notes.append("A render of a locked shot was dropped — unlock it first.")
+                    continue
             clean.append(action)
         elif tool == "dub_shot" and raw.get("shotId") in shot_ids:
             clean.append({"tool": tool, "shotId": raw["shotId"]})

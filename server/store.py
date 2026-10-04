@@ -368,6 +368,10 @@ def stale_reason(shot: dict[str, Any], board: dict[str, Any]) -> str:
     """
     if not shot.get("outputs"):
         return ""
+    if shot.get("locked"):
+        # Locked is the user saying "this clip is final" -- a project setting
+        # changed since does not make it a candidate for re-rendering.
+        return ""
     recorded = shot.get("renderFingerprint")
     if not recorded:
         # Rendered by a version that kept no record of its inputs. It may well
@@ -438,6 +442,10 @@ def default_shot(defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         # it was spoken must not be muxed from the old take.
         "dialogueSpokenText": "",
         "dialogueSpokenStyle": "",
+        # Frozen: no edit, render, dub or still touches this shot, whatever
+        # the project settings do, until it is unlocked. Only the lock
+        # endpoint changes it (see app.py _keep_locked_shots).
+        "locked": False,
     }
 
 
@@ -538,6 +546,22 @@ class Store:
 
     def refs_dir(self, slug: str) -> Path:
         return self.project_dir(slug) / "refs"
+
+    def locked_dirs(self, slug: str, board: dict[str, Any]) -> dict[str, str]:
+        """Shot folders holding a locked shot's clip -> that shot's id.
+
+        Shot folders are numbered by position, so a shot rendered at a
+        position a locked shot once held would write over its clip.
+        """
+        out: dict[str, str] = {}
+        for i, shot in enumerate(board.get("shots") or []):
+            if not shot.get("locked"):
+                continue
+            out[self.shot_rel_dir(slug, i + 1)] = shot["id"]
+            for url in shot.get("outputs") or []:
+                if isinstance(url, str) and url.startswith("/media/"):
+                    out[str(Path(url[len("/media/"):]).parent)] = shot["id"]
+        return out
 
     def shot_rel_dir(self, slug: str, index: int) -> str:
         """A shot's directory, relative to ``data_dir``.

@@ -42,7 +42,8 @@ from .backends.base import Backend, ProgressEvent, ShotPaths
 from .dubbing import mux_speech
 from .render_timings import RenderTimings
 from .store import (
-    Store, artifact_filename, last_saved_frame, render_fingerprint, stale_reason,
+    Store, artifact_filename, default_shot, last_saved_frame, render_fingerprint, slugify,
+    stale_reason,
 )
 
 # statuses that a "render all" should pick up
@@ -186,6 +187,7 @@ class Orchestrator:
         # reusing _runs/_order, which are shaped around a whole render batch.
         self._stills_thread: threading.Thread | None = None
         self._stills_shot_id: str | None = None
+        self._stills_kind = "still"   # "still" (Create Image) or "character"
         # Shot ids are only unique within a board, and the phone view has to
         # say which project the stills belong to.
         self._stills_slug: str | None = None
@@ -227,6 +229,18 @@ class Orchestrator:
         t = self._stills_thread
         return t is not None and t.is_alive()
 
+    def touches(self, slug: str, shot_id: str) -> bool:
+        """Is a running job working on, or queued to work on, this shot?"""
+        with self._lock:
+            if self.stills_busy and self._stills_slug == slug and self._stills_shot_id == shot_id:
+                return True
+            if not self.busy or self._slug != slug:
+                return False
+            if self._seed_sweep and self._seed_sweep.get("shotId") == shot_id:
+                return True
+            # Queued counts too: queuing already cleared its clip.
+            return self._current == shot_id or shot_id in self._runs
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -245,6 +259,7 @@ class Orchestrator:
                 "seedSweep": dict(self._seed_sweep) if self._seed_sweep else None,
                 "stills": {
                     "busy": self.stills_busy,
+                    "kind": self._stills_kind,
                     "shotId": self._stills_shot_id,
                     "slug": self._stills_slug,
                     "phase": self._stills_phase,
@@ -297,7 +312,8 @@ class Orchestrator:
         self._operation = "dialogue"
         self._seed_sweep = None
         self._slug = slug
-        self._order = [s["id"] for s in board["shots"] if (s.get("dialogue") or "").strip()]
+        self._order = [s["id"] for s in board["shots"]
+                       if (s.get("dialogue") or "").strip() and not s.get("locked")]
         self._runs = {sid: ShotRun(shot_id=sid) for sid in self._order}
         self._error = ""
         self._assembly = None
@@ -348,7 +364,13 @@ class Orchestrator:
         whole_board = not shot_ids
         if shot_ids:
             wanted = set(shot_ids)
-            targets = [s for s in shots if s["id"] in wanted]
+            asked = [s for s in shots if s["id"] in wanted]
+            targets = [s for s in asked if not s.get("locked")]
+            if asked and not targets:
+                raise RuntimeError(
+                    "that shot is locked — unlock it to render it again"
+                    if len(asked) == 1 else "those shots are all locked — unlock them to render them again"
+                )
             because = {s["id"]: "asked for by name" for s in targets}
         else:
             targets, because = self._pending(board)
@@ -362,10 +384,26 @@ class Orchestrator:
                 if not isinstance(ref, dict) or ref.get("kind") != "chain":
                     continue
                 source = shots[index[ref["from"]]]
+                if source.get("locked"):
+                    # Its frames are what they are; the chain gate in
+                    # _run_one blocks the dependent if there are none.
+                    continue
                 frame_dir = self.data_dir / self.store.shot_rel_dir(slug, index[source["id"]] + 1) / "frames"
                 if source.get("status") != "done" or stale_reason(source, board) or not last_saved_frame(frame_dir, int(source.get("frames") or 0)):
                     wanted.add(source["id"])
                     because.setdefault(source["id"], "required by a dependent scene")
+        # Never render into a folder holding a locked shot's clip (folders are
+        # numbered by position, so a moved board can line one up that way).
+        locked_dirs = self.store.locked_dirs(slug, board)
+        clashes = {s["id"] for i, s in enumerate(shots)
+                   if s["id"] in wanted
+                   and locked_dirs.get(self.store.shot_rel_dir(slug, i + 1), s["id"]) != s["id"]}
+        if clashes and not whole_board and clashes == wanted:
+            raise RuntimeError(
+                "that shot's folder holds a locked shot's clip — move the shots "
+                "back, or unlock the locked one, before rendering it"
+            )
+        wanted -= clashes
         targets = [s for s in shots if s["id"] in wanted]
         if not targets and not whole_board:
             raise RuntimeError("nothing to render")
@@ -474,6 +512,8 @@ class Orchestrator:
         because: dict[str, str] = {}
 
         for shot in shots:
+            if shot.get("locked"):
+                continue
             status = shot.get("status", "draft")
             if status in RERUNNABLE:
                 because[shot["id"]] = f"status is “{status}”"
@@ -490,7 +530,7 @@ class Orchestrator:
         while changed:
             changed = False
             for shot in shots:
-                if shot["id"] in because:
+                if shot["id"] in because or shot.get("locked"):
                     continue
                 for key in ("startRef", "endRef"):
                     ref = shot.get(key)
@@ -542,9 +582,16 @@ class Orchestrator:
         shot = next((s for s in board.get("shots") or [] if s["id"] == shot_id), None)
         if shot is None:
             raise RuntimeError("shot not found")
+        if shot.get("locked"):
+            raise RuntimeError("this shot is locked — unlock it to create a new image")
         if not (shot.get("prompt") or "").strip():
             raise RuntimeError("nothing to sketch — this shot has no prompt yet")
 
+        self._check_still_engine(board)
+        return self._start_stills_job(slug, shot_id, "still", self._run_stills,
+                                      (slug, shot_id, phase_prompts or {}))
+
+    def _check_still_engine(self, board: dict) -> str:
         still_model = self._still_model(board)
         cap = self.backend.capability(still_model)
         if cap is None:
@@ -556,9 +603,13 @@ class Orchestrator:
             ok, msg = self.backend.health()
             if not ok:
                 raise RuntimeError(msg)
+        return still_model
 
+    def _start_stills_job(self, slug: str, shot_id: str | None, kind: str,
+                          target: Callable[..., None], args: tuple) -> dict[str, Any]:
         with self._lock:
             self._cancel.clear()
+            self._stills_kind = kind
             self._stills_shot_id = shot_id
             self._stills_slug = slug
             self._stills_phase = "starting"
@@ -568,11 +619,112 @@ class Orchestrator:
             self._stills_results = {}
 
         self._stills_thread = threading.Thread(
-            target=self._run_stills, args=(slug, shot_id, phase_prompts or {}),
-            name="create-stills", daemon=True,
+            target=target, args=args, name=f"create-{kind}", daemon=True,
         )
         self._stills_thread.start()
         return self.status()
+
+    # ------------------------------------------------------------------ #
+    # a cast member's reference image, from their description
+    # ------------------------------------------------------------------ #
+
+    def create_character_image(self, slug: str, name: str, description: str) -> dict[str, Any]:
+        """A reference portrait of a cast member, made from their description.
+
+        For a character with no picture yet: the still engine renders the
+        description on its own, in the board's render style, and the image is
+        filed in the project's refs/ like an upload. The Cast editor then sets
+        it as the character's reference image (status ``results.image``).
+        Works for a character not saved yet, so it takes the text, not an id.
+        """
+        if self.busy:
+            raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("an image is already generating — one GPU job at a time")
+        name, description = (name or "").strip(), (description or "").strip()
+        if not description:
+            raise ValueError("write the character's description first — the image is made from it")
+        board = self.store.load(slug)
+        self._check_still_engine(board)
+        return self._start_stills_job(slug, None, "character", self._run_character_image,
+                                      (slug, name, description))
+
+    def _run_character_image(self, slug: str, name: str, description: str) -> None:
+        try:
+            board = self.store.load(slug)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            work_rel = f"{slugify(slug)}/character-images/{stamp}"
+            work_abs = self.data_dir / work_rel
+            work_abs.mkdir(parents=True, exist_ok=True)
+
+            description = description.rstrip(" .")
+            who = f"{name}: {description}" if name else description
+            prompt = (
+                f"Character reference portrait. {who}. The whole figure in view, "
+                "standing, centred and facing the camera, against a plain neutral "
+                "studio background with clear even lighting. One person only, no "
+                "scenery, no props beyond what they wear or carry, no text."
+            )
+            # Only the character and the look: the scene description would
+            # put a location around them, and other cast would join them.
+            project = dict(board)
+            project["sceneDescription"] = ""
+            project["soundscape"] = ""
+            project["defaults"] = {**(board.get("defaults") or {}), "draft": False, "sketch": False}
+            # A standing figure wants a tall frame: the project's size, turned
+            # to portrait if it is landscape.
+            w, _, h = str(project["defaults"].get("resolution") or "960x544").partition("x")
+            if w.isdigit() and h.isdigit() and int(w) > int(h):
+                project["defaults"]["resolution"] = f"{h}x{w}"
+            still_model = self._still_model(board)
+            steps, seed = still_params(board.get("defaults") or {}, True)
+            shot = default_shot(board.get("defaults"))
+            shot.update(id=f"character-{stamp}", prompt=prompt, model=still_model,
+                        steps=steps, _fixedSteps=True, seed=seed)
+            paths = ShotPaths(workspace=self.workspace, abs_dir=work_abs, rel_dir=work_rel,
+                              data_dir=self.data_dir)
+            with self._lock:
+                self._stills_phase = "image"
+                self._stills_progress = 10.0
+            spec = self.backend.prepare(shot, project, paths)
+
+            def on_event(ev: ProgressEvent) -> None:
+                if ev.log_line:
+                    with self._lock:
+                        self._stills_log.append({"level": ev.log_level, "text": f"[character] {ev.log_line}"})
+
+            result = self.backend.run(spec, on_event, self._cancel.is_set)
+            if result.cancelled or self._cancel.is_set():
+                raise RuntimeError("stopped before completion")
+            if result.error or result.exit_code != 0:
+                raise RuntimeError(
+                    result.error or f"{still_model} exited {result.exit_code}: "
+                    + next((t for lvl, t in reversed(result.log) if lvl == "ERROR"), "")
+                )
+            out = next((p for p in spec.expected_outputs if p.exists()), None)
+            if out is None:
+                raise RuntimeError("the image engine did not produce an image")
+
+            # Filed in refs/ like an upload, so the picker offers it too.
+            refs = self.store.refs_dir(slug)
+            refs.mkdir(parents=True, exist_ok=True)
+            base = slugify(name or description)[:40] or "character"
+            dest = refs / f"{base}-portrait{out.suffix}"
+            n = 2
+            while dest.exists():
+                dest = refs / f"{base}-portrait-{n}{out.suffix}"
+                n += 1
+            shutil.copy2(out, dest)
+            rel = str(dest.relative_to(self.data_dir)).replace("\\", "/")
+            with self._lock:
+                self._stills_results = {"image": {
+                    "kind": "upload", "path": rel, "url": "/media/" + rel, "label": dest.name,
+                }}
+                self._stills_progress = 100.0
+                self._stills_phase = "done"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            with self._lock:
+                self._stills_error = str(exc)
 
     def _still_model(self, board: dict) -> str:
         """The board's still engine; "auto" is the first available image
@@ -720,7 +872,8 @@ class Orchestrator:
             # Prepare all dialogue before the first expensive video job. Whole-board
             # runs also remux current clips whose audio mix setting changed.
             board = self.store.load(slug)
-            speech_ids = [s["id"] for s in board["shots"]] if assemble_after else list(self._order)
+            speech_ids = ([s["id"] for s in board["shots"] if not s.get("locked")]
+                          if assemble_after else list(self._order))
             if self.prepare_dialogue:
                 for sid in speech_ids:
                     if self._cancel.is_set():
@@ -799,6 +952,17 @@ class Orchestrator:
             return
         shot = shots[idx]
         run = self._runs[shot_id]
+
+        # ---- lock gate -------------------------------------------------
+        # Locked after the batch was queued, or the board moved so this
+        # shot's folder now holds a locked shot's clip.
+        owner = self.store.locked_dirs(slug, board).get(self.store.shot_rel_dir(slug, idx + 1))
+        if shot.get("locked") or (owner and owner != shot_id):
+            run.status = "cancelled"
+            run.reason = ("locked — not rendered" if shot.get("locked")
+                          else "its folder holds a locked shot's clip — not rendered")
+            run.log.append({"level": "INFO", "text": run.reason})
+            return
 
         # ---- dependency gate ------------------------------------------
         dep_problem = self._resolve_chain(shot, shots, slug)
@@ -1005,6 +1169,8 @@ class Orchestrator:
         shot = next((s for s in board["shots"] if s["id"] == shot_id), None)
         if shot is None:
             raise ValueError("no such shot")
+        if shot.get("locked"):
+            raise RuntimeError("this shot is locked — unlock it to try other seeds")
         if seeds:
             seeds = list(dict.fromkeys(int(n) for n in seeds if 0 <= int(n) < 2**31))
         else:
@@ -1185,6 +1351,8 @@ class Orchestrator:
         """
         if self.busy:
             raise RuntimeError("wait for the current render to finish")
+        if any(s["id"] == shot_id and s.get("locked") for s in self.store.load(slug).get("shots") or []):
+            raise RuntimeError("this shot is locked — unlock it to use another take")
         take_dir = self.seed_takes_dir(slug, shot_id) / f"seed-{int(seed)}"
         take = self._read_take(take_dir)
         if not take:
@@ -1468,6 +1636,8 @@ class Orchestrator:
                     if s["id"] == shot_id), None)
         if idx is None:
             raise RuntimeError("shot not found")
+        if board["shots"][idx].get("locked"):
+            raise RuntimeError("this shot is locked — unlock it to change its review state")
         shot = board["shots"][idx]
         run = self._runs.get(shot_id)
         status = run.status if run else shot.get("status")

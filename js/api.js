@@ -164,6 +164,11 @@ const API = {
   // Start/mid/end Krea-2 stills for one shot — a fast preview, not a render.
   stills: (slug, shotId) => req("POST", "/api/stills", { slug, shotId }),
 
+  // A reference portrait made from a cast member's name and description.
+  // Runs as an image job; status().stills.results.image is the new ref.
+  characterImage: (slug, { name, description }) =>
+    req("POST", "/api/character-image", { slug, name, description }),
+
   // Render several projects in sequence, each with its own saved settings.
   renderBatch: (slugs) => req("POST", "/api/render-batch", { slugs }),
 
@@ -184,6 +189,11 @@ const API = {
   // re-render to prove it.
   acceptReview: (slug, shotId) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept-review`, {}),
+
+  // Freeze one shot against edits, renders and project-setting changes (or
+  // release it). Returns {board, stale}, the server's copy after the change.
+  lockShot: (slug, shotId, locked) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/lock`, { locked }),
 
   accept: (slug, shotId) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/accept`, {}),
