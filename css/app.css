@@ -693,7 +693,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   flex: none;
 }
 
-.style-ref img { width: 100%; height: 100%; object-fit: cover; }
+/* The whole image, letterboxed in the square: a reference is chosen for
+   what is in it, and cropping hid exactly the parts that differ. */
+.style-ref img { width: 100%; height: 100%; object-fit: contain; cursor: zoom-in; }
 
 .style-ref-add {
   width: 56px;

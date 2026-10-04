@@ -3569,7 +3569,8 @@ function renderRail() {
     d.title = r.label || r.path;
     const img = el("img");
     img.src = r.url || r.src;
-    img.alt = "";
+    img.alt = r.label || "";
+    img.addEventListener("click", () => openLightbox(img.src, img.alt));
     d.appendChild(img);
     const x = el("button", "clear-ref", "✕");
     x.addEventListener("click", () => {
