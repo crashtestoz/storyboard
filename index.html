@@ -391,13 +391,28 @@
           <div class="readonly">24 fps — fixed by the models</div>
         </div>
         <div class="field">
-          <label>Default steps <span class="hint-inline">8 draft · 16 good</span></label>
+          <label>Default steps <span class="hint-inline">final renders · 16–20 recommended</span></label>
           <input type="number" id="defSteps" value="8">
         </div>
         </section>
 
         </div>
         <div class="settings-pane" data-settings-pane="video">
+        <section>
+        <div class="card-heading"><span class="card-heading-title">Render engine</span><span class="card-heading-desc">which program runs MiniMax H3 — applies to every project</span></div>
+        <div class="field">
+          <label for="backendSelect">Engine</label>
+          <div class="rename-row">
+            <select id="backendSelect">
+              <option value="vpipe">vpipe — 8-bit H3, Turbo LoRA support</option>
+              <option value="h3c">h3.c — full-precision BF16 H3</option>
+            </select>
+            <button class="btn btn-sm" id="btnSaveBackend" disabled>Save &amp; restart server</button>
+          </div>
+        </div>
+        <div class="field-note" id="backendNote"></div>
+        </section>
+
         <section>
         <div class="card-heading"><span class="card-heading-title">Draft mode</span><span class="card-heading-desc">fast, rough, same motion</span></div>
         <label class="toggle" id="draftToggleWrap">
@@ -543,7 +558,7 @@
         <div class="card-heading"><span class="card-heading-title">Web search</span><span class="card-heading-desc">optional; lets the Storyboard AD research things beyond this board</span></div>
         <div class="field">
           <label>Search engine URL</label>
-          <input type="text" id="searchUrlInput" autocomplete="off" spellcheck="false" placeholder="e.g. http://localhost:31808 (SearXNG)">
+          <input type="text" id="searchUrlInput" autocomplete="off" spellcheck="false" placeholder="e.g. http://localhost:8080 (SearXNG)">
         </div>
         <div class="field-note" id="searchUrlWarn"></div>
         <div class="field-note">
@@ -592,6 +607,12 @@
             placeholder="Appearance, clothing, build, age — whatever should stay consistent whenever they appear."></textarea>
           <div class="field-note">Separates character traits from the surrounding environment.</div>
           <div class="proposal-slot" id="castDescProposal"></div>
+        </div>
+        <div class="field">
+          <label for="castVoiceDesc">Voice <span class="hint-inline">optional</span></label>
+          <textarea id="castVoiceDesc" rows="2"
+            placeholder="How they always sound: e.g. low, dry, slightly gravelly American baritone, unhurried."></textarea>
+          <div class="field-note">Added to the voice direction of every line they speak, ahead of that scene's own direction.</div>
         </div>
         <div class="field-row">
           <div class="field">

@@ -163,7 +163,7 @@ class OneVoicePerCharacter(unittest.TestCase):
 
     def test_clip_another_project_links_to_is_kept(self):
         other = default_board("q")
-        other["characters"] = [{"id": "x", "name": "Han", "description": "A pilot.",
+        other["characters"] = [{"id": "x", "name": "Jax", "description": "A pilot.",
                                 "voice": {"path": "p/refs/Alexander_-_Clear__Steady_and_Refined.mp3"}}]
         (self.root / "q").mkdir(exist_ok=True)
         (self.root / "q/storyboard.json").write_text(__import__("json").dumps(other))

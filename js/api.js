@@ -88,6 +88,7 @@ const API = {
   // Only resolves once the request lands; the process re-execs itself right
   // after, so the caller has to poll info() to know when it's back.
   restartServer: () => req("POST", "/api/server-settings/restart"),
+  setBackend: (backend) => req("POST", "/api/server-settings", { backend }),
 
   // Also saved to server-config.json, but read fresh on every chat turn —
   // no restart needed. An empty string disables web search again.

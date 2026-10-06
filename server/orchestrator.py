@@ -1134,6 +1134,21 @@ class Orchestrator:
                 renderedAs="draft" if spec.payload.get("draft") else "final",
                 renderFingerprint=fingerprint,
                 renderedDialogueSource="native" if native_dialogue_spoken else "recording",
+                # What actually ran -- the engine and Turbo can change the
+                # step count from the shot's own, and both can be switched
+                # after the render, so the clip's summary reads this.
+                renderedWith={
+                    "engine": spec.payload.get("engine") or getattr(self.backend, "id", ""),
+                    "steps": spec.payload.get("steps"),
+                    "turbo": bool(spec.payload.get("turbo")),
+                    # The clip's own geometry: a locked shot reports these
+                    # rather than the project's current size (see
+                    # render_record.py). Frames is the clip's length, which
+                    # a sketch reaches by holding frames.
+                    "width": spec.payload.get("width"),
+                    "height": spec.payload.get("height"),
+                    "frames": fresh_shot.get("frames"),
+                },
             )
             if native_dialogue_spoken:
                 # A dub from before this shot spoke its own line natively

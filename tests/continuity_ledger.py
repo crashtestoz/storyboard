@@ -223,7 +223,7 @@ class BoardPassTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.board = default_board("Sample")
+        self.board = default_board("Sample Board")
         self.board["shots"] = [default_shot(self.board["defaults"]) for _ in range(3)]
         prompts = ["Alex stands at frame left of the bench.",
                    "Alex stands at frame right, frowning.",

@@ -241,6 +241,20 @@ def speech_fingerprint(shot: dict, board: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def _speaker_voice_description(shot: dict[str, Any], board: dict[str, Any]) -> dict[str, str]:
+    """The speaking character's voice description, for the fingerprint.
+
+    Empty -> no key at all, so boards from before the field existed keep the
+    fingerprints they were rendered under.
+    """
+    if not (shot.get("dialogue") or "").strip():
+        return {}
+    from .dubbing import speaker_for
+
+    voice = ((speaker_for(shot, board) or {}).get("voiceDescription") or "").strip()
+    return {"voiceDescription": voice} if voice else {}
+
+
 def render_fingerprint(shot: dict[str, Any], board: dict[str, Any], *,
                        _library_refs: list | None = None) -> str:
     """Hash of everything that decides what a render of *shot* produces.
@@ -286,6 +300,7 @@ def render_fingerprint(shot: dict[str, Any], board: dict[str, Any], *,
         "recording": shot.get("dialogueAudioUrl") if shot.get("dialogueSource") == "recording" else None,
         "dialogueSource": shot.get("dialogueSource", "auto"),
         "dialogueStyle": shot.get("dialogueStyle", ""),
+        **_speaker_voice_description(shot, board),
         "speakerId": shot.get("speakerId", ""),
         "dialogueVoice": shot.get("dialogueVoice", ""),
         "dubMode": shot.get("dubMode", "mix"),

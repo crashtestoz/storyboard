@@ -227,9 +227,9 @@ class StoryboardChatTests(unittest.TestCase):
                  "snippet": "Average shot length varies by genre."},
             ]
             result = chat(model, self.board, "How long is a typical film shot?",
-                          search_url="http://localhost:31808")
+                          search_url="http://localhost:8080")
         fake_search.assert_called_once_with(
-            "http://localhost:31808", "average shot length feature film"
+            "http://localhost:8080", "average shot length feature film"
         )
         self.assertEqual(len(model.calls), 2)
         self.assertIn(SEARCH_CAPABILITY_PROMPT, model.calls[0][0])
@@ -246,7 +246,7 @@ class StoryboardChatTests(unittest.TestCase):
         ])
         with patch("server.storyboard_chat.web_search", return_value=[]) as fake_search:
             result = chat(model, self.board, "Research this",
-                          search_url="http://localhost:31808")
+                          search_url="http://localhost:8080")
         fake_search.assert_called_once()
         self.assertEqual(len(model.calls), 2)
         self.assertEqual(result["message"], "Still not sure.")
@@ -256,28 +256,28 @@ class ReplaceTextTests(unittest.TestCase):
     """replace_text edits exact words without the model copying prompts out."""
 
     def setUp(self):
-        self.board = default_board("Sample Board 1")
-        self.board["sceneDescription"] = "Boston at night. The visor headset is matte black."
-        self.alex = default_character("Alex", "Wears the visor headset on his brow.")
+        self.board = default_board("Sample Board")
+        self.board["sceneDescription"] = "Boston at night. The headset is matte black."
+        self.alex = default_character("Alex", "Wears the headset on his brow.")
         self.board["characters"] = [self.alex]
         self.shots = [default_shot(self.board["defaults"]) for _ in range(3)]
-        self.shots[0]["prompt"] = "Alex tears the visor headset off. The visor headset sparks."
+        self.shots[0]["prompt"] = "Alex tears the headset off. The headset sparks."
         self.shots[1]["prompt"] = "Alex stares at the bench."
-        self.shots[2]["prompt"] = "Alex taps the visor headset."
+        self.shots[2]["prompt"] = "Alex taps the headset."
         self.board["shots"] = self.shots
 
     def test_each_matching_shot_becomes_one_exact_update(self):
-        actions = validate_actions([{"tool": "replace_text", "find": "the visor headset",
+        actions = validate_actions([{"tool": "replace_text", "find": "the headset",
                                      "replace": "his headset", "scope": ["shots"]}], self.board)
         self.assertEqual(actions, [
             {"tool": "update_shot", "shotId": self.shots[0]["id"], "fields": {
-                "prompt": "Alex tears his headset off. The visor headset sparks."}},
+                "prompt": "Alex tears his headset off. The headset sparks."}},
             {"tool": "update_shot", "shotId": self.shots[2]["id"], "fields": {
                 "prompt": "Alex taps his headset."}},
         ])
 
     def test_scope_defaults_to_board_cast_and_shots(self):
-        actions = validate_actions([{"tool": "replace_text", "find": "visor headset",
+        actions = validate_actions([{"tool": "replace_text", "find": "headset",
                                      "replace": "headset"}], self.board)
         self.assertEqual([a["tool"] for a in actions],
                          ["set_board_fields", "update_character", "update_shot", "update_shot"])
@@ -287,10 +287,10 @@ class ReplaceTextTests(unittest.TestCase):
     def test_shot_ids_limit_it_and_it_merges_into_a_rewrite_of_the_same_shot(self):
         sid = self.shots[2]["id"]
         actions = validate_actions([
-            {"tool": "replace_text", "find": "visor headset", "replace": "headset",
+            {"tool": "replace_text", "find": "headset", "replace": "headset",
              "shotIds": [sid]},
             {"tool": "update_shot", "shotId": sid,
-             "fields": {"prompt": "Alex slowly taps the visor headset.", "frames": 96}},
+             "fields": {"prompt": "Alex slowly taps the headset.", "frames": 96}},
         ], self.board)
         self.assertEqual(actions, [{"tool": "update_shot", "shotId": sid, "fields": {
             "prompt": "Alex slowly taps the headset.", "frames": 96}}])
@@ -318,7 +318,7 @@ class BoardManagementTests(unittest.TestCase):
     """The AD can see, read, create, copy, open, rename and delete boards."""
 
     def setUp(self):
-        self.board = default_board("Sample Board 1")
+        self.board = default_board("Sample Board")
         self.alex = default_character("Alex", "Mid-forties, unkempt hair.")
         self.board["characters"] = [self.alex]
         self.board["shots"] = [default_shot(self.board["defaults"])]
@@ -331,7 +331,7 @@ class BoardManagementTests(unittest.TestCase):
         self.boards = {"sample-board-2": self.sequel}
 
     def validate(self, actions):
-        return validate_actions(actions, self.board, self.slugs, "sample-board-1",
+        return validate_actions(actions, self.board, self.slugs, "sample-board",
                                 load_board=self.boards.__getitem__)
 
     def test_create_board_carries_continuity_and_checks_cast_ids(self):
@@ -369,7 +369,7 @@ class BoardManagementTests(unittest.TestCase):
         self.assertEqual(self.validate([
             {"tool": "open_board", "slug": "harbour"},
             {"tool": "open_board", "slug": "../etc"},
-            {"tool": "delete_board", "slug": "sample-board-1"},
+            {"tool": "delete_board", "slug": "sample-board"},
             {"tool": "delete_board", "slug": "missing"},
             {"tool": "copy_from_board", "slug": "sample-board-2", "carryOver": ["cast"]},
             {"tool": "copy_from_board", "slug": "sample-board-2", "carryOver": []},
@@ -377,7 +377,7 @@ class BoardManagementTests(unittest.TestCase):
             {"tool": "rename_board", "name": ""},
         ]), [
             {"tool": "open_board", "slug": "harbour"},
-            {"tool": "delete_board", "slug": "sample-board-1"},
+            {"tool": "delete_board", "slug": "sample-board"},
             {"tool": "copy_from_board", "slug": "sample-board-2", "carryOver": ["cast"]},
             {"tool": "rename_board", "name": "Renamed Board"},
         ])
@@ -389,7 +389,7 @@ class BoardManagementTests(unittest.TestCase):
             {"tool": "open_board", "slug": "harbour"},
             {"tool": "start_render"},
         ]}))
-        result = chat(model, self.board, "Start episode 3", slug="sample-board-1",
+        result = chat(model, self.board, "Start episode 3", slug="sample-board",
                       other_boards=self.other, load_board=self.boards.__getitem__)
         self.assertEqual([a["tool"] for a in result["actions"]], ["create_board"])
 
@@ -398,7 +398,7 @@ class BoardManagementTests(unittest.TestCase):
             json.dumps({"message": "Reading.", "actions": [], "read": ["sample-board-2", "../secret"]}),
             json.dumps({"message": "Maya is in Ep2.", "actions": [], "read": ["harbour"]}),
         ])
-        result = chat(model, self.board, "Who is in Ep2?", slug="sample-board-1",
+        result = chat(model, self.board, "Who is in Ep2?", slug="sample-board",
                       other_boards=self.other, load_board=self.boards.__getitem__)
         self.assertIn("OTHER STORYBOARDS", model.calls[0][1])
         self.assertIn('"slug":"harbour"', model.calls[0][1])

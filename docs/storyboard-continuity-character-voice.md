@@ -71,8 +71,8 @@ Implementation lives in `storyboard/server/{orchestrator,store,speech,assemble}.
 `storyboard/server/backends/vpipe_backend.py`, and `storyboard/js/app.js`.
 Regression coverage includes `storyboard/tests/continuity.py` and the existing
 scene-layer, render-all, speech, persistence, and reference-control suites.
-No Fern settings were changed and no new model render was started as part of
-implementation.
+No existing project settings were changed and no new model render was started as
+part of implementation.
 
 ## Goal
 
@@ -105,11 +105,11 @@ Existing recordings can be reused after a render. The post-render relay checks
 whether the spoken text and direction still match. Native speech bypasses that
 relay so an older recording does not replace the newly generated speech.
 
-### Fern board observed on 16 September 2026
+### Example camera-test board observed on 16 September 2026
 
-`projects/camera-motion-test/storyboard.json` had:
+A ten-scene camera-motion test board had:
 
-- The same Fern character portrait and reference voice attached to the cast.
+- The same character portrait and reference voice attached to the cast.
 - No Start/End frame chains on any of its ten scenes.
 - Scene 1 using native speech.
 - Scenes 2–10 using recordings, with existing dialogue WAV files and matching
@@ -277,7 +277,7 @@ ambience may share one track, so mixing a continuous bed needs listening checks.
    path is evaluated. Official Ref2VA video support does not establish that the
    local VPIPE adapter already supports it correctly.
 
-Start with a separate three-scene copy of the Fern board, leaving the active
+Start with a separate three-scene copy of that test board, leaving the active
 render untouched. Compare independent Ref2VA, Ref2VA reference continuity, and
 FL2VA frame chaining with cloned recordings. Keep duration, resolution, and
 shared scene direction comparable; test native speech and recorded speech as

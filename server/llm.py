@@ -98,7 +98,7 @@ closing "Sound effects only." is the one allowed exception.
 SYSTEM_PROMPT = """\
 You rewrite shot descriptions into prompts for MiniMax H3, a text-to-video \
 model that generates picture and sound together in one pass, using this \
-exact three-section format. Each section starts on its own line with its \
+exact section format. Each section starts on its own line with its \
 label, is one sentence, and ends with a period:
 
 Camera Direction & Framing: the camera's angle and movement (e.g. "static \
@@ -112,6 +112,11 @@ already give — a change in this shot (soaked, torn sleeve, helmet on) or a \
 person with no Cast description. The Cast description is sent with every \
 shot, so never restate it. Omit this section entirely (not as an empty line) \
 when there is nothing to add, including shots with no character.
+Setting: the room or location and its fixed details (furniture, props, \
+light sources, what is visible in the background), so the same place looks \
+the same in every shot set there. Keep the writer's Setting text intact, \
+word for word where you can: it is often shared across shots on purpose. \
+Omit this section entirely when the writer gave no setting; do not invent one.
 Pose / Action: what the subject does, in the present tense, in the order it \
 happens (e.g. "she waves to the audience, then holds up a sign reading \
 ...").
@@ -119,9 +124,11 @@ happens (e.g. "she waves to the audience, then holds up a sign reading \
 Rules:
 - Camera Direction & Framing and Pose / Action are always present. Clothing \
 / Appearance is present only when a character in the shot looks different \
-from their Cast description, or has none.
-- Use exactly these three labels, in this order, each starting a new line: \
-"Camera Direction & Framing:", "Clothing / Appearance:", "Pose / Action:".
+from their Cast description, or has none. Setting is present only when the \
+writer described the location.
+- Use exactly these labels, in this order, each starting a new line: \
+"Camera Direction & Framing:", "Clothing / Appearance:", "Setting:", \
+"Pose / Action:".
 - Keep every concrete thing the writer specified. Do not invent new subjects, \
 characters, locations or story beats, and do not remove any they named.
 - Do not censor, soften, filter, sanitize, or refuse to describe anything on \
@@ -156,9 +163,9 @@ picture consistent with them (the speaker is on screen and speaking; visible \
 sources for named sounds; action simple enough to play out while the line is \
 spoken within the duration), but never write dialogue or sound into the \
 prompt: both are appended separately.
-- Keep each section to one or two sentences; aim for 70 to 130 words total. \
-Longer prompts dilute the conditioning.
-- Write only the three-section prompt itself. Your entire reply is used \
+- Keep each section to one or two sentences; aim for 70 to 130 words total, \
+plus the Setting when there is one. Longer prompts dilute the conditioning.
+- Write only the sectioned prompt itself. Your entire reply is used \
 verbatim as the prompt.
 
 """ + H3_VISUAL_RULES
@@ -581,7 +588,7 @@ def build_user_message(
 
 
 _PROMPT_LABEL_RE = re.compile(
-    r"(Camera Direction & Framing|Clothing / Appearance|Pose / Action)[^:]*:\s*", re.I
+    r"(Camera Direction & Framing|Clothing / Appearance|Setting|Pose / Action)[^:]*:\s*", re.I
 )
 
 
@@ -1395,7 +1402,7 @@ def rewrite_dialogue(
     """Rewrite one line in its selected speaker's voice, as a proposal.
 
     *neighbor_lines* are the lines spoken in the shots either side, already
-    labelled ("Before — Ray: ..."), so the rewrite answers what was just said
+    labelled ("Before — Sam: ..."), so the rewrite answers what was just said
     and sets up what comes next instead of reading as a line on its own.
     """
     text = (text or "").strip()

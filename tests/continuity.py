@@ -126,8 +126,12 @@ class Continuity(unittest.TestCase):
         with patch.object(self.orch,'_run_one') as render:
             self.orch._run_batch(self.slug)
             render.assert_not_called()
-        self.assertIn('voice offline',self.orch._error)
-        self.assertEqual(self.orch.store.load(self.slug)['shots'][0]['status'],'blocked')
+        # A dialogue failure blocks that shot, not the batch: the reason is
+        # on the shot, and there is no batch-wide error.
+        shot = self.orch.store.load(self.slug)['shots'][0]
+        self.assertEqual(shot['status'],'blocked')
+        self.assertIn('voice offline',shot['reason'])
+        self.assertFalse(self.orch._error)
 
     def test_current_speech_reused_changed_voice_regenerated_native_skipped(self):
         board = self.board

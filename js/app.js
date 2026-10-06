@@ -1584,6 +1584,8 @@ function wireChrome() {
   $("#btnRename").addEventListener("click", renameProject);
   $("#btnDeleteBoard").addEventListener("click", deleteProject);
   $("#btnSaveDataDir").addEventListener("click", saveDataDirAndRestart);
+  $("#backendSelect").addEventListener("change", paintBackendButton);
+  $("#btnSaveBackend").addEventListener("click", saveBackendAndRestart);
   // Saved as soon as you leave the field or press Enter — no Save button.
   $("#searchUrlInput").addEventListener("change", saveSearchUrl);
 
@@ -1881,12 +1883,14 @@ function wireChrome() {
     clearTimeout(stepsPromptTimer);
     stepsPromptTimer = setTimeout(() => {
       const steps = Number(e.target.value);
-      const all = shots();
+      // Locked scenes keep the steps they were rendered at.
+      const all = shots().filter((s) => !s.locked);
       if (!steps || !all.some((s) => s.steps !== steps)) return;
       const n = all.length;
       if (!confirm(
-        `Also set ${steps} steps on all ${n} scene${n === 1 ? "" : "s"}?\n\n` +
-        "OK updates every scene. Cancel keeps each scene's own steps; " +
+        `Also set ${steps} steps on all ${n} unlocked scene${n === 1 ? "" : "s"}?\n\n` +
+        "OK updates every unlocked scene (locked ones keep theirs). Cancel " +
+        "keeps each scene's own steps; " +
         "the new default applies to scenes you add."
       )) return;
       for (const s of all) s.steps = steps;
@@ -2221,6 +2225,7 @@ function openSettings() {
   $("#btnRename").disabled = true;
   $("#btnDeleteBoard").disabled = !state.board || state.deletingBoard;
   paintDataDir();
+  paintBackend();
   paintSearchUrl();
   initializeSettingsTabs();
   paintLlmServiceManager();
@@ -2939,6 +2944,69 @@ function paintDataDir() {
       "that flag/variable is removed from however this server is launched."
     : "";
   warn.classList.toggle("field-warn", overridden);
+}
+
+function paintBackend() {
+  const current = (state.info && state.info.backend && state.info.backend.id) || "";
+  const pick = $("#backendSelect");
+  if ([...pick.options].some((o) => o.value === current)) pick.value = current;
+  paintBackendButton();
+}
+
+function paintBackendButton() {
+  const current = (state.info && state.info.backend && state.info.backend.id) || "";
+  const chosen = $("#backendSelect").value;
+  const unchanged = chosen === current;
+  $("#btnSaveBackend").disabled = unchanged;
+  $("#backendNote").textContent = unchanged
+    ? `Running now: ${state.info.backend.label}.`
+    : "Switching restarts the server. Shots already rendered keep their " +
+      "clips, but the two engines' output can look different.";
+}
+
+/* After a restart request: poll until the server answers, then reload. */
+async function reloadWhenServerIsBack() {
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 700));
+    try {
+      await API.info();
+      window.location.reload();
+      return;
+    } catch {
+      // still restarting — keep polling
+    }
+  }
+  toast("The server didn't come back within 30s — check the terminal it's " +
+        "running in, then reload this page.", "error");
+}
+
+async function saveBackendAndRestart() {
+  const choice = $("#backendSelect").value;
+  if (!confirm(`Switch the render engine to ${choice} and restart the server ` +
+               `now?\n\nThis briefly drops every connection to this app.`)) {
+    return;
+  }
+  const btn = $("#btnSaveBackend");
+  btn.disabled = true;
+  const was = btn.textContent;
+  try {
+    btn.textContent = "saving…";
+    await saveNow();
+    const r = await API.setBackend(choice);
+    if (r.overridden) {
+      toast("Saved, but this server was started with SBV_BACKEND set, which " +
+            "always wins — remove it from how the server is launched.", "error");
+    }
+    btn.textContent = "restarting…";
+    await API.restartServer();
+    await reloadWhenServerIsBack();
+  } catch (err) {
+    toast(`Could not switch the render engine: ${err.message}`, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
 }
 
 function paintSearchUrl() {
@@ -3715,7 +3783,13 @@ function renderRail() {
   const [cw, ch] = current.split("x").map(Number);
   const cap = modelCap(effectiveShotModel(selectedShot())) || state.models[0] || null;
   const [dw, dh] = draftGeometry(cw, ch, cap ? cap.sizeAlign : 16);
-  $("#draftNote").textContent = draftOn
+  const turboOn = !!(state.info && state.info.backend && state.info.backend.turbo);
+  $("#draftNote").textContent = turboOn
+    ? (draftOn ? "Rendering drafts" : "Drafts render") + ` at the full ${cw}×${ch} ` +
+      `on the Turbo LoRA (${state.info.backend.turboSteps} steps) — fast but flatter than a final. Final ` +
+      `renders use each scene's own step count on the full model. Sketch ` +
+      `previews still render small.`
+    : draftOn
     ? `Rendering at ${dw}×${dh}, at each scene's own step count, dialogue and ` +
       `sound effects included. Clip length and seed are unchanged, so the ` +
       `camera move is the one you will get.`
@@ -4386,13 +4460,31 @@ function paintSoundtrackStatus() {
    when it has not been built: a folder of clips and no video is the failure
    this panel exists to make obvious. */
 function renderCutSettings(host, busy) {
-  const details = el("details", "panel");
+  // A card like the others on this tab, closed until its heading is clicked.
+  const details = el("details", "panel cut-settings");
   details.open = !!state.cutSettingsOpen;
   details.addEventListener("toggle", () => { state.cutSettingsOpen = details.open; });
-  details.appendChild(el("summary", null, "Continuity, dialogue & cut settings"));
+  const summary = el("summary", "cut-settings-summary");
+  summary.append(
+    cardHeading("Continuity, dialogue & cut", "crossfades, fades, audio levels and scene chaining"),
+    el("span", "cut-settings-chevron"));
+  summary.lastChild.setAttribute("aria-hidden", "true");
+  const body = el("div", "cut-settings-body");
+  details.append(summary, body);
+  const group = (title) => {
+    const g = el("div", "cut-settings-group");
+    g.appendChild(el("div", "cut-settings-group-title", title));
+    body.appendChild(g);
+    return g;
+  };
+
+  const cut = group("Cut");
+  const fields = el("div", "cut-settings-fields");
+  cut.appendChild(fields);
   const opts = () => (state.board.assembly ||= {});
   const number = (label, value, max, change) => {
-    const row = el("label", "field-note", label + " ");
+    const row = el("label", "cut-settings-field");
+    row.appendChild(el("span", null, label));
     const input = el("input");
     input.type = "number"; input.min = "0"; input.max = String(max); input.step = "0.05";
     input.value = String(value || 0); input.disabled = busy;
@@ -4401,7 +4493,7 @@ function renderCutSettings(host, busy) {
       if (!Number.isFinite(n) || n < 0 || n > max) return;
       change(n); markDirty();
     });
-    row.appendChild(input); details.appendChild(row);
+    row.appendChild(input); fields.appendChild(row);
   };
   number("Crossfade seconds (0 = straight cut)", opts().transitionSeconds, 2, n => { opts().transitionSeconds = n; });
   number("Audio fade at scene edges (seconds)", opts().audioFadeSeconds, 2, n => { opts().audioFadeSeconds = n; });
@@ -4416,15 +4508,23 @@ function renderCutSettings(host, busy) {
   };
   number("Fade from black at the start (seconds, 0 = off)", opts().fadeInBlackSeconds ?? opts().fadeBlackSeconds, 3, n => { splitFade(); opts().fadeInBlackSeconds = n; });
   number("Fade to black at the end (seconds, 0 = off)", opts().fadeOutBlackSeconds ?? opts().fadeBlackSeconds, 3, n => { splitFade(); opts().fadeOutBlackSeconds = n; });
+  cut.appendChild(el("div", "field-note",
+    "Crossfades overlap picture and sound and shorten the cut."));
+
+  const audio = group("Audio");
   const normalize = el("input"); normalize.type = "checkbox";
   normalize.checked = !!opts().normalizeAudio; normalize.disabled = busy;
   normalize.addEventListener("change", () => { opts().normalizeAudio = normalize.checked; markDirty(); });
   const normLabel = el("label", "field-note");
-  normLabel.append(normalize, el("span", null, " Match scene audio levels")); details.appendChild(normLabel);
+  normLabel.append(normalize, el("span", null, " Match scene audio levels")); audio.appendChild(normLabel);
   const music = el("button", "btn btn-sm btn-ghost", "Soundtrack settings…");
   music.title = "Music under the whole cut — Settings → Soundtrack";
   music.onclick = () => { openSettings(); document.querySelector('[data-settings-tab="soundtrack"]')?.click(); };
-  details.append(el("div", "field-note", "Music for the whole cut is set up in Settings → Soundtrack."), music);
+  const musicRow = el("div", "cut-settings-actions");
+  musicRow.append(music, el("span", "field-note", "Music for the whole cut is set up in Settings → Soundtrack."));
+  audio.appendChild(musicRow);
+
+  const continuity = group("Continuity & dialogue");
   const chain = el("button", "btn btn-sm", "Chain all scenes from their previous shot");
   chain.title = "Chains that already skip back to an earlier shot are kept";
   chain.disabled = busy || shots().length < 2;
@@ -4451,8 +4551,10 @@ function renderCutSettings(host, busy) {
       state.awaitingBatch = true; startPolling(); render();
     } catch (err) { toast(err.message, "error"); prepare.disabled = false; }
   };
-  details.append(chain, prepare, el("div", "field-note",
-    "Current takes are reused; missing or changed recordings are generated. Native speech is created during video rendering. Crossfades overlap picture and sound and shorten the cut."));
+  const buttons = el("div", "cut-settings-actions");
+  buttons.append(chain, prepare);
+  continuity.append(buttons, el("div", "field-note",
+    "Current takes are reused; missing or changed recordings are generated. Native speech is created during video rendering."));
   host.appendChild(details);
 }
 
@@ -4656,6 +4758,7 @@ async function editCharacter(existing) {
     : `Edit ${draft.name || "character"}`;
   $("#castName").value = draft.name || "";
   $("#castDesc").value = draft.description || "";
+  $("#castVoiceDesc").value = draft.voiceDescription || "";
   $("#castVoiceText").value = draft.voiceText || "";
   /* Cloning and transcription are separate capabilities: the board's speech
      engine may clone a voice and have no speech recognition at all. So the
@@ -4999,6 +5102,7 @@ async function editCharacter(existing) {
     $("#castSave").onclick = async () => {
       draft.name = $("#castName").value.trim();
       draft.description = $("#castDesc").value.trim();
+      draft.voiceDescription = $("#castVoiceDesc").value.trim();
       draft.voiceText = $("#castVoiceText").value.trim();
       if (!draft.name || !draft.description) {
         castError("A character needs both a name and a description.");
@@ -5105,10 +5209,16 @@ function renderStrip() {
     const draftOn = !!(state.board.defaults && state.board.defaults.draft);
     const sketchOn = draftOn && !!state.board.defaults.sketch;
     const [rw, rh] = projectResolution().split("x").map(Number);
-    const resLabel = draftOn
-      ? `${draftGeometry(rw, rh, cap ? cap.sizeAlign : 16).join("×")} (${sketchOn ? "sketch" : "draft"})`
+    const turbo = turboDraft(raw);
+    const frozen = lockedRecord(raw);
+    const resLabel = frozen
+      ? `${frozen.width}×${frozen.height}` +
+        (raw.renderedAs === "draft" ? ` (${frozen.turbo ? "Turbo draft" : "draft"})` : "")
+      : draftOn
+      ? `${(turbo ? [rw, rh] : draftGeometry(rw, rh, cap ? cap.sizeAlign : 16)).join("×")} (${sketchOn ? "sketch" : turbo ? "Turbo draft" : "draft"})`
       : projectResolution();
-    const stepsLabel = raw.steps;
+    const stepsLabel = frozen ? frozen.steps
+      : turbo ? `${state.info.backend.turboSteps} (Turbo draft)` : raw.steps;
     // Sketch renders far fewer real frames (see the backend's own comment
     // in prepare()) then stretches the clip back to this same duration, so
     // the length shown here still holds — only the frame count actually
@@ -5306,9 +5416,10 @@ function wireDragList(list) {
   });
 }
 
-// A new shot starts from the three headings every shot prompt is written in.
+// A new shot starts from the headings every shot prompt is written in.
+// Setting names the room or location; leave it empty to inherit the scene.
 const SHOT_PROMPT_TEMPLATE =
-  "Camera Direction & Framing: \n\nClothing / Appearance: \n\nPose / Action: ";
+  "Camera Direction & Framing: \n\nClothing / Appearance: \n\nSetting: \n\nPose / Action: ";
 
 async function addShot() {
   try {
@@ -6481,8 +6592,14 @@ function speakerName(raw) {
     const explicit = (state.board.characters || []).find((c) => c.id === raw.speakerId);
     if (explicit && (explicit.name || "").trim()) return explicit.name.trim();
   }
-  const first = cast.find((c) => (c.name || "").trim());
-  return first ? first.name.trim() : "The visible character";
+  // Same inference as server/dubbing.py's speaker_for (and the "Auto" pick in
+  // the Dialogue panel): the first cast member with a cloned voice, else the
+  // first in the shot — otherwise the preview names a different speaker than
+  // the render prompt does.
+  const inferred = cast.find((c) => c.voice && c.voice.path) || cast[0];
+  return inferred && (inferred.name || "").trim()
+    ? inferred.name.trim()
+    : "The visible character";
 }
 
 /** Exactly what the backend will assemble, so the preview cannot drift. */
@@ -6561,6 +6678,23 @@ function alignUp(v, align) {
 
 // Mirrors the backend's _draft_geometry. A draft only shrinks the frame; the
 // steps stay the shot's own.
+/* A locked shot's frozen render record -- what its clip was actually
+   rendered with -- or null. Locked shots report this, never the project's
+   current size or steps (server/render_record.py fills it in). */
+function lockedRecord(raw) {
+  const r = raw && raw.locked && raw.renderedWith;
+  return r && r.width && r.height ? r : null;
+}
+
+/* A Turbo draft: draft on (not sketch), an H3 Ref2VA shot, and the server's
+   engine has a Turbo LoRA for drafts. It renders at the project's full frame
+   size and at the Turbo step count -- see the backend's prepare(). */
+function turboDraft(raw) {
+  const d = state.board.defaults || {};
+  return !!d.draft && !d.sketch && effectiveShotModel(raw) === STORYBOARD_MODEL &&
+    !!(state.info && state.info.backend && state.info.backend.turbo);
+}
+
 function draftGeometry(w, h, align = 16) {
   const scale = Math.min(0.5, 384 / Math.max(w, h));
   return [
@@ -7082,13 +7216,29 @@ function clipRenderSpec(raw) {
   const d = state.board.defaults || {};
   const draft = raw.renderedAs ? raw.renderedAs === "draft" : !!d.draft;
   const [w, h] = projectResolution().split("x").map(Number);
-  const [rw, rh] = draft ? draftGeometry(w, h, cap ? cap.sizeAlign : 16) : [w, h];
+  // A Turbo draft (H3 Ref2VA, Turbo on) keeps the full frame; see the
+  // backend's turbo_draft_full_size.
+  const fullDraft = draft && !raw.renderedAs && turboDraft(raw);
+  const frozen = lockedRecord(raw);
+  const [rw, rh] = frozen ? [frozen.width, frozen.height]
+    : draft && !fullDraft ? draftGeometry(w, h, cap ? cap.sizeAlign : 16) : [w, h];
+  // A rendered clip reports the engine and step count that actually ran
+  // (recorded by the orchestrator); the current label and the shot's own
+  // steps describe the next render, which may differ.
+  const done = raw.renderedWith;
+  const ENGINE_NAMES = { h3c: "h3.c, BF16", vpipe: "vpipe, 8-bit" };
+  let model = (cap || {}).label || effectiveShotModel(raw);
+  if (done && done.engine && cap && cap.kind === "video") {
+    const base = model.split("—")[0].replace(/\s*\(h3\.c\)/, "").trim();
+    model = `${base} · ${ENGINE_NAMES[done.engine] || done.engine}` +
+      (done.turbo ? " · Turbo LoRA" : "");
+  }
   return {
-    model: (cap || {}).label || effectiveShotModel(raw),
+    model,
     still: !!cap && cap.kind === "image",
     res: `${rw}×${rh}`,
     mode: draft ? (d.sketch && !raw.renderedAs ? "sketch" : "draft") : "",
-    steps: raw.steps,
+    steps: done && done.steps ? done.steps : raw.steps,
   };
 }
 

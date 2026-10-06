@@ -55,7 +55,7 @@ class LibraryTests(unittest.TestCase):
         lib = copy.deepcopy(self.board["styleRefs"])
         for s in self.board["shots"]:
             s["renderFingerprint"] = render_fingerprint(s, self.board, _library_refs=lib)
-        # ...then two more images were added, as on the Sample board.
+        # ...then two more images were added, as happens on a real board.
         self.board["styleRefs"] += [ref("side.png"), ref("rear.png")]
         self.assertEqual([stale_reason(s, self.board) for s in self.board["shots"]], ["", ""])
         # A real change is still a change under the old formula too.

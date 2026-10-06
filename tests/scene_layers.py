@@ -16,16 +16,16 @@ from server.llm import _parse_character_result
 class SceneLayers(unittest.TestCase):
     def setUp(self):
         self.board = dict(sceneDescription='Shared corridor.', soundscape='Ventilation.', characters=[
-            dict(id='c1', name='Droid', description='Gold plating.', image={'path':'gold.png'}, voice={'path':'voice.wav'})], defaults={})
+            dict(id='c1', name='Robot', description='Brushed steel plating.', image={'path':'steel.png'}, voice={'path':'voice.wav'})], defaults={})
         self.shot = dict(id='s1', model='ref2va', prompt='Walk through @corridor.', characterIds=['c1'],
                          referenceImages=[dict(path='room.png',tag='corridor',role='environment')],
                          dialogue='Yes, sir.', dialogueStyle='Quietly.', dialogueSource='native', soundNote='Metal footsteps.')
     def test_layers_and_mapping(self):
         prompt = _resolved_prompt(self.shot,self.board,model='ref2va')
-        for part in ['Shared corridor.', 'Gold plating.', 'Walk through <Picture 1>.', 'Ventilation.', 'Metal footsteps.', 'Quietly.']:
+        for part in ['Shared corridor.', 'Brushed steel plating.', 'Walk through <Picture 1>.', 'Ventilation.', 'Metal footsteps.', 'Quietly.']:
             self.assertIn(part,prompt)
         refs = _ref2va_references(self.shot,self.board,ShotPaths(Path('/tmp'),Path('/tmp/shot'),'shot',Path('/tmp')))
-        self.assertEqual([Path(r).name for r in refs], ['room.png','gold.png','voice.wav'])
+        self.assertEqual([Path(r).name for r in refs], ['room.png','steel.png','voice.wav'])
         self.shot['referenceImages'].insert(0,dict(path='other.png'))
         self.assertIn('Walk through <Picture 2>.',_resolved_prompt(self.shot,self.board,model='ref2va'))
     def test_recording_excludes_voice_reference(self):
@@ -102,7 +102,7 @@ class SceneLayers(unittest.TestCase):
         self.assertNotEqual(original,render_fingerprint(shot,self.board))
     def test_unselected_character_not_added(self):
         self.shot['characterIds']=[]
-        self.assertNotIn('Gold plating.',_resolved_prompt(self.shot,self.board,model='ref2va'))
+        self.assertNotIn('Brushed steel plating.',_resolved_prompt(self.shot,self.board,model='ref2va'))
 
     def test_frame_anchors_route_ref2va_as_ordered_references(self):
         # Start/End frames -- manual or chained -- always route through
@@ -155,7 +155,7 @@ class SceneLayers(unittest.TestCase):
             ShotPaths(Path('/tmp'), Path('/tmp/shot'), 'shot', Path('/tmp')),
         )
         self.assertEqual([Path(r).name for r in refs],
-                         ['opening.png', 'closing.png', 'room.png', 'gold.png',
+                         ['opening.png', 'closing.png', 'room.png', 'steel.png',
                           'voice.wav'])
 
     def test_h3_base_frame_sizes(self):

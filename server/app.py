@@ -68,6 +68,7 @@ from typing import Any
 from . import assemble as assembly
 from .backends.base import Backend
 from .orchestrator import Orchestrator
+from .render_record import ensure_render_record
 from .llm import (
     LLMService, describe_character, describe_still_phases, rewrite_dialogue,
     rewrite_prompt,
@@ -108,7 +109,7 @@ SERVER_CONFIG_NAME = "server-config.json"
 # board. A tab that missed a render finishing (opened before it, a second
 # tab, another machine) would otherwise save its stale "running, no clip"
 # copy straight over the result, losing the clip and with it any CHANGED
-# marker: exactly what happened to a Sample scene.
+# marker.
 SERVER_RENDER_FIELDS = (
     "status", "reason", "progress", "runtimeSeconds", "outputs", "validation",
     "thumb", "logUrl", "renderedAs", "renderFingerprint", "renderedDialogueSource",
@@ -553,7 +554,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(
                 {
                     "backend": {"id": ctx.backend.id, "label": ctx.backend.label,
-                                "healthy": ok, "message": msg},
+                                "healthy": ok, "message": msg,
+                                # h3.c only: a baked Turbo LoRA is in use.
+                                # Drafts of H3 Ref2VA shots use a Turbo LoRA
+                                # and keep the project's frame size.
+                                "turbo": bool(getattr(ctx.backend, "draft_turbo", lambda: 0)()),
+                                "turboSteps": int(getattr(ctx.backend, "draft_turbo", lambda: 0)())},
                     "hardware": describe_hardware(),
                     "workspace": str(ctx.workspace),
                     "dataDir": str(ctx.data_dir),
@@ -1179,7 +1185,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/server-settings":
             payload = self._read_json() or {}
-            if not {"dataDir", "searchUrl", "mfluxModel", "llmKey"} & set(payload):
+            if not {"dataDir", "searchUrl", "mfluxModel", "llmKey", "backend"} & set(payload):
                 raise ValueError("nothing to save")
             if "llmKey" in payload:
                 forget_llm_health()
@@ -1207,6 +1213,19 @@ class Handler(BaseHTTPRequestHandler):
                     "dataDir": str(target),
                     "active": str(target) == str(ctx.data_dir),
                     "overridden": ctx.data_dir_source in ("cli", "env"),
+                })
+            if "backend" in payload:
+                # Read once at startup (see __main__), so it takes effect on
+                # the restart the client asks for next. comfyui is left out:
+                # it is a scaffold, not a working engine.
+                choice = str(payload.get("backend") or "")
+                if choice not in ("vpipe", "h3c"):
+                    raise ValueError("backend must be 'vpipe' or 'h3c'")
+                doc["backend"] = choice
+                result.update({
+                    "backend": choice,
+                    # --backend / SBV_BACKEND outrank the config file.
+                    "overridden": bool(os.environ.get("SBV_BACKEND")),
                 })
             if "searchUrl" in payload:
                 # Optional and blank by default — an empty string disables
@@ -1466,6 +1485,11 @@ class Handler(BaseHTTPRequestHandler):
         if locked and ctx.orch.touches(slug, shot_id):
             raise RuntimeError("This shot is rendering — wait for it to finish, or stop it, before locking it.")
         shot["locked"] = locked
+        if locked:
+            # Freeze what the clip was rendered with, so the shot keeps
+            # reporting it whatever the project's size or steps become.
+            timings = getattr(ctx.orch, "timings", None)
+            ensure_render_record(shot, ctx.data_dir, getattr(timings, "path", None))
         board = ctx.store.save(slug, board)
         return self._send_json({"slug": slug, "board": board, "stale": self._staleness(slug, board)})
 

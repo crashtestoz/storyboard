@@ -28,9 +28,11 @@ def build_backend(kind: str, *, vpipe_binary: Path, workspace: Path,
                   project_root: Path | None = None,
                   h3c_binary: Path | None = None,
                   h3c_model_dir: Path | None = None,
-                  h3c_options: dict[str, Any] | None = None) -> Backend:
+                  h3c_options: dict[str, Any] | None = None,
+                  vpipe_h3_turbo: dict[str, Any] | None = None) -> Backend:
     if kind == "vpipe":
-        inner: Backend = VpipeBackend(binary=vpipe_binary, workspace=workspace)
+        inner: Backend = VpipeBackend(binary=vpipe_binary, workspace=workspace,
+                                      h3_turbo=vpipe_h3_turbo)
     elif kind == "comfyui":
         inner = ComfyUIBackend(base_url=comfyui_url, output_dir=workspace)
     elif kind == "h3c":

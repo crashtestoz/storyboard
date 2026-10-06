@@ -15,6 +15,7 @@ from .backends import BACKEND_IDS, build_backend
 from .orchestrator import Orchestrator
 from .render_timings import FILE_NAME as TIMINGS_FILE, RenderTimings
 from .store import Store
+from .render_record import ensure_render_record
 from .llm import CONFIG_NAME as LLM_CONFIG_NAME
 from .llm import load_services as load_llm_services
 from .tts import CONFIG_NAME, load_engines
@@ -208,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                      or _configured(UI_ROOT, "h3cModelDir")
                      or DEFAULT_H3C_DIR / "MiniMax-H3").expanduser()
     h3c_options = _configured_value(UI_ROOT, "h3cOptions")
+    vpipe_h3_turbo = _configured_value(UI_ROOT, "vpipeH3Turbo")
     backend = build_backend(
         args.backend,
         vpipe_binary=args.vpipe.expanduser(),
@@ -217,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
         h3c_binary=h3c_binary,
         h3c_model_dir=h3c_model_dir,
         h3c_options=h3c_options if isinstance(h3c_options, dict) else None,
+        vpipe_h3_turbo=vpipe_h3_turbo if isinstance(vpipe_h3_turbo, dict) else None,
     )
     # Engines come from tts-services.json: a service is a name and a URL, so
     # adding another instance is an edit rather than a code change. None loads
@@ -232,6 +235,18 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(workspace=workspace, data_dir=data_dir)
     # Anything left mid-run by a previous process is not running now.
     stranded = store.reconcile_startup()
+    # Locked shots from before render records existed: give each one what
+    # its clip was rendered with, once (render_record.py). Nothing renders
+    # at startup, so this cannot race a render's own save.
+    for entry in store.list_boards():
+        try:
+            board = store.load(entry["slug"])
+            if sum(ensure_render_record(s, data_dir, UI_ROOT / TIMINGS_FILE)
+                   for s in board.get("shots") or [] if s.get("locked")):
+                store.save(entry["slug"], board)
+        except Exception as exc:  # noqa: BLE001 - never block startup on this
+            print(f"render record backfill skipped for {entry.get('slug')}: {exc}",
+                  file=sys.stderr)
     orch = Orchestrator(backend=backend, store=store, workspace=workspace,
                         data_dir=data_dir,
                         timings=RenderTimings(UI_ROOT / TIMINGS_FILE))

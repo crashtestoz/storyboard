@@ -44,7 +44,7 @@ class DialogueTests(unittest.TestCase):
         self.assertEqual(dialogue_seconds({"dialogue": "  "}, None), (0.0, ""))
 
     def test_words_at_speaking_rate_plus_pauses(self):
-        secs, basis = dialogue_seconds({"dialogue": "Well done... we did it!"}, None)
+        secs, basis = dialogue_seconds({"dialogue": "We did it... we won!"}, None)
         self.assertAlmostEqual(secs, 5 / 2.5 + 0.4, places=2)
         self.assertIn("5 words", basis)
 
@@ -129,12 +129,12 @@ class OnlyThisLineTests(unittest.TestCase):
         from server.backends.vpipe_backend import _resolved_prompt
         from server.store import default_board, default_character, default_shot
         board = default_board("B")
-        doc = default_character("Ray", "wild white hair")
-        doc["voice"] = {"path": "b/refs/doc.m4a"}
-        board["characters"] = [doc]
+        ray = default_character("Ray", "tall, grey beard")
+        ray["voice"] = {"path": "b/refs/ray.m4a"}
+        board["characters"] = [ray]
         s = default_shot(board["defaults"])
-        s.update(prompt="Ray leans over.", characterIds=[doc["id"]], speakerId=doc["id"],
-                 dialogue="We aren't going to a where, Sam.", **shot)
+        s.update(prompt="Ray leans over.", characterIds=[ray["id"]], speakerId=ray["id"],
+                 dialogue="We aren't going anywhere without you, Sam.", **shot)
         board["shots"] = [s]
         return _resolved_prompt(s, board, with_audio=True, model="ref2va")
 
@@ -148,17 +148,17 @@ class OnlyThisLineTests(unittest.TestCase):
         from server.backends.vpipe_backend import _resolved_prompt
         from server.store import default_board, default_character, default_shot
         board = default_board("B")
-        doc = default_character("Ray", "wild white hair")
-        sam = default_character("Sam", "red puffer vest")
-        board["characters"] = [doc, sam]
+        ray = default_character("Ray", "tall, grey beard")
+        sam = default_character("Sam", "blue raincoat")
+        board["characters"] = [ray, sam]
         s = default_shot(board["defaults"])
-        s.update(prompt="Ray leans over.", characterIds=[doc["id"], sam["id"]],
-                 speakerId=doc["id"], dialogue="Come on, get in!", dialogueSource="native")
+        s.update(prompt="Ray leans over.", characterIds=[ray["id"], sam["id"]],
+                 speakerId=ray["id"], dialogue="Come on, get in!", dialogueSource="native")
         board["shots"] = [s]
         p = _resolved_prompt(s, board, with_audio=True, model="ref2va")
         self.assertIn("Sam is on screen but silent", p)
         self.assertNotIn("Ray is on screen but silent", p)
-        self.assertIn("Sam: red puffer vest", p)               # still cast for the picture
+        self.assertIn("Sam: blue raincoat", p)               # still cast for the picture
         self.assertNotIn("previous scene's dialogue has already ended", p)
 
     def test_chained_shot_opens_without_speech(self):

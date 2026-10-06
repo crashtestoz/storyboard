@@ -362,23 +362,19 @@ def speak_ad_reply(ctx, slug, text):
 
 
 # Stand-in reference clips for a cast member with no voice of their own.
-# There is no curated preset bank in this project — these are generic,
-# non-named-character clips already banked in another project's refs/, the
-# same clips the library picker offers for reuse across projects.
-_FALLBACK_VOICES = [
-    {
-        "gender": "female",
-        "path": "harbour-flyby/refs/ElevenLabs-Kristen-Natural-Upbeat.mp3",
-        "label": "ElevenLabs-Kristen-Natural-Upbeat.mp3",
-        "voiceText": "Do you want me to apply these frame updates to Scene 5?",
-    },
-    {
-        "gender": "male",
-        "path": "harbour-flyby/refs/jax-voice.mp3",
-        "label": "jax-voice.mp3",
-        "voiceText": "Look, don't worry. Everything's gonna be fine. Trust me.",
-    },
-]
+# There is no bundled preset bank: the clips are whatever the user lists in an
+# optional per-machine voice-presets.json beside the UI, as a list of
+# {"gender": "female"|"male", "path": "<project>/refs/<clip>", "label": "...",
+# "voiceText": "<what the clip says>"} entries, with paths relative to the
+# data directory. Without that file no stand-in voice is assigned.
+def _fallback_voices(ctx):
+    try:
+        presets = json.loads((ctx.ui_root / "voice-presets.json").read_text())
+    except (OSError, ValueError):
+        return []
+    return [p for p in presets if isinstance(p, dict) and p.get("gender") and p.get("path")] \
+        if isinstance(presets, list) else []
+
 
 _FEMALE_WORDS = re.compile(r"\b(she|her|hers|woman|women|girl|female|lady)\b", re.IGNORECASE)
 _MALE_WORDS = re.compile(r"\b(he|him|his|man|men|boy|male|guy)\b", re.IGNORECASE)
@@ -412,7 +408,7 @@ def _assign_fallback_voice(ctx, speaker):
     gender = _guess_gender(speaker.get("description"))
     if gender is None:
         return False
-    for preset in _FALLBACK_VOICES:
+    for preset in _fallback_voices(ctx):
         if preset["gender"] != gender:
             continue
         if not (ctx.data_dir / preset["path"]).exists():
@@ -420,10 +416,10 @@ def _assign_fallback_voice(ctx, speaker):
         speaker["voice"] = {
             "path": preset["path"],
             "url": "/media/" + preset["path"],
-            "label": preset["label"],
+            "label": preset.get("label") or Path(preset["path"]).name,
         }
         if not (speaker.get("voiceText") or "").strip():
-            speaker["voiceText"] = preset["voiceText"]
+            speaker["voiceText"] = preset.get("voiceText") or ""
         return True
     return False
 

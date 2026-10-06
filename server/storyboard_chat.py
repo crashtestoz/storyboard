@@ -195,13 +195,15 @@ every shot — never repeat either in a shot prompt) + soundscape (project backg
 render into every shot, or be held out for a later mix) + characters (name, \
 description, optional portrait + voice clip) + shots.
 
-Shot prompt shape: three labeled sections, one per line, each one sentence \
+Shot prompt shape: labeled sections, one per line, each one sentence \
 ending in a period — "Camera Direction & Framing: ..." (angle, movement, \
 composition, lens/depth of field when it matters), "Clothing / Appearance: \
 ..." (only for what differs in this shot from the character's Cast \
 description and portrait, or for a character with no Cast description; \
-omit the line entirely otherwise), then "Pose / Action: ..." (present \
-tense, in the order it happens). Every render already sends each cast \
+omit the line entirely otherwise), "Setting: ..." (the room or location and \
+its fixed details; reuse the SAME Setting text word for word in every shot \
+set in that place, and omit the line when no location is given), then \
+"Pose / Action: ..." (present tense, in the order it happens). Every render already sends each cast \
 member's Cast description, and on Ref2VA their portrait, alongside the \
 shot prompt, so restating clothing they already give is redundant. Same \
 shape the Rewrite button produces — see rewrite_prompt's \
@@ -515,11 +517,12 @@ Rules:
   description, and whenever you review the board, check every shot prompt
   for wording that restates or contradicts what those descriptions now say,
   flag it, and propose replace_text to cut it back to the plain name.
-- Write video prompts in the three-section shape from the "Shot prompt
+- Write video prompts in the sectioned shape from the "Shot prompt
   shape" note below — "Camera Direction & Framing:", then "Clothing /
   Appearance:" only if a character in the shot looks different from their
-  Cast description, then "Pose / Action:", each labeled and on its own
-  line. Do not duplicate the shared scene or the Cast descriptions.
+  Cast description, then "Setting:" when the location is known (the same
+  text in every shot in that place), then "Pose / Action:", each labeled
+  and on its own line. Do not duplicate the shared scene or the Cast descriptions.
   Keep each section to one or two sentences, 70 to 130 words total per
   shot, the same length a rewrite would produce — a longer prompt dilutes
   the conditioning and, multiplied across many shots in one board, is what

@@ -489,6 +489,68 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   gap: 4px;
 }
 
+/* Final video tab: the cut settings card. The whole heading row is the
+   toggle; the chevron turns when it opens. */
+.cut-settings { padding: 0; }
+.cut-settings-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.cut-settings-summary::-webkit-details-marker { display: none; }
+.cut-settings-summary:hover { background: var(--bg-sunken); }
+.cut-settings-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cut-settings-summary > .card-heading { flex: 1; margin: 0; }
+.cut-settings-chevron {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+.cut-settings[open] .cut-settings-chevron { transform: rotate(45deg); }
+.cut-settings[open] .cut-settings-summary {
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.cut-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+}
+.cut-settings-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.cut-settings-group-title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.cut-settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+}
+.cut-settings-field {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.cut-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .chain-badge.broken {
   color: var(--warn, #e0a83a);
 }
@@ -1971,6 +2033,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 .rename-row input { flex: 1; min-width: 0; }
+#backendSelect { flex: 1; min-width: 0; }
+#btnSaveBackend { white-space: nowrap; flex: none; }
 
 #projPath {
   margin-top: var(--sp-2);

@@ -254,10 +254,52 @@ class VpipeBackend(Backend):
     # (h3c_backend) names its own file so neither clobbers the other's.
     SPEC_FILE = "shot.vpipeline"
 
-    def __init__(self, binary: Path, workspace: Path):
+    def __init__(self, binary: Path, workspace: Path,
+                 h3_turbo: dict[str, Any] | None = None):
         self.binary = Path(binary)
         self.workspace = Path(workspace)
         self._proc: subprocess.Popen | None = None
+        # "vpipeH3Turbo" in server-config.json: a few-step distillation LoRA
+        # per H3 partition, {"ref2va": {"lora", "file", "scale", "steps",
+        # "videoShift"}, "fl2va": {...}}. See _h3_turbo.
+        self.h3_turbo = h3_turbo if isinstance(h3_turbo, dict) else {}
+
+    def _turbo_label(self, model: str) -> str:
+        t = self._h3_turbo(model)
+        return f" · Turbo LoRA for drafts ({t['steps']} steps)" if t else ""
+
+    def draft_turbo(self) -> int:
+        """Steps a Turbo draft of an H3 Ref2VA shot runs at; 0 when off."""
+        t = self._h3_turbo("ref2va")
+        return int(t["steps"]) if t else 0
+
+    def turbo_draft_full_size(self, model: str) -> bool:
+        """A Turbo draft keeps the project's frame size (see prepare)."""
+        return bool(self._h3_turbo(model))
+
+    def _h3_turbo(self, model: str) -> dict[str, Any] | None:
+        """The Turbo LoRA settings for this H3 partition, or None.
+
+        A distillation is fit to its own step count and sigma grid, so when
+        one applies it decides both: the shot's own steps are replaced by the
+        adapter's, and video_shift by the one it was trained on. Ignored
+        unless the adapter is actually on disk, so a missing download falls
+        back to the plain model rather than failing the render.
+        """
+        t = self.h3_turbo.get(model)
+        if not isinstance(t, dict) or not t.get("lora"):
+            return None
+        # "lora" is vpipe's registry name, which need not match a folder
+        # (lightx2v's adapters share one repo dir), so "file" -- the
+        # adapter's path under models/ -- is what to look for when given.
+        if not self._model_present(str(t.get("file") or t["lora"])):
+            return None
+        return {
+            "lora": str(t["lora"]),
+            "scale": float(t.get("scale", 1.0)),
+            "steps": int(t.get("steps", 8)),
+            "videoShift": float(t.get("videoShift", 12.0)),
+        }
 
     # ------------------------------------------------------------------ #
     # description
@@ -320,7 +362,8 @@ class VpipeBackend(Backend):
         return [
             ModelCapability(
                 id="fl2va",
-                label="MiniMax H3 · FL2VA — text / frame anchors → video + audio",
+                label="MiniMax H3 · FL2VA — text / frame anchors → video + audio"
+                + self._turbo_label("fl2va"),
                 kind="video",
                 supports_start_anchor=True,
                 supports_end_anchor=True,
@@ -338,7 +381,8 @@ class VpipeBackend(Backend):
             ),
             ModelCapability(
                 id="ref2va",
-                label="MiniMax H3 · Ref2VA — reference images → video + audio",
+                label="MiniMax H3 · Ref2VA — reference images → video + audio"
+                + self._turbo_label("ref2va"),
                 kind="video",
                 # Ref2VA packs references instead of keyframes; the two are
                 # mutually exclusive, so it offers no anchors at all.
@@ -545,12 +589,18 @@ class VpipeBackend(Backend):
         # there is then nothing for H3 to speak into.
         natively_spoken = with_audio and _speaks_line_aloud(shot, project, model)
         steps = int(shot.get("steps") or cap.default_steps)
+        # Turbo is a draft tool: a final render always runs the full model at
+        # the shot's own steps.
+        turbo = self._h3_turbo(model) if draft else None
+        if turbo:
+            steps = turbo["steps"]
         seed = int(shot.get("seed") or 0)
 
-        if draft:
+        if draft and (sketch or not self.turbo_draft_full_size(model)):
             # A draft is the same render at a smaller size: the steps stay
             # the shot's own (which defaults to the project's), so only the
-            # resolution decides how rough it is.
+            # resolution decides how rough it is. A Turbo draft is already
+            # fast, so it keeps the project's frame size instead.
             width, height, _ = _draft_geometry(
                 width, height, steps, cap.size_align
             )
@@ -666,6 +716,7 @@ class VpipeBackend(Backend):
                 "draft": draft,
                 "save_frames": save_frames,
                 "nativeDialogueSpoken": natively_spoken,
+                "turbo": bool(turbo),
                 "sketch": sketch,
                 "sketchStretchFactor": stretch_factor,
             },
@@ -696,7 +747,7 @@ class VpipeBackend(Backend):
                 ],
                 "config": {"unload_when_idle": "always"},
             },
-            _h3_config(),
+            _h3_config(turbo=self._h3_turbo("fl2va") if draft else None),
         ]
 
         # anchors: a still becomes a latent via load-image -> resample -> vae-encode.
@@ -966,7 +1017,8 @@ class VpipeBackend(Backend):
         stages: list[dict] = [
             _model_select("local/MiniMax-H3-Ref2VA-8bit"),
             _text_prompt(prompt),
-            _h3_config(with_audio_timestep=True),
+            _h3_config(with_audio_timestep=True,
+                       turbo=self._h3_turbo("ref2va") if draft else None),
             {
                 "id": "video-ref-encoder",
                 "type": "video-ref-encoder",
@@ -1398,7 +1450,8 @@ def _text_prompt(text: str) -> dict:
     }
 
 
-def _h3_config(with_audio_timestep: bool = False) -> dict:
+def _h3_config(with_audio_timestep: bool = False,
+               turbo: dict | None = None) -> dict:
     cfg = {
         "video_shift": 12.0,
         "audio_shift": 3.0,
@@ -1407,6 +1460,12 @@ def _h3_config(with_audio_timestep: bool = False) -> dict:
     }
     if with_audio_timestep:
         cfg["condition_audio_timestep"] = 1.0
+    if turbo:
+        # The shift is part of the adapter, not a preference: lightx2v's
+        # 768p distillations were trained on 6, everything else on 12.
+        cfg["video_shift"] = turbo["videoShift"]
+        cfg["lora"] = turbo["lora"]
+        cfg["lora_scale"] = turbo["scale"]
     return {
         "id": "minimax-h3-model-config",
         "type": "minimax-h3-model-config",
@@ -1696,9 +1755,6 @@ def _resolved_prompt(
             "Use character portraits for identity and material details only; "
             "do not copy their pose, camera angle, or background."
         )
-    view = _view_constraint(shot)
-    if view:
-        parts.append(view)
     parts.append((project.get("sceneDescription") or "").strip())
     render_style = (project.get("renderStyle") or "").strip()
     if render_style:
@@ -1796,11 +1852,13 @@ def _resolved_prompt(
             # H3 generates the whole soundtrack in one pass, so a short line
             # in a long clip leaves seconds of audio it fills with more
             # talking — improvised, garbled, or words lifted from the voice
-            # reference clip (a 7-word line in a 10 s Sample shot
-            # came back as a stream of gibberish). Say what the line is NOT,
+            # reference clip (a 7-word line in a 10 s shot came back as a
+            # stream of gibberish). Say what the line is NOT,
             # and roughly where it sits, not only what it is.
             parts.append(_only_this_line(shot, project, clones_voice))
             parts.append(_voice_direction(shot, project, clones_voice))
+        elif not line:
+            parts.append(_no_dialogue(shot, project))
     return " ".join(_sentence(p) for p in parts if p)
 
 
@@ -1812,18 +1870,59 @@ def _voice_direction(shot: dict, project: dict, clones_voice: bool) -> str:
     that this scene's direction replaces it.
     """
     style = " ".join((shot.get("dialogueStyle") or "").split()).rstrip(" .")
+    # The character's own voice, the same in every scene, comes first; the
+    # scene's direction follows and shapes it (tone, volume, pace).
+    who = speaker_for(shot, project) or {}
+    voice = " ".join((who.get("voiceDescription") or "").split()).rstrip(" .")
+    if voice and style:
+        style = f"{voice}; in this scene: {style}"
+    elif voice:
+        style = voice
     if not style:
         return ""
     speaker = _speaker_name(shot, project)
     # The Dialogue tab is where delivery is decided. A word like "whispers"
-    # left in the scene's action text otherwise competes with it -- and won,
-    # in Sample scene 1, over a direction to scream.
+    # left in the scene's action text otherwise competes with it -- and won
+    # over a direction to scream.
     authority = (" How the line sounds comes only from this direction: any "
                  "wording about the voice in the scene action above describes "
                  "the action, not the delivery.")
     override = (" It also overrides the tone, volume and pace of the "
                 "reference voice clip." if clones_voice else "")
     return f"Voice direction for {speaker}'s line: {style}.{authority}{override}"
+
+
+def _no_dialogue(shot: dict, project: dict) -> str:
+    """Say so when the shot has no dialogue.
+
+    H3 generates picture and sound together and gives a voice to any face on
+    screen unless told otherwise, so a blank dialogue box left to itself comes
+    back with murmuring. The guards in ``_only_this_line`` only run when there
+    is a line; this is the same instruction for the shot with none.
+    """
+    text = (
+        "There is no dialogue in this clip: nobody speaks, with no spoken "
+        "words, no voices, no murmuring and no vocal sounds of any kind, only "
+        "the scene's sound effects and ambience."
+    )
+    start = shot.get("startRef")
+    if isinstance(start, dict) and start.get("kind") == "chain":
+        text += (
+            " The previous scene's dialogue has already ended: this clip opens "
+            "with no speech at all."
+        )
+    names = [
+        (c.get("name") or "").strip()
+        for c in _shot_characters(shot, project)
+        if (c.get("name") or "").strip()
+    ]
+    if names:
+        who = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        text += (
+            f" {who} {'is' if len(names) == 1 else 'are'} on screen but silent "
+            "for the whole clip: mouth closed."
+        )
+    return text
 
 
 def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
@@ -1837,7 +1936,7 @@ def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
     )
     if clones_voice:
         # "Sets how they sound" let H3 copy the clip's calm reading over an
-        # explicit direction to shout (Sample, scenes 1 and 3).
+        # explicit direction to shout.
         text += (
             " The reference voice clip sets only who they sound like (timbre, "
             "pitch and accent), never what they say and never how they say "
@@ -1845,9 +1944,9 @@ def _only_this_line(shot: dict, project: dict, clones_voice: bool) -> str:
             "repeat any words from it."
         )
     # A cast member who is on screen but not speaking is still a visible
-    # face H3 will happily give a voice to — Sample shots 5–7,
-    # with Sam cast beside a speaking Ray, came back with mumbling before
-    # and after Ray's line that the same shots without Sam did not have.
+    # face H3 will happily give a voice to — a silent cast member beside a
+    # speaking one came back with mumbling before and after the line that the
+    # same shot without them did not have.
     # "No other voices" alone is not enough; name who stays quiet.
     # And a shot chained from the previous one is told to "continue
     # naturally" from it — which H3 also applies to the sound: shots 6 and 7
@@ -2052,19 +2151,6 @@ def _shot_reference_images(shot: dict) -> list[Any]:
         refs.append(shot.get("endRef"))
     refs.extend(shot.get("referenceImages") or [])
     return refs
-
-
-def _view_constraint(shot: dict) -> str:
-    prompt = (shot.get("prompt") or "").lower()
-    rear_words = ("from behind", "from the rear", "rear view", "back view")
-    if any(word in prompt for word in rear_words):
-        return (
-            "Camera constraint: keep the visible character facing away from "
-            "the camera from the first frame; show back plating and rear "
-            "silhouette, not a front-facing portrait, hands-on-hips pose, "
-            "face, eyes, chest plate, or front torso."
-        )
-    return ""
 
 
 def _clones_voice(shot: dict, project: dict, model: str) -> bool:

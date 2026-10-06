@@ -258,6 +258,26 @@ def test_dialogue_prompting() -> None:
           "no intelligible dialogue" in prompt,
           prompt)
 
+    shot["dialogue"] = ""
+    prompt = _resolved_prompt(shot, board, with_audio=True)
+    check("a shot with no dialogue says there is no dialogue",
+          "There is no dialogue in this clip" in prompt and
+          "no murmuring" in prompt and "Kira is on screen but silent" in prompt,
+          prompt)
+    check("a silent shot not chained from another has no 'previous scene' line",
+          "previous scene's dialogue has already ended" not in prompt,
+          prompt)
+    shot["startRef"] = {"kind": "chain", "from": "s0", "resolved": "x/f.png"}
+    prompt = _resolved_prompt(shot, board, with_audio=True, model="ref2va")
+    check("a chained silent shot is told the previous dialogue has ended",
+          "previous scene's dialogue has already ended" in prompt,
+          prompt)
+    check("the no-dialogue sentence is audio-only",
+          "There is no dialogue" not in _resolved_prompt(shot, board, with_audio=False, model="ref2va"),
+          prompt)
+    shot["startRef"] = None
+    shot["dialogue"] = "Hold course."
+
     shot["model"] = "ref2va"
     shot["startRef"] = None
     shot["referenceImages"] = [
@@ -268,8 +288,8 @@ def test_dialogue_prompting() -> None:
     check("a Ref2VA shot reference set is called out as primary visual context",
           "shot reference image set is the primary visual reference" in prompt,
           prompt)
-    check("a rear-view shot gets a first-frame camera constraint",
-          "keep the visible character facing away" in prompt,
+    check("a rear-view shot gets no hard-coded camera constraint added",
+          "Camera constraint" not in prompt and "facing away" not in prompt,
           prompt)
     check("shot-local Ref2VA references retain shared scene text",
           "An ocean at golden hour." in prompt,

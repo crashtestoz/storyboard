@@ -107,6 +107,11 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "int8RowFc2": False,     # M5 only
     "refImageSize": "match",  # or "max"
     "defaultSteps": 20,
+    # A Turbo LoRA baked into a copy-on-write clone of the model (see
+    # h3-turbo/fold_ref2va_turbo.py): {"enabled", "modelDir", "steps"}.
+    # Draft Ref2VA renders only -- the clone's FL2VA is the stock model, and
+    # finals always use the full model.
+    "turbo": {},
 }
 
 # h3.c phase -> the three phases the shared progress blend understands.
@@ -203,7 +208,8 @@ class H3cBackend(VpipeBackend):
             ),
             ModelCapability(
                 id="ref2va",
-                label="MiniMax H3 · Ref2VA (h3.c) — reference images → video + audio",
+                label="MiniMax H3 · Ref2VA (h3.c) — reference images → video + audio"
+                + (f" · Turbo LoRA for drafts ({self._turbo()['steps']} steps)" if self._turbo() else ""),
                 supports_style_refs=True,
                 max_style_refs=9,
                 # h3.c needs FL2VA's text encoder and VAEs even for Ref2VA,
@@ -234,6 +240,24 @@ class H3cBackend(VpipeBackend):
         # run at very different speeds.
         spec.payload["timingModel"] = f"h3c:{spec.payload['model']}"
         spec.payload["engine"] = "h3c"
+        # argv() swaps in the baked Turbo model and its step count for a job
+        # with references; say so here too, so the timing history, the
+        # summary line and the shot's render record report what actually ran.
+        # Turbo is a DRAFT tool: fast, but flatter and less realistic than the
+        # full model, so a final render never uses it.
+        spec_path = Path(spec.payload["spec_path"])
+        job = json.loads(spec_path.read_text())
+        turbo = self._turbo()
+        use = bool(turbo and job.get("references") and spec.payload.get("draft"))
+        job["turbo"] = use
+        spec_path.write_text(json.dumps(job, indent=2) + "\n")
+        if use:
+            old = spec.payload["steps"]
+            spec.payload["steps"] = turbo["steps"]
+            spec.payload["turbo"] = True
+            spec.payload["timingModel"] = f"h3c-turbo:{spec.payload['model']}"
+            spec.summary = spec.summary.replace(
+                f" · {old} steps", f" · {turbo['steps']} steps · Turbo LoRA")
         return spec
 
     def _check_geometry(self, w: int, h: int, frames: int) -> None:
@@ -299,13 +323,43 @@ class H3cBackend(VpipeBackend):
             "lastFrame": None,
         }
 
+    def _turbo(self) -> dict[str, Any] | None:
+        """The baked Turbo model to use for Ref2VA, or None.
+
+        On whenever the folded checkpoint is configured and on disk (an
+        explicit "enabled": false in server-config.json still turns it off);
+        a deleted clone falls back to the stock model's small drafts.
+        """
+        t = self.options.get("turbo")
+        if not isinstance(t, dict) or not t.get("enabled", True) or not t.get("modelDir"):
+            return None
+        root = Path(str(t["modelDir"])).expanduser()
+        if not (root / "Ref2VA" / "transformer").is_dir():
+            return None
+        return {"modelDir": root, "steps": int(t.get("steps", 4))}
+
+    def draft_turbo(self) -> int:
+        t = self._turbo()
+        return int(t["steps"]) if t else 0
+
+    def turbo_draft_full_size(self, model: str) -> bool:
+        # Only Ref2VA has a baked Turbo model; an FL2VA draft still shrinks.
+        return model == "ref2va" and bool(self._turbo())
+
     def argv(self, job: dict) -> list[str]:
         """The h3 command line for one prepared job."""
         o = self.options
         steps = int(job["steps"])
+        model_dir = self.model_dir
+        turbo = self._turbo()
+        # Decided in prepare(): a draft with references (h3.c renders Ref2VA
+        # exactly then; FL2VA is unchanged in the Turbo clone).
+        if turbo and job.get("turbo"):
+            model_dir = turbo["modelDir"]
+            steps = turbo["steps"]
         argv = [
             str(self.binary),
-            "-d", str(self.model_dir),
+            "-d", str(model_dir),
             "-p", job["prompt"],
             "-o", job["output"],
             "--width", str(job["width"]),
