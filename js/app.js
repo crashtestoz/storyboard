@@ -2278,6 +2278,10 @@ function initializeSettingsTabs() {
   };
   $("#btnSaveLlmService").onclick = saveLlmServiceFromForm;
   $("#llmThinking").onchange = saveLlmThinking;
+  $("#llmCtx").oninput = (e) => {
+    e.target.dataset.touched = "1";
+    $("#llmCtxValue").textContent = fmtCtx(CTX_STOPS[e.target.value]);
+  };
   $("#btnCancelLlmService").onclick = () => paintLlmServiceManager();
   $("#btnDeleteLlmService").onclick = deleteLlmService;
   $("#llmServiceAuth").onchange = (e) => { $("#llmServiceKeyWrap").hidden = !e.target.checked; };
@@ -2384,6 +2388,8 @@ function onLlmKindChange() {
     $("#llmServiceKeyWrap").hidden = false;
   }
   paintLlmKindHelp();
+  const editing = $("#llmEditor").dataset.editing;
+  paintLlmCtxField(llmConfigs().find((c) => c.id === editing));
 }
 
 /* LLM services share one dropdown with prompt rewriting: picking a service
@@ -2408,6 +2414,43 @@ function paintLlmServiceManager() {
   editor.dataset.editing = "";
   sel.querySelector("option[value='']")?.remove();
   render();
+}
+
+// The context window belongs to the service (llm-services.json). Evenly spaced
+// stops, so the ticks under the full-width slider are too; the small sizes a
+// board actually needs would bunch up on a linear scale.
+const CTX_STOPS = [4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144];
+const CTX_DEFAULT = 8192;
+const CTX_NEW_SERVICE = 32768; // the AD chat's prompt for a big board runs ~24K
+const fmtCtx = (n) => `${Math.round(Number(n) / 1024)}K tokens`;
+const ctxStopIndex = (n) => CTX_STOPS.reduce(
+  (best, v, i) => (Math.abs(v - n) < Math.abs(CTX_STOPS[best] - n) ? i : best), 0);
+
+function paintCtxTicks() {
+  const ticks = $("#llmCtxTicks");
+  if (ticks.childElementCount) return;
+  const last = CTX_STOPS.length - 1;
+  CTX_STOPS.forEach((v, i) => {
+    const t = el("span", "ctx-tick");
+    t.style.setProperty("--f", i / last);
+    // Every stop gets a tick; only the round sizes are labelled.
+    if (Math.log2(v / 1024) % 1 === 0) { t.classList.add("ctx-tick-major"); t.dataset.l = `${v / 1024}K`; }
+    ticks.append(t);
+  });
+}
+
+// Shown only for Ollama, the one kind that takes the window per request.
+function paintLlmCtxField(service) {
+  const field = $("#llmCtxField");
+  field.hidden = $("#llmServiceKind").value !== "ollama";
+  if (field.hidden) return;
+  paintCtxTicks();
+  const slider = $("#llmCtx");
+  const value = service?.numCtx || (service ? CTX_DEFAULT : CTX_NEW_SERVICE);
+  slider.value = ctxStopIndex(value);
+  // An off-scale value already saved is only replaced if the slider is moved.
+  slider.dataset.touched = "";
+  $("#llmCtxValue").textContent = fmtCtx(service?.numCtx || value);
 }
 
 function openLlmEditor(id) {
@@ -2436,6 +2479,7 @@ function openLlmEditor(id) {
   $("#btnSaveLlmService").textContent = service ? "Save changes" : "Add service";
   if (adding) $("#llmServiceUrl").value = LLM_KINDS.ollama.url;
   paintLlmKindHelp();
+  paintLlmCtxField(service);
 
   // Where the key comes from — never the key itself.
   const keyInput = $("#llmServiceKey");
@@ -2884,6 +2928,10 @@ async function saveLlmServiceFromForm() {
   }
   // An edited service keeps its place in the list; a new one goes last.
   const entry = { id, label, kind, url, model, requiresKey };
+  const ctx = $("#llmCtx");
+  if (kind === "ollama" && (ctx.dataset.touched || !editing)) {
+    entry.numCtx = CTX_STOPS[ctx.value];
+  }
   const entries = llmConfigs().map((s) => (s.id === editing ? entry : { ...s }));
   if (!editing) entries.push(entry);
   button.disabled = true;

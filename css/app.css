@@ -1858,6 +1858,37 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .llm-editor-actions { display: flex; gap: var(--sp-2); align-items: center; }
 .llm-editor[hidden], .llm-editor [hidden] { display: none !important; }
 
+/* Context-window slider: full width, with a tick under every stop. The ticks
+   sit inside a box inset by half the thumb so they line up with where the
+   thumb actually stops. */
+.ctx-range {
+  -webkit-appearance: none; appearance: none;
+  display: block; width: 100%; height: 20px; margin: 0; padding: 0;
+  background: transparent; cursor: pointer;
+}
+.ctx-range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--border); }
+.ctx-range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--border); }
+.ctx-range::-webkit-slider-thumb {
+  -webkit-appearance: none; box-sizing: border-box; width: 16px; height: 16px; margin-top: -6px;
+  border-radius: 50%; border: 2px solid var(--bg-sunken); background: var(--accent);
+}
+.ctx-range::-moz-range-thumb {
+  box-sizing: border-box; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--bg-sunken); background: var(--accent);
+}
+.ctx-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.ctx-ticks { position: relative; height: 26px; margin: 0 8px; }
+.ctx-tick {
+  position: absolute; top: 0; left: calc(var(--f) * 100%);
+  width: 1px; height: 5px; background: var(--text-dim);
+  font-size: var(--fs-xs); color: var(--text-dim);
+}
+.ctx-tick-major { height: 8px; }
+.ctx-tick-major::after {
+  content: attr(data-l); position: absolute; top: 10px; left: 0;
+  transform: translateX(-50%); white-space: nowrap;
+}
+#llmCtxValue { margin-left: var(--sp-2); font-weight: 600; color: var(--text); }
+
 .settings-body > section + section,
 .settings-pane > section + section {
   margin-top: var(--sp-5);

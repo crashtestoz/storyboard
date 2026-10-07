@@ -655,14 +655,60 @@ class LLMService:
                 f"{self.label} requires an API key (HTTP {code}) — enter one in "
                 "Settings → Prompt rewriting.")
 
-    def _open(self, req: urllib.request.Request, timeout: float):
-        """urlopen, with an auth failure reported as the key problem it is."""
+    def _open(self, req: urllib.request.Request, timeout: float, *,
+              explain: bool = True):
+        """urlopen, with an auth failure reported as the key problem it is and
+        any other HTTP error as the server's own reason, not a bare status.
+        ``explain=False`` re-raises the HTTPError for a caller that reads it."""
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise RuntimeError(self._rejected(exc.code)) from exc
-            raise
+            if not explain:
+                raise
+            raise RuntimeError(self._explain(exc)) from exc
+
+    def _explain(self, exc: urllib.error.HTTPError) -> str:
+        """What the server said was wrong, in words the user can act on."""
+        try:
+            detail = exc.read().decode("utf-8", "replace").strip()
+        except OSError:
+            detail = ""
+        # Ollama wraps llama.cpp's JSON error in a JSON string, and
+        # OpenAI-style servers nest it under "error"; unwrap down to the text.
+        info: dict[str, Any] = {}
+        node: Any = detail
+        for _ in range(3):
+            if isinstance(node, str):
+                try:
+                    node = json.loads(node)
+                except ValueError:
+                    break
+            if isinstance(node, dict) and "error" in node:
+                node = node["error"]
+            else:
+                break
+        if isinstance(node, dict):
+            info = node
+            detail = str(node.get("message") or node.get("error") or detail)
+        elif isinstance(node, str):
+            detail = node
+        n_prompt, n_ctx = info.get("n_prompt_tokens"), info.get("n_ctx")
+        if n_prompt and n_ctx:
+            return (
+                f"{self.label}: the prompt is {int(n_prompt):,} tokens but this "
+                f"service's context window is {int(n_ctx):,}. Raise the Context "
+                "window in Settings → Prompt rewriting, or use a shorter board."
+            )
+        if "context" in detail.lower() and any(
+                w in detail.lower() for w in ("exceed", "too long", "maximum")):
+            return (
+                f"{self.label}: the prompt is longer than the model's context "
+                f"window ({detail}). Raise the context window or load the model "
+                "with a larger one."
+            )
+        return f"{self.label} answered HTTP {exc.code}: {detail or exc.reason}"
 
     def complete(self, system: str, user: str, *, timeout: float = 300.0,
                  max_tokens: int | None = None) -> str:
@@ -1064,7 +1110,7 @@ class OpenAICompatLLM(LLMService):
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         try:
-            with self._open(req, timeout) as r:
+            with self._open(req, timeout, explain=False) as r:
                 doc = json.loads(r.read().decode())
         except urllib.error.HTTPError as exc:
             # LM Studio and several otherwise OpenAI-compatible servers accept

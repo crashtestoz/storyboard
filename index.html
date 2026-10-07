@@ -352,6 +352,12 @@
           </div>
           <div class="field"><label for="llmServiceUrl">Server URL</label><input type="text" id="llmServiceUrl" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceUrlNote"></div></div>
           <div class="field"><label for="llmServiceModel">Model</label><input type="text" id="llmServiceModel" placeholder="e.g. llama3.1:8b" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceModelNote"></div></div>
+          <div class="field" id="llmCtxField" hidden>
+            <label for="llmCtx">Context window <output id="llmCtxValue"></output></label>
+            <input type="range" id="llmCtx" class="ctx-range" min="0" max="11" step="1" value="1">
+            <div class="ctx-ticks" id="llmCtxTicks" aria-hidden="true"></div>
+            <div class="field-note">How much of the board and conversation the model can read. The AD chat sends the whole board every turn — a large board needs 24K or more, and Ollama fails with “HTTP 400 Bad Request” if the window is too small. A larger window uses more memory on the machine running Ollama.</div>
+          </div>
           <label class="toggle"><input type="checkbox" id="llmServiceAuth"><span class="toggle-track"></span><span>Requires an API key</span></label>
           <div class="field" id="llmServiceKeyWrap" hidden>
             <label for="llmServiceKey">API key <span class="hint-inline">stored on this Mac only</span></label>

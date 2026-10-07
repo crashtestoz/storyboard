@@ -1314,6 +1314,14 @@ class Handler(BaseHTTPRequestHandler):
                     if thinking not in THINKING_LEVELS:
                         raise ValueError(f"thinking must be one of {', '.join(THINKING_LEVELS)}")
                     entry["thinking"] = thinking
+                if "numCtx" in item:
+                    try:
+                        num_ctx = int(item["numCtx"])
+                    except (TypeError, ValueError):
+                        raise ValueError("numCtx must be a whole number of tokens") from None
+                    if not 1024 <= num_ctx <= 1048576:
+                        raise ValueError("numCtx must be between 1024 and 1048576 tokens")
+                    entry["numCtx"] = num_ctx
                 clean.append(entry)
             config = ctx.ui_root / "llm-services.json"
             tmp = config.with_suffix(".json.tmp")

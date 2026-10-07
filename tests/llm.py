@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.llm import (  # noqa: E402
     SCENE_SYSTEM_PROMPT, SOUND_ACCENT_SYSTEM_PROMPT, SOUNDSCAPE_SYSTEM_PROMPT,
-    SYSTEM_PROMPT, OpenAICompatLLM, board_outline, build_user_message,
+    SYSTEM_PROMPT, OllamaLLM, OpenAICompatLLM, board_outline, build_user_message,
     rewrite_dialogue,
 )
 
@@ -158,6 +158,38 @@ class H3AwareRewriteTests(unittest.TestCase):
                          neighbor_lines=["Before — Sam: Is that what I think it is?"])
         self.assertIn("SURROUNDING DIALOGUE", service.user)
         self.assertIn("Sam: Is that what I think it is?", service.user)
+
+
+class HttpErrorMessageTests(unittest.TestCase):
+    def _fail(self, service, code, body):
+        err = HTTPError(service.url, code, "Bad Request", {}, io.BytesIO(body.encode()))
+        with patch("server.llm.urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(RuntimeError) as ctx:
+                service.complete("system", "user")
+        return str(ctx.exception)
+
+    def test_ollama_context_overflow_names_the_window(self):
+        service = OllamaLLM("g", "Gemma4 26b", "http://studio:11434", "gemma4:26b")
+        inner = json.dumps({"error": {
+            "code": 400, "type": "exceed_context_size_error",
+            "message": "request (23968 tokens) exceeds the available context size (8192 tokens)",
+            "n_prompt_tokens": 23968, "n_ctx": 8192}})
+        message = self._fail(service, 400, json.dumps({"error": inner}))
+        self.assertIn("23,968", message)
+        self.assertIn("8,192", message)
+        self.assertIn("Context window", message)
+        self.assertNotIn("Bad Request", message)
+
+    def test_other_errors_carry_the_server_reason(self):
+        service = OllamaLLM("g", "Gemma4 26b", "http://studio:11434", "gemma4:26b")
+        message = self._fail(service, 400, json.dumps({"error": "invalid think value"}))
+        self.assertEqual(message, "Gemma4 26b answered HTTP 400: invalid think value")
+
+    def test_openai_style_context_error(self):
+        service = OpenAICompatLLM("l", "LM Studio", "http://localhost:1234", "m")
+        message = self._fail(service, 400, json.dumps({"error": {
+            "message": "maximum context length is 4096 tokens"}}))
+        self.assertIn("context window", message)
 
 
 if __name__ == "__main__":
