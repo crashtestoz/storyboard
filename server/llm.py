@@ -1465,7 +1465,9 @@ def build_one(entry: dict[str, Any], saved_key: str = "") -> LLMService:
         svc.thinking = thinking
         return _apply_key(svc, entry, saved_key)
     if kind == "anthropic":
-        return _apply_key(AnthropicLLM(sid, label, url, model), entry, saved_key)
+        svc = AnthropicLLM(sid, label, url, model)
+        svc.thinking = thinking
+        return _apply_key(svc, entry, saved_key)
     if kind == "broken":
         return BrokenLLM(sid, label, str(entry.get("why") or "misconfigured"))
     return BrokenLLM(

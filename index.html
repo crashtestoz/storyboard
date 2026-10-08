@@ -330,16 +330,6 @@
           </div>
           <div class="field-note" id="llmNote"></div>
         </div>
-        <div class="field" id="llmThinkingField" hidden>
-          <label for="llmThinking">Thinking <span class="hint-inline">for the service above · how long the model reasons before it answers</span></label>
-          <select id="llmThinking">
-            <option value="none">None — answer straight away</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-          </select>
-          <div class="field-note">Thinking can improve rewrites and AD replies, but each request takes longer — on a local model, often minutes at High. Models that can't think ignore it.</div>
-        </div>
         <div class="llm-editor" id="llmEditor" hidden>
           <div class="llm-editor-title" id="llmEditorTitle">New service</div>
           <div class="field-row">
@@ -362,6 +352,16 @@
           </div>
           <div class="field"><label for="llmServiceUrl">Server URL</label><input type="text" id="llmServiceUrl" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceUrlNote"></div></div>
           <div class="field"><label for="llmServiceModel">Model</label><input type="text" id="llmServiceModel" placeholder="e.g. llama3.1:8b" autocomplete="off" spellcheck="false"><div class="field-note" id="llmServiceModelNote"></div></div>
+          <div class="field">
+            <label for="llmThinking">Thinking <span class="hint-inline">how long the model reasons before it answers</span></label>
+            <select id="llmThinking">
+              <option value="none">None — answer straight away</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <div class="field-note" id="llmThinkingNote">Thinking can improve rewrites and AD replies, but each request takes longer — on a local model, often minutes at High. Models that can't think ignore it.</div>
+          </div>
           <div class="field" id="llmCtxField" hidden>
             <label for="llmCtx">Context window <output id="llmCtxValue"></output></label>
             <input type="range" id="llmCtx" class="ctx-range" min="0" max="11" step="1" value="1">

@@ -2341,7 +2341,6 @@ function initializeSettingsTabs() {
     openLlmEditor(id);
   };
   $("#btnSaveLlmService").onclick = saveLlmServiceFromForm;
-  $("#llmThinking").onchange = saveLlmThinking;
   $("#llmCtx").oninput = (e) => {
     e.target.dataset.touched = "1";
     $("#llmCtxValue").textContent = fmtCtx(CTX_STOPS[e.target.value]);
@@ -2442,6 +2441,14 @@ function paintLlmKindHelp() {
 
 // Switching type: swap in the new type's usual URL unless you typed your own,
 // and switch on the API key for cloud services.
+// Off unless the service says otherwise. Claude reads it as an effort level.
+function paintLlmThinking(service) {
+  $("#llmThinking").value = service?.thinking || "none";
+  $("#llmThinkingNote").textContent = $("#llmServiceKind").value === "anthropic"
+    ? "Sets Claude's effort. Models before Claude 4.6 don't support it, and newer Claude models always think a little, so None leaves them at their default."
+    : "Thinking can improve rewrites and AD replies, but each request takes longer — on a local model, often minutes at High. Models that can't think ignore it.";
+}
+
 function onLlmKindChange() {
   const info = LLM_KINDS[$("#llmServiceKind").value] || {};
   const urlInput = $("#llmServiceUrl");
@@ -2453,6 +2460,7 @@ function onLlmKindChange() {
   }
   paintLlmKindHelp();
   const editing = $("#llmEditor").dataset.editing;
+  paintLlmThinking({ thinking: $("#llmThinking").value });
   paintLlmCtxField(llmConfigs().find((c) => c.id === editing));
 }
 
@@ -2543,6 +2551,7 @@ function openLlmEditor(id) {
   $("#btnSaveLlmService").textContent = service ? "Save changes" : "Add service";
   if (adding) $("#llmServiceUrl").value = LLM_KINDS.ollama.url;
   paintLlmKindHelp();
+  paintLlmThinking(service);
   paintLlmCtxField(service);
 
   // Where the key comes from — never the key itself.
@@ -2991,7 +3000,7 @@ async function saveLlmServiceFromForm() {
     for (let n = 2; others.some((s) => s.id === id) || id === "none"; n++) id = `${base}-${n}`;
   }
   // An edited service keeps its place in the list; a new one goes last.
-  const entry = { id, label, kind, url, model, requiresKey };
+  const entry = { id, label, kind, url, model, requiresKey, thinking: $("#llmThinking").value };
   const ctx = $("#llmCtx");
   if (kind === "ollama" && (ctx.dataset.touched || !editing)) {
     entry.numCtx = CTX_STOPS[ctx.value];
@@ -3014,20 +3023,6 @@ async function saveLlmServiceFromForm() {
     toast(editing ? "LLM service updated." : "LLM service added.");
   } catch (err) { toast(err.message, "error"); }
   finally { button.disabled = false; }
-}
-
-// The thinking level belongs to the service (llm-services.json), so it applies
-// in every project that uses it. Saved as soon as it is picked.
-async function saveLlmThinking(e) {
-  const id = $("#llmService").value;
-  const thinking = e.target.value;
-  const entries = llmConfigs().map((s) => (s.id === id ? { ...s, thinking } : { ...s }));
-  e.target.disabled = true;
-  try {
-    await applyLlmServices(entries);
-    toast(thinking === "none" ? "Thinking off." : `Thinking set to ${thinking}.`);
-  } catch (err) { toast(err.message, "error"); }
-  finally { e.target.disabled = false; render(); }
 }
 
 async function deleteLlmService() {
@@ -4186,14 +4181,6 @@ function renderRail() {
     chip.textContent = sv?.healthy ? "Online" : "Offline";
     chip.title = sv && !sv.healthy ? sv.message || "" : "";
     paintStartButton($("#btnStartLlm"), "llm", sv);
-    // Ollama and OpenAI-compatible services only; Claude has no switch here.
-    const cfg = llmConfigs().find((c) => c.id === chosenLlm);
-    const thinkingField = $("#llmThinkingField");
-    thinkingField.hidden = !cfg || cfg.kind === "anthropic";
-    const thinkingSel = $("#llmThinking");
-    if (document.activeElement !== thinkingSel) thinkingSel.value = cfg?.thinking || "none";
-  } else {
-    $("#llmThinkingField").hidden = true;
   }
   $("#btnEditLlmService").disabled = !llmSel.value || llmSel.value === "none";
 
