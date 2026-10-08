@@ -698,6 +698,7 @@ function projectBatchOutcome(status) {
 const CHAT_STORAGE_PREFIX = "storyboardToVideo.chat.";
 const CHAT_HISTORY_LIMIT = 60;
 const AD_SPEECH_STORAGE_KEY = "storyboardToVideo.adSpeech.enabled";
+const AD_THINKING_STORAGE_KEY = "storyboardToVideo.adThinking";
 
 function chatStorageKey(slug) {
   return CHAT_STORAGE_PREFIX + slug;
@@ -893,6 +894,7 @@ function renderAssistantChat() {
       dots.setAttribute("aria-hidden", "true");
       for (let i = 0; i < 3; i++) dots.appendChild(el("span", null, "."));
       msg.appendChild(dots);
+      msg.appendChild(el("div", "chat-progress", chatProgressText()));
       host.appendChild(msg);
     } else {
       host.appendChild(el("div", cls, turn.content));
@@ -1212,6 +1214,32 @@ function randomADThinkingLine() {
   return AD_THINKING_LINES[Math.floor(Math.random() * AD_THINKING_LINES.length)];
 }
 
+/* The live line under the AD's pending bubble: what phase the turn is in and
+   how much the model has produced, streamed from the server. Kept out of the
+   turn itself so it is never saved with the transcript. */
+let chatLive = null; // {startedAt, progress} while a turn is in flight
+
+function chatProgressText() {
+  if (!chatLive) return "";
+  const secs = Math.max(0, Math.floor((Date.now() - chatLive.startedAt) / 1000));
+  const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  const p = chatLive.progress;
+  if (!p) return `Connecting · ${clock}`;
+  const total = p.thinking + p.reply;
+  if (!total) return `${p.phase} · ${clock}`;
+  const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  const parts = [p.phase, p.reply > 0 ? "writing reply" : "thinking",
+    `~${fmt(total)} tokens` + (p.thinking && p.reply ? ` (~${fmt(p.thinking)} thinking)` : "")];
+  if (p.tps) parts.push(`${p.tps} tok/s`);
+  parts.push(clock);
+  return parts.join(" · ");
+}
+
+function paintChatProgress() {
+  const node = $("#bladeMessages .chat-message.pending .chat-progress");
+  if (node) node.textContent = chatProgressText();
+}
+
 /* Fire-and-forget: a reply that fails to speak is not worth blocking the
    chat over, so failures are a quiet toast rather than a broken turn. */
 async function speakAssistantReply(text) {
@@ -1240,22 +1268,47 @@ async function sendAssistantMessage() {
   const turns = chatTurns();
   const history = turns.filter((t) => !t.pending && !t.error)
     .map((t) => ({role: t.role, content: t.content}));
-  turns.push({role: "user", content});
+  const asked = {role: "user", content};
+  turns.push(asked);
   const pending = {role: "assistant", content: randomADThinkingLine(), pending: true};
   turns.push(pending);
   persistChat(state.slug);
   input.value = "";
   state.chatBusy = true;
   $("#bladeSend").disabled = true;
+  // Stop abandons the request: the server sees the browser leave and stops the
+  // model generating. The turn is then dropped and the message handed back to
+  // the box, as if it had not been sent.
+  const abort = new AbortController();
+  const stop = $("#bladeStop");
+  stop.hidden = false;
+  stop.onclick = () => abort.abort();
+  chatLive = {startedAt: Date.now(), progress: null};
+  const clock = setInterval(paintChatProgress, 1000);
   renderAssistantChat();
   try {
     await saveNow();
-    const result = await API.chat(state.slug, content, history, state.selectedId, svc.id);
+    const live = chatLive;
+    const result = await API.chat(state.slug, content, history, state.selectedId, svc.id,
+      (progress) => { live.progress = progress; paintChatProgress(); }, abort.signal,
+      $("#bladeThinking").value);
     Object.assign(pending, {content: result.message, actions: result.actions || [], pending: false});
     if (state.speechEnabled) speakAssistantReply(result.message);
   } catch (err) {
-    Object.assign(pending, {content: `Chat failed: ${err.message}`, pending: false, error: true});
+    if (abort.signal.aborted) {
+      // (not found if the chat was cleared while this was running)
+      const from = turns.indexOf(asked), to = turns.indexOf(pending);
+      if (from >= 0 && to >= from) turns.splice(from, to - from + 1);
+      if (!input.value.trim()) input.value = content;
+      toast("Stopped. Your message is back in the box.");
+    } else {
+      Object.assign(pending, {content: `Chat failed: ${err.message}`, pending: false, error: true});
+    }
   } finally {
+    clearInterval(clock);
+    chatLive = null;
+    stop.hidden = true;
+    stop.onclick = null;
     state.chatBusy = false;
     $("#bladeSend").disabled = false;
     persistChat(state.slug);
@@ -1323,6 +1376,17 @@ function wireAssistantBlade() {
   window.addEventListener("scroll", positionAssistantBlade, {passive: true});
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && state.bladeOpen) setBladeOpen(false);
+  });
+  const thinking = $("#bladeThinking");
+  // Off unless this browser chose otherwise ("" is the explicit "model default").
+  try {
+    const saved = localStorage.getItem(AD_THINKING_STORAGE_KEY);
+    thinking.value = saved === null ? "none" : saved;
+  } catch { /* private browsing, storage disabled */ }
+  if (thinking.selectedIndex < 0) thinking.value = "none";
+  thinking.addEventListener("change", () => {
+    try { localStorage.setItem(AD_THINKING_STORAGE_KEY, thinking.value); }
+    catch { /* optional storage */ }
   });
   const speechToggle = $("#bladeSpeechToggle");
   try { state.speechEnabled = localStorage.getItem(AD_SPEECH_STORAGE_KEY) === "1"; }

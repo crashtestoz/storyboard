@@ -86,12 +86,14 @@ def _summarise(service, summary: str, turns: list[dict[str, str]]) -> str:
 
 def condense(
     service, history: list[dict[str, str]], memory_path: Path | None,
+    on_summarise=None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Return ``(summary, verbatim_turns)`` for *history*.
 
     *history* is the cleaned transcript, oldest first, not including the
     message being sent now. Without a *memory_path* nothing is summarised
-    and the last KEEP + BATCH turns are returned verbatim.
+    and the last KEEP + BATCH turns are returned verbatim. *on_summarise*,
+    if given, is called just before a model call folds turns into the summary.
     """
     turns = [{"role": t["role"], "content": t["content"][:TURN_CHARS]} for t in history]
     if memory_path is None:
@@ -116,6 +118,8 @@ def condense(
     pending = older[start:]
 
     if len(pending) >= BATCH:
+        if on_summarise:
+            on_summarise()
         try:
             new_summary = _summarise(service, summary, pending)
         except Exception:  # noqa: BLE001 — fall back to sending them verbatim

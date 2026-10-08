@@ -18,6 +18,9 @@ Routes
 ``POST /api/length-estimate``  how long a shot needs, from its prompt's action
                                 beats and its dialogue ``{slug, shotId, prompt?}``
 ``POST /api/chat``             discuss the board and propose reviewed edits
+                                (optional ``thinking`` overrides the service's level);
+                                with ``stream: true`` the reply is NDJSON progress
+                                events ending in a ``result`` or ``error`` event
 ``GET  /api/boards/<slug>/export``   download the board as JSON
 ``GET  /api/boards/<slug>/export.zip``  download the project folder as a ZIP,
                                  without rendered video
@@ -77,7 +80,7 @@ from .llm import board_outline
 from .llm import load_services as load_llm_services
 from .llm import load_config as load_llm_config
 from .llm import KNOWN_KINDS as LLM_KINDS
-from .llm import THINKING_LEVELS
+from .llm import THINKING_LEVELS, ClientGone
 from .local_config import ensure_local_configs
 from . import services as local_services
 from .dubbing import speaker_for
@@ -424,6 +427,50 @@ class Handler(BaseHTTPRequestHandler):
 
     def _err(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
+
+    def _send_events(self, run) -> None:
+        """Answer with a stream of newline-delimited JSON events.
+
+        *run(emit)* does the work, calling ``emit(event)`` as it goes, and
+        returns the result, sent as the closing ``result`` event. Nothing is
+        sent until the first event, so a request that fails before the work
+        starts (bad input, an unhealthy model) still gets a proper HTTP error
+        status; one that fails later ends in an ``error`` event, the status
+        line being long gone. Writing to a browser that has left raises
+        ClientGone, which abandons the model call instead of finishing it for
+        nobody. The response is delimited by the connection closing (this
+        handler speaks HTTP/1.0), so it needs no Content-Length.
+        """
+        started = False
+
+        def emit(event: dict[str, Any]) -> None:
+            nonlocal started
+            try:
+                if not started:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Accel-Buffering", "no")
+                    self.end_headers()
+                    started = True
+                self.wfile.write(json.dumps(event).encode() + b"\n")
+                self.wfile.flush()
+            except OSError:
+                raise ClientGone from None
+
+        try:
+            emit({"type": "result", "result": run(emit)})
+        except ClientGone:
+            self.close_connection = True
+        except Exception as exc:  # noqa: BLE001
+            if not started:
+                raise
+            text = str(exc) if isinstance(exc, (ValueError, RuntimeError)) \
+                else f"{type(exc).__name__}: {exc}"
+            try:
+                emit({"type": "error", "error": text})
+            except ClientGone:
+                self.close_connection = True
 
     def _read_json(self) -> Any:
         length = int(self.headers.get("Content-Length") or 0)
@@ -1044,20 +1091,36 @@ class Handler(BaseHTTPRequestHandler):
             service = ctx.llm(
                 payload.get("service") or (board.get("defaults") or {}).get("llm")
             )
-            return self._send_json(storyboard_chat(
-                service,
-                board,
-                payload.get("message") or "",
-                history=payload.get("history") or [],
-                selected_id=payload.get("selectedShotId"),
-                search_url=ctx.search_url(),
-                data_dir=ctx.data_dir,
-                timings=ctx.orch.timings,
-                memory_path=ctx.store.project_dir(slug) / AD_MEMORY_FILE,
-                slug=slug,
-                other_boards=[b for b in ctx.store.list_boards() if b["slug"] != slug],
-                load_board=ctx.store.load,
-            ))
+            # The AD's own thinking level, for this request only: how hard to
+            # reason suits a quick edit and a whole-board review differently,
+            # and the service's setting is one level for everything. Empty
+            # keeps the service's.
+            thinking = str(payload.get("thinking") or "")
+            if thinking:
+                if thinking not in THINKING_LEVELS:
+                    raise ValueError(f"thinking must be one of {', '.join(THINKING_LEVELS)}")
+                service = copy.copy(service)
+                service.thinking = thinking
+
+            def run(on_event=None):
+                return storyboard_chat(
+                    service,
+                    board,
+                    payload.get("message") or "",
+                    history=payload.get("history") or [],
+                    selected_id=payload.get("selectedShotId"),
+                    search_url=ctx.search_url(),
+                    data_dir=ctx.data_dir,
+                    timings=ctx.orch.timings,
+                    memory_path=ctx.store.project_dir(slug) / AD_MEMORY_FILE,
+                    slug=slug,
+                    other_boards=[b for b in ctx.store.list_boards() if b["slug"] != slug],
+                    load_board=ctx.store.load,
+                    on_event=on_event,
+                )
+            if payload.get("stream"):
+                return self._send_events(run)
+            return self._send_json(run())
 
         if path == "/api/describe-character":
             payload = self._read_json() or {}

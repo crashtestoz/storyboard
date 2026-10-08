@@ -171,6 +171,16 @@
             placeholder="Review the board, revise a shot, or build a sequence…"></textarea>
           <div class="blade-compose-row">
             <span class="blade-compose-hint">Enter to send · Shift+Enter for a new line</span>
+            <select id="bladeThinking"
+              title="How hard the AD reasons before replying. Off is much faster on a local model; &ldquo;model default&rdquo; follows the model's own setting in Settings.">
+              <option value="none">Thinking: off</option>
+              <option value="">Thinking: model default</option>
+              <option value="low">Thinking: low</option>
+              <option value="medium">Thinking: medium</option>
+              <option value="high">Thinking: high</option>
+            </select>
+            <button class="btn btn-danger" id="bladeStop" type="button" hidden
+              title="Stop this reply; your message goes back in the box">Stop</button>
             <button class="btn btn-primary" id="bladeSend" type="submit">Send</button>
           </div>
         </form>

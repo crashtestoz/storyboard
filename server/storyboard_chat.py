@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from contextlib import nullcontext
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from typing import Any
 from .backends.vpipe_backend import estimate_render_seconds
 from .hardware import describe_hardware
 from . import ad_memory
-from .llm import H3_SOUND_RULES, H3_VISUAL_RULES, LLMService
+from .llm import H3_SOUND_RULES, H3_VISUAL_RULES, LLMService, streaming
 from .store import stale_reason
 from .web_search import format_results as format_search_results
 from .web_search import search as web_search
@@ -168,7 +170,7 @@ def _hardware_reference() -> str:
     hw = describe_hardware()
     return (
         "HARDWARE THIS SERVER RUNS ON: " + hw["summary"] + ". Every shot's "
-        "estimatedRenderSeconds in context is derived from this machine's own "
+        "estimatedRenderSeconds in RENDER STATE is derived from this machine's own "
         "previous renders of the same model; null means none has been timed "
         "here yet. State that when giving a time, and that it is an estimate "
         "— actual runtime still varies with what else is running."
@@ -254,7 +256,7 @@ time; live progress shows in the app's own Render panel, which you cannot see \
 or poll — tell the user to look there, or wait for your next message once \
 they say it finished. stop_render cancels a run in progress. A shot goes \
 "stale" once its saved fields diverge from what its last render used — that \
-is the shot's needsRender flag in context. assemble joins rendered clips \
+is why it appears in RENDER STATE's needsRender. assemble joins rendered clips \
 (the dubbed version wins while current) into final.mp4, in shot order.
 
 Draft mode renders small and fast (capped resolution, up to 8 steps, no generated \
@@ -276,13 +278,19 @@ You are the Storyboard AD, the user's assistant director. Help the user review, 
 the storyboard currently open in the app. Be concise, concrete, and candid
 about continuity, camera direction, pacing, visual consistency, and sound.
 
-The CURRENT STORYBOARD context below is the full board: every shot's actual
-prompt, soundNote, dialogue and title text, not a summary of it. A field
-missing from a shot is empty (no dialogue, no start frame, and so on); refs
-lists the shot's reference images by @tag. CONVERSATION MEMORY, when present,
-summarises the earlier part of this conversation: honour the decisions and
-preferences it records. OTHER STORYBOARDS lists the project's other boards
-by slug, name and shot count — the open board is not among them. Read the
+The CURRENT STORYBOARD context in each request is the full board: every
+shot's actual prompt, soundNote, dialogue and title text, not a summary of it.
+A field missing from a shot is empty (no dialogue, no start frame, and so
+on); refs lists the shot's reference images by @tag. After it come OTHER
+STORYBOARDS, then CONVERSATION MEMORY and RECENT CONVERSATION, and last
+RENDER STATE. CONVERSATION MEMORY, when present, summarises the earlier part
+of this conversation: honour the decisions and preferences it records.
+OTHER STORYBOARDS lists the project's other boards by slug, name and shot
+count — the open board is not among them. RENDER STATE holds what changes
+between messages: selectedShotId (the shot the user has open), and
+needsRender, the shots that still need a render, each with its number, id and
+estimatedRenderSeconds. A shot missing from needsRender is already rendered
+and current, or locked. Read the
 wording of each shot's prompt, not just its topic, when asked to review,
 critique or check something — a continuity or pacing problem is often in the
 specific words a shot uses (a camera move, a pose, a detail) clashing with
@@ -571,7 +579,7 @@ Rules:
   take, not descriptions of what someone else could do. Asked to render,
   generate/dub audio, stop a render, or assemble the cut, propose the
   matching action directly — omit start_render's shotIds to mean every shot
-  that still needs it (see needsRender in context).
+  that still needs it (RENDER STATE's needsRender).
 - Asked to change, rewrite, or fix a shot's dialogue (what a character says),
   propose update_shot with the new fields.dialogue text, the same as any other
   field edit — this is always available, regardless of dialogueSource. Only
@@ -581,11 +589,11 @@ Rules:
   when "recording" (or unset). For "native" dialogue, explain that its audio
   only comes from rendering. Propose start_render only when the user's separate
   current message explicitly asks to render.
-- Skip proposing start_render for a shot whose needsRender is already false,
+- Skip proposing start_render for a shot not listed in RENDER STATE's needsRender,
   unless the user explicitly wants a re-render — say it is already rendered
   and current instead.
 - To answer "how long will this take", read that shot's estimatedRenderSeconds
-  from context and give a rounded, plain-language figure, noting it is an
+  from RENDER STATE and give a rounded, plain-language figure, noting it is an
   estimate from this machine's earlier renders (see HARDWARE below). If it is
   null, say no render of that kind has been timed on this machine yet, so
   there is no estimate until one finishes. Never invent your own number, and never claim to watch a render's progress
@@ -628,6 +636,55 @@ anything answerable from the board and your own knowledge.
 # under this. Without it, an unbounded non-streamed generation is what turns
 # into the request timing out instead of a normal reply.
 CHAT_MAX_TOKENS = 8192
+
+
+#: With streaming, no single silence can time a turn out any more, so a turn
+#: that never stops (a thinking loop) is bounded as a whole instead.
+CHAT_MAX_SECONDS = 30 * 60
+
+
+class _Progress:
+    """Turns the model's streamed chunks into progress events for the UI.
+
+    Events carry the phase the turn is in and how much the model has
+    produced in it, in rough tokens (a quarter of the characters; the
+    backends don't all report real counts mid-stream). Chunk events are
+    throttled, since a local model emits dozens a second.
+    """
+
+    GAP = 0.25  # seconds between chunk events
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.label = ""
+        self._reset()
+
+    def _reset(self) -> None:
+        self.chars = {"thinking": 0, "reply": 0}
+        self.first: float | None = None
+        self.last_sent = 0.0
+
+    def phase(self, label: str) -> None:
+        self.label = label
+        self._reset()
+        self._send(None)
+
+    def chunk(self, kind: str, text: str) -> None:
+        now = time.monotonic()
+        if self.first is None:
+            self.first = now
+        self.chars[kind] = self.chars.get(kind, 0) + len(text)
+        if now - self.last_sent >= self.GAP:
+            self._send(kind)
+
+    def _send(self, kind: str | None) -> None:
+        now = self.last_sent = time.monotonic()
+        thinking, reply = self.chars["thinking"] // 4, self.chars["reply"] // 4
+        tps = None
+        if self.first is not None and now - self.first >= 1:
+            tps = round((thinking + reply) / (now - self.first), 1)
+        self.emit({"type": "progress", "phase": self.label, "kind": kind,
+                   "thinking": thinking, "reply": reply, "tps": tps})
 
 BOARD_FIELDS = {"sceneDescription", "renderStyle", "soundscape"}
 CHARACTER_FIELDS = {"name", "description"}
@@ -717,6 +774,33 @@ def compact_board_context(
         "selectedShotId": selected_id,
         "shots": shots,
     }
+
+
+def split_render_state(context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate what changes between turns from what is the story.
+
+    The board is the bulk of every prompt, and a backend that reuses a cached
+    prompt prefix can only reuse it up to the first character that differs.
+    Which shots still need a render, how long they would take, and which shot
+    is selected change after every render or click, and they used to sit
+    inside each shot, so the cache was lost from the first shot on. Returns
+    ``(stable, render_state)``: *stable* is the context without them, for the
+    cacheable part of the prompt; *render_state* is a small block for the end.
+    """
+    stable = dict(context)
+    selected = stable.pop("selectedShotId", None)
+    needing = []
+    shots = []
+    for shot in stable.get("shots") or []:
+        shot = dict(shot)
+        needs = shot.pop("needsRender", False)
+        seconds = shot.pop("estimatedRenderSeconds", None)
+        if needs:
+            needing.append({"number": shot.get("number"), "id": shot.get("id"),
+                            "estimatedRenderSeconds": seconds})
+        shots.append(shot)
+    stable["shots"] = shots
+    return stable, {"selectedShotId": selected, "needsRender": needing}
 
 
 def _chat_reference_images(
@@ -1175,12 +1259,17 @@ def chat(
     slug: str | None = None,
     other_boards: list[dict[str, Any]] | None = None,
     load_board=None,
+    on_event=None,
 ) -> dict[str, Any]:
     """One Storyboard AD turn.
 
     *other_boards* is the project's board listing (``Store.list_boards``)
     without the open board; *load_board* (slug -> board) lets the AD read
     one of them in full and lets validation check a copy's source cast.
+
+    With *on_event*, the model is streamed and the callback gets progress
+    events (see ``_Progress``) as the turn goes. It runs in the calling
+    thread and may raise to abandon the turn.
     """
     message = (message or "").strip()
     if not message:
@@ -1194,11 +1283,19 @@ def chat(
         content = turn.get("content") if isinstance(turn, dict) else None
         if role in ("user", "assistant") and isinstance(content, str):
             cleaned.append({"role": role, "content": content})
-    summary, recent = ad_memory.condense(service, cleaned, memory_path)
-    with tempfile.TemporaryDirectory(prefix="sbv-ad-frames-") as tmp:
-        return _chat_turn(service, board, message, selected_id, search_url,
-                          data_dir, timings, summary, recent, Path(tmp),
-                          slug, other_boards or [], load_board)
+    progress = _Progress(on_event) if on_event else None
+    with (streaming(progress.chunk, max_seconds=CHAT_MAX_SECONDS)
+          if progress else nullcontext()):
+        if progress:
+            progress.phase("Preparing the conversation")
+        summary, recent = ad_memory.condense(
+            service, cleaned, memory_path,
+            on_summarise=(lambda: progress.phase("Updating conversation memory"))
+            if progress else None)
+        with tempfile.TemporaryDirectory(prefix="sbv-ad-frames-") as tmp:
+            return _chat_turn(service, board, message, selected_id, search_url,
+                              data_dir, timings, summary, recent, Path(tmp),
+                              slug, other_boards or [], load_board, progress)
 
 
 def _other_boards_context(other_boards: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1235,7 +1332,8 @@ def _read_boards(slugs: list[str], other_boards: list[dict[str, Any]], load_boar
 
 def _chat_turn(service, board, message, selected_id, search_url, data_dir,
                timings, summary, recent, frames_dir: Path,
-               slug=None, other_boards=(), load_board=None) -> dict[str, Any]:
+               slug=None, other_boards=(), load_board=None,
+               progress: _Progress | None = None) -> dict[str, Any]:
     images, image_labels = _chat_reference_images(board, selected_id, data_dir)
     clip_images, clip_labels = _chat_clip_frames(
         board, selected_id, message, data_dir, frames_dir)
@@ -1257,20 +1355,27 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
             "so if a judgment needs the motion between them, and you still cannot hear "
             "the clip's sound."
         )
-    # Conversation first, board second: the conversation only ever grows at
-    # its end, so a backend that reuses a cached prompt prefix (Ollama,
-    # llama.cpp, vLLM) keeps it warm from turn to turn, while the board —
-    # which changes whenever an edit is applied — sits after it and costs
-    # only its own re-read.
+    # Stable first, volatile last. A backend that reuses a cached prompt prefix
+    # (Ollama, llama.cpp, vLLM) can only reuse it up to the first character that
+    # differs from the last request. The system prompt never changes; the board
+    # changes only when a shot is edited; the conversation grows by a turn every
+    # message, so it sits after the board — the other way round, each message
+    # re-reads the whole board. What changes after every render or click (which
+    # shots need a render, the selection) goes last, in a block of its own.
+    stable, render_state = split_render_state(
+        compact_board_context(board, selected_id, timings))
     user = (
-        ("CONVERSATION MEMORY (earlier turns, summarised):\n" + summary + "\n\n"
-         if summary else "")
-        + "RECENT CONVERSATION:\n"
-        + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
-        + "\n\nCURRENT STORYBOARD (compact JSON):\n"
-        + json.dumps(compact_board_context(board, selected_id, timings), ensure_ascii=False, separators=(",", ":"))
+        "CURRENT STORYBOARD (compact JSON):\n"
+        + json.dumps(stable, ensure_ascii=False, separators=(",", ":"))
         + "\n\nOTHER STORYBOARDS:\n"
         + json.dumps(_other_boards_context(other_boards), ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+        + ("CONVERSATION MEMORY (earlier turns, summarised):\n" + summary + "\n\n"
+           if summary else "")
+        + "RECENT CONVERSATION:\n"
+        + json.dumps(recent, ensure_ascii=False, separators=(",", ":"))
+        + "\n\nRENDER STATE:\n"
+        + json.dumps(render_state, ensure_ascii=False, separators=(",", ":"))
         + visual_context
         + "\n\nUSER:\n" + message
     )
@@ -1287,9 +1392,13 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
         # where showing the user "empty response" never does.
         reply = _parse_reply(complete(prompt))
         if reply["message"] == EMPTY_REPLY:
+            if progress:
+                progress.phase("Retrying — the model sent nothing")
             reply = _parse_reply(complete(prompt))
         return reply
 
+    if progress:
+        progress.phase("Reading the board")
     parsed = ask(user)
     query = parsed.get("search") if search_url else ""
     reads = parsed.get("read") or []
@@ -1298,15 +1407,21 @@ def _chat_turn(service, board, message, selected_id, search_url, data_dir,
         # read together still costs a single extra round trip.
         followup = user
         if reads:
+            if progress:
+                progress.phase("Reading other storyboards")
             followup += ("\n\nREQUESTED STORYBOARDS:\n"
                          + _read_boards(reads, list(other_boards), load_board))
         if query:
+            if progress:
+                progress.phase(f"Searching the web for “{query}”")
             results = web_search(search_url, query)
             followup += (f"\n\nSEARCH RESULTS for \"{query}\":\n"
                          + format_search_results(results))
         followup += ("\n\nAnswer the user now using what was requested above; say "
                      "so plainly if it didn't help. Do not request another search "
                      "or board read.")
+        if progress:
+            progress.phase("Answering with what it found")
         parsed = ask(followup)
     notes: list[str] = []
     actions = validate_actions(

@@ -33,6 +33,50 @@ async function req(method, url, body, headers) {
   return data;
 }
 
+/* POST that answers with newline-delimited JSON events (see the server's
+   _send_events). Each progress event goes to onEvent; the closing "result"
+   event's payload is returned. Resolves like req() for errors that arrive as
+   an ordinary HTTP failure, and throws on an in-stream "error" event or a
+   connection that ends before a result. */
+async function reqEvents(url, body, onEvent, signal) {
+  const res = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body), signal,
+  });
+  if (!res.ok) {
+    let data = null;
+    try { data = JSON.parse(await res.text()); } catch { /* not JSON */ }
+    const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    err.payload = data;
+    err.status = res.status;
+    throw err;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = null;
+  const handle = (line) => {
+    if (!line.trim()) return;
+    const event = JSON.parse(line);
+    if (event.type === "result") result = event.result;
+    else if (event.type === "error") throw new Error(event.error);
+    else if (onEvent) onEvent(event);
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      handle(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+  }
+  handle(buffer);
+  if (result === null) throw new Error("The connection closed before the reply finished.");
+  return result;
+}
+
 const EXT_TYPES = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp",
   wav: "audio/wav", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
@@ -67,8 +111,13 @@ const API = {
   lengthEstimate: (slug, shotId, { prompt, dialogue, dialogueStyle } = {}) =>
     req("POST", "/api/length-estimate", { slug, shotId, prompt, dialogue, dialogueStyle }),
 
-  chat: (slug, message, history, selectedShotId, service) =>
-    req("POST", "/api/chat", { slug, message, history, selectedShotId, service }),
+  // Streams: onProgress gets {phase, kind, thinking, reply, tps} as the model
+  // works, so a slow local model shows life instead of timing out silently.
+  // thinking: "" keeps the service's own level, else none|low|medium|high.
+  chat: (slug, message, history, selectedShotId, service, onProgress, signal, thinking) =>
+    reqEvents("/api/chat", {
+      slug, message, history, selectedShotId, service, stream: true, thinking,
+    }, onProgress, signal),
 
   describeCharacter: (image, voice, name, description, service) =>
     req("POST", "/api/describe-character", {

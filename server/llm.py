@@ -22,9 +22,12 @@ import json
 import os
 import re
 import base64
+import contextvars
 import mimetypes
+import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -616,6 +619,79 @@ def board_outline(board: dict[str, Any], *, words: int = 16) -> str:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Streaming
+# --------------------------------------------------------------------------- #
+#
+# A model call is normally one blocking request: nothing comes back until the
+# whole reply (reasoning included) is finished, so a slow local model hits the
+# request timeout while it is still working. Inside ``streaming()`` every
+# service asks for a streamed response instead. The timeout then applies to
+# silence between chunks rather than to the whole generation, and the caller
+# sees each chunk as it arrives. Outside it nothing changes, so the callers
+# that don't care (rewrites, estimates) are untouched.
+
+
+class ClientGone(BaseException):
+    """The party watching a streamed call went away; stop generating.
+
+    A BaseException on purpose: the callers in between treat a failed model
+    call as "fall back and carry on" (``except Exception``), which for a
+    reader that has disconnected would just start the next call for nobody.
+    """
+
+
+class _Sink:
+    def __init__(self, on_chunk, max_seconds: float | None):
+        self.on_chunk = on_chunk
+        self.max_seconds = max_seconds
+        self.deadline = time.monotonic() + max_seconds if max_seconds else None
+
+    def feed(self, kind: str, text: str) -> None:
+        """One chunk of ``"thinking"`` or ``"reply"`` text."""
+        if not text:
+            return
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise RuntimeError(
+                f"The model was still generating after {self.max_seconds / 60:.0f} "
+                "minutes, so it was stopped. Try a lower thinking level or a "
+                "faster model.")
+        self.on_chunk(kind, text)
+
+
+_STREAM: contextvars.ContextVar[_Sink | None] = contextvars.ContextVar(
+    "llm_stream", default=None)
+
+
+@contextmanager
+def streaming(on_chunk, *, max_seconds: float | None = None):
+    """Stream every model call made inside this block.
+
+    ``on_chunk(kind, text)`` gets each piece as it is generated, *kind* being
+    ``"thinking"`` or ``"reply"``. It may raise to abort the generation (the
+    connection to the model is closed). *max_seconds* bounds the whole block,
+    since the per-call timeout no longer does.
+    """
+    token = _STREAM.set(_Sink(on_chunk, max_seconds))
+    try:
+        yield
+    finally:
+        _STREAM.reset(token)
+
+
+def _streaming() -> bool:
+    return _STREAM.get() is not None
+
+
+def _strip_think(text: str) -> str:
+    """A thinking model on a server that doesn't split its reasoning out leaves
+    it inline, ending in </think>; only what follows is the reply."""
+    text = text.strip()
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1].strip()
+    return text
+
+
 class LLMService:
     """Base class for a language model this tool can ask for a rewrite."""
 
@@ -830,6 +906,31 @@ class OllamaLLM(LLMService):
             f"Pull it with: ollama pull {self.model}"
         )
 
+    def _read_chat(self, r) -> str:
+        """The reply from an open /api/chat response: one JSON document, or,
+        inside ``streaming()``, one JSON line per chunk."""
+        sink = _STREAM.get()
+        if sink is None:
+            doc = json.loads(r.read().decode())
+            return ((doc.get("message") or {}).get("content") or "").strip()
+        parts: list[str] = []
+        for raw in r:
+            line = raw.strip()
+            if not line:
+                continue
+            doc = json.loads(line)
+            if doc.get("error"):
+                raise RuntimeError(f"{self.label}: {doc['error']}")
+            message = doc.get("message") or {}
+            sink.feed("thinking", message.get("thinking") or "")
+            piece = message.get("content") or ""
+            if piece:
+                parts.append(piece)
+                sink.feed("reply", piece)
+            if doc.get("done"):
+                break
+        return "".join(parts).strip()
+
     def complete(self, system: str, user: str, *, timeout: float = 300.0,
                  max_tokens: int | None = None) -> str:
         options = {"temperature": 0.7, "top_p": 0.9, "num_ctx": self.num_ctx}
@@ -844,7 +945,7 @@ class OllamaLLM(LLMService):
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "stream": False,
+                "stream": _streaming(),
                 # A rewrite should be a rewrite, not a reinvention.
                 "options": options,
                 # Off by default: Qwen3 thinking models otherwise reason at
@@ -858,8 +959,7 @@ class OllamaLLM(LLMService):
             headers=self._headers(),
         )
         with self._open(req, timeout) as r:
-            doc = json.loads(r.read().decode())
-        return ((doc.get("message") or {}).get("content") or "").strip()
+            return self._read_chat(r)
 
     def complete_with_image(
         self,
@@ -882,7 +982,7 @@ class OllamaLLM(LLMService):
                         ],
                     },
                 ],
-                "stream": False,
+                "stream": _streaming(),
                 "options": {"temperature": 0.4, "top_p": 0.9,
                             "num_ctx": self.num_ctx},
                 "think": self._think(),
@@ -893,8 +993,7 @@ class OllamaLLM(LLMService):
             headers=self._headers(),
         )
         with self._open(req, timeout) as r:
-            doc = json.loads(r.read().decode())
-        return ((doc.get("message") or {}).get("content") or "").strip()
+            return self._read_chat(r)
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
@@ -914,7 +1013,7 @@ class OllamaLLM(LLMService):
                     for p in (images or [])
                 ]},
             ],
-            "stream": False,
+            "stream": _streaming(),
             "options": {"temperature": 0.4, "top_p": 0.9,
                         "num_ctx": self.num_ctx},
             "think": self._think(),
@@ -924,19 +1023,13 @@ class OllamaLLM(LLMService):
             headers=self._headers(),
         )
         with self._open(req, timeout) as r:
-            doc = json.loads(r.read().decode())
-        return ((doc.get("message") or {}).get("content") or "").strip()
+            return self._read_chat(r)
 
 
 def _reply(doc: dict[str, Any]) -> str:
-    """The reply text of a chat-completions response. A thinking model on a
-    server that doesn't split its reasoning out leaves it inline, ending in
-    </think>; only what follows is the reply."""
+    """The reply text of a chat-completions response."""
     choices = doc.get("choices") or [{}]
-    text = ((choices[0].get("message") or {}).get("content") or "").strip()
-    if "</think>" in text:
-        text = text.rsplit("</think>", 1)[1].strip()
-    return text
+    return _strip_think((choices[0].get("message") or {}).get("content") or "")
 
 
 THINKING_LEVELS = ("none", "low", "medium", "high")
@@ -1023,6 +1116,53 @@ class OpenAICompatLLM(LLMService):
             return False, f"{self.url} does not serve {self.model!r}"
         return True, ""
 
+    def _read_chat(self, r) -> str:
+        """The reply from an open chat-completions response: one JSON
+        document, or, inside ``streaming()``, server-sent events."""
+        sink = _STREAM.get()
+        if sink is None:
+            return _reply(json.loads(r.read().decode()))
+        parts: list[str] = []
+        inline_think = None  # None: undecided, True: inside <think>, False: past it
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                doc = json.loads(data)
+            except ValueError:
+                continue
+            error = doc.get("error")
+            if error:
+                raise RuntimeError(f"{self.label}: " + str(
+                    error.get("message") if isinstance(error, dict) else error))
+            for choice in doc.get("choices") or []:
+                delta = choice.get("delta") or {}
+                # llama.cpp / vLLM / DeepSeek name the reasoning field
+                # reasoning_content; OpenRouter and others, reasoning.
+                sink.feed("thinking", delta.get("reasoning_content")
+                          or delta.get("reasoning") or "")
+                piece = delta.get("content") or ""
+                if not piece:
+                    continue
+                parts.append(piece)
+                # A server that doesn't split reasoning out leaves it inline,
+                # between <think> and </think>; it is still thinking.
+                if inline_think is None:
+                    head = "".join(parts).lstrip()
+                    if head.startswith("<think>"):
+                        inline_think = True
+                    elif len(head) >= len("<think>") or not "<think>".startswith(head):
+                        inline_think = False
+                # The chunk that closes the block is still part of it.
+                sink.feed("thinking" if inline_think else "reply", piece)
+                if inline_think and "</think>" in "".join(parts[-3:]):
+                    inline_think = False
+        return _strip_think("".join(parts))
+
     def complete(self, system: str, user: str, *, timeout: float = 300.0,
                  max_tokens: int | None = None) -> str:
         body_dict = {
@@ -1032,7 +1172,7 @@ class OpenAICompatLLM(LLMService):
                 {"role": "user", "content": user},
             ],
             "temperature": 0.7,
-            "stream": False,
+            "stream": _streaming(),
         }
         if max_tokens is not None:
             body_dict["max_tokens"] = max_tokens
@@ -1040,8 +1180,7 @@ class OpenAICompatLLM(LLMService):
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
-            doc = json.loads(r.read().decode())
-        return _reply(doc)
+            return self._read_chat(r)
 
     def complete_with_image(
         self,
@@ -1072,14 +1211,13 @@ class OpenAICompatLLM(LLMService):
                     },
                 ],
                 "temperature": 0.4,
-                "stream": False,
+                "stream": _streaming(),
             }
         ).encode()
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         with self._open(req, timeout) as r:
-            doc = json.loads(r.read().decode())
-        return _reply(doc)
+            return self._read_chat(r)
 
     def complete_with_media(
         self, system: str, user: str, *, images: list[Path] | None = None,
@@ -1105,13 +1243,13 @@ class OpenAICompatLLM(LLMService):
             "model": self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": content}],
-            "temperature": 0.4, "stream": False,
+            "temperature": 0.4, "stream": _streaming(),
         }).encode()
         req = urllib.request.Request(f"{self.api}/chat/completions",
                                      data=body, headers=self._headers())
         try:
             with self._open(req, timeout, explain=False) as r:
-                doc = json.loads(r.read().decode())
+                text = self._read_chat(r)
         except urllib.error.HTTPError as exc:
             # LM Studio and several otherwise OpenAI-compatible servers accept
             # image_url blocks but not OpenAI's input_audio block. Character
@@ -1141,7 +1279,7 @@ class OpenAICompatLLM(LLMService):
                 f"{self.label} rejected the multimodal request "
                 f"(HTTP {exc.code}): {detail or exc.reason}"
             ) from exc
-        return _reply(doc)
+        return text
 
 
 class AnthropicLLM(LLMService):
@@ -1191,13 +1329,36 @@ class AnthropicLLM(LLMService):
     def _create(self, system: str, content: Any, timeout: float,
                 max_tokens: int | None) -> str:
         anthropic, client = self._client(timeout=timeout)
+        extra: dict[str, Any] = {}
+        if self.thinking != "none":
+            # Claude's thinking depth is output_config.effort. Sent as raw body
+            # so it works whatever SDK version is installed. Thinking tokens
+            # count against max_tokens, so a caller's cap would cut the reasoning
+            # off before any reply: use the full allowance instead.
+            extra["extra_body"] = {"output_config": {"effort": self.thinking}}
+            max_tokens = None
+        request = dict(
+            model=self.model,
+            max_tokens=max_tokens or self.DEFAULT_MAX_TOKENS,
+            system=system,
+            messages=[{"role": "user", "content": content}],
+            **extra,
+        )
+        sink = _STREAM.get()
         try:
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens or self.DEFAULT_MAX_TOKENS,
-                system=system,
-                messages=[{"role": "user", "content": content}],
-            )
+            if sink is None:
+                response = client.messages.create(**request)
+            else:
+                with client.messages.stream(**request) as stream:
+                    for event in stream:
+                        if event.type != "content_block_delta":
+                            continue
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            sink.feed("reply", delta.text)
+                        elif delta.type == "thinking_delta":
+                            sink.feed("thinking", delta.thinking)
+                    response = stream.get_final_message()
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
             raise RuntimeError(self._rejected(exc.status_code)) from exc
         if response.stop_reason == "refusal":

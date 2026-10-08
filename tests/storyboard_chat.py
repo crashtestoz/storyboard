@@ -13,10 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.storyboard_chat import (  # noqa: E402
     CHAT_SYSTEM_PROMPT, SEARCH_CAPABILITY_PROMPT, chat, compact_board_context,
+    split_render_state,
     validate_actions,
 )
 from server.backends.vpipe_backend import estimate_render_seconds  # noqa: E402
 from server import ad_memory  # noqa: E402
+from server.llm import _STREAM  # noqa: E402
 from server.render_timings import RenderTimings  # noqa: E402
 from server.store import (  # noqa: E402
     default_board, default_character, default_shot, render_fingerprint,
@@ -39,6 +41,11 @@ class FakeLLM:
         return True, ""
 
     def complete(self, system, user, *, timeout=120.0, max_tokens=None):
+        # Under streaming() a real service feeds the sink as it generates.
+        sink = _STREAM.get()
+        if sink is not None:
+            sink.feed("thinking", "x" * 40)
+            sink.feed("reply", "y" * 80)
         self.seen = (system, user, timeout)
         self.calls.append(self.seen)
         return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
@@ -55,6 +62,32 @@ class StoryboardChatTests(unittest.TestCase):
                      "logUrl": "/media/private/run.log"})
         self.board["characters"] = [character]
         self.board["shots"] = [shot]
+
+    def test_streams_progress_events_without_changing_the_result(self):
+        reply = json.dumps({"message": "Looks fine.", "actions": []})
+        events = []
+        with patch("server.storyboard_chat._Progress.GAP", 0):
+            result = chat(FakeLLM(reply), self.board, "Review it", on_event=events.append)
+        self.assertEqual(result["message"], "Looks fine.")
+        self.assertTrue(all(e["type"] == "progress" for e in events))
+        self.assertEqual(events[0]["phase"], "Preparing the conversation")
+        # The fake model emits 40 characters of thinking, then 80 of reply, at
+        # a quarter of a token each.
+        self.assertEqual((events[-1]["phase"], events[-1]["kind"]), ("Reading the board", "reply"))
+        self.assertEqual((events[-1]["thinking"], events[-1]["reply"]), (10, 20))
+        plain = chat(FakeLLM(reply), self.board, "Review it")
+        self.assertEqual(plain, result)
+
+    def test_a_search_round_trip_reports_each_phase(self):
+        events = []
+        model = FakeLLM([json.dumps({"message": "", "actions": [], "search": "dolly zoom"}),
+                         json.dumps({"message": "Done.", "actions": []})])
+        with patch("server.storyboard_chat.web_search", return_value=[]):
+            chat(model, self.board, "What's a dolly zoom?",
+                 search_url="http://search", on_event=events.append)
+        phases = [e["phase"] for e in events]
+        self.assertIn("Searching the web for “dolly zoom”", phases)
+        self.assertEqual(phases[-1], "Answering with what it found")
 
     def test_context_omits_runtime_data(self):
         context = compact_board_context(self.board, self.board["shots"][0]["id"])
@@ -486,16 +519,45 @@ class ConversationMemoryTests(unittest.TestCase):
         self.assertEqual(summary, "")
         self.assertEqual(len(recent), 2)
 
-    def test_chat_puts_memory_and_conversation_before_the_board(self):
+    def test_prompt_runs_from_most_stable_to_most_volatile(self):
+        # A cached prompt prefix is reused only up to the first difference, so
+        # the board (changes on edits) must come before the conversation (grows
+        # every message) or each message re-reads the whole board.
         board = default_board("Crossing")
         board["shots"] = [default_shot(board["defaults"])]
         model = self.Summariser()
         chat(model, board, "Next?", history=self.turns(ad_memory.KEEP + ad_memory.BATCH),
              memory_path=self.path)
         user = model.calls[-1][1]
-        self.assertIn("CONVERSATION MEMORY", user)
-        self.assertLess(user.index("RECENT CONVERSATION"), user.index("CURRENT STORYBOARD"))
-        self.assertLess(user.index("CURRENT STORYBOARD"), user.index("USER:\nNext?"))
+        order = ["CURRENT STORYBOARD", "OTHER STORYBOARDS", "CONVERSATION MEMORY",
+                 "RECENT CONVERSATION", "RENDER STATE", "USER:\nNext?"]
+        self.assertEqual([user.index(part) for part in order],
+                         sorted(user.index(part) for part in order))
+
+    def test_render_state_is_kept_out_of_the_cacheable_board(self):
+        board = default_board("Crossing")
+        shot = default_shot(board["defaults"])
+        board["shots"] = [shot]
+        model = FakeLLM(json.dumps({"message": "ok", "actions": []}))
+        chat(model, board, "Status?", selected_id=shot["id"])
+        user = model.calls[-1][1]
+        story, state = user.split("RENDER STATE:\n")
+        self.assertNotIn("needsRender", story)
+        self.assertNotIn("estimatedRenderSeconds", story)
+        self.assertNotIn("selectedShotId", story)
+        self.assertIn(shot["id"], state.split("USER:")[0])
+        self.assertIn('"needsRender":[{', state)  # an unrendered shot needs one
+
+    def test_render_state_changes_leave_the_board_text_alone(self):
+        board = default_board("Crossing")
+        shot = default_shot(board["defaults"])
+        board["shots"] = [shot]
+        first, first_state = split_render_state(compact_board_context(board, shot["id"]))
+        shot["outputs"] = ["clip.mp4"]
+        second, second_state = split_render_state(compact_board_context(board, None))
+        self.assertEqual(first, second)  # the cacheable part did not move
+        self.assertEqual(first_state["selectedShotId"], shot["id"])
+        self.assertIsNone(second_state["selectedShotId"])
 
     def test_context_drops_empty_fields_and_lists_reference_tags(self):
         board = default_board("Crossing")

@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.llm import (  # noqa: E402
     SCENE_SYSTEM_PROMPT, SOUND_ACCENT_SYSTEM_PROMPT, SOUNDSCAPE_SYSTEM_PROMPT,
-    SYSTEM_PROMPT, OllamaLLM, OpenAICompatLLM, board_outline, build_user_message,
-    rewrite_dialogue,
+    SYSTEM_PROMPT, AnthropicLLM, ClientGone, OllamaLLM, OpenAICompatLLM, board_outline,
+    build_user_message, rewrite_dialogue, streaming,
 )
 
 
@@ -190,6 +190,139 @@ class HttpErrorMessageTests(unittest.TestCase):
         message = self._fail(service, 400, json.dumps({"error": {
             "message": "maximum context length is 4096 tokens"}}))
         self.assertIn("context window", message)
+
+
+class AnthropicThinkingTests(unittest.TestCase):
+    def _run(self, thinking):
+        from types import SimpleNamespace as NS
+        sent = {}
+
+        class Messages:
+            def create(self, **kw):
+                sent.update(kw)
+                return NS(stop_reason="end_turn", content=[
+                    NS(type="thinking", text=None), NS(type="text", text=" Hi ")])
+
+        service = AnthropicLLM("c", "Claude", "https://api.anthropic.com", "claude-opus-5-5")
+        service.thinking = thinking
+        fake = NS(messages=Messages())
+        with patch.object(service, "_client", return_value=(NS(), fake)):
+            reply = service.complete("system", "user", max_tokens=8192)
+        return sent, reply
+
+    def test_off_sends_no_thinking_controls(self):
+        sent, reply = self._run("none")
+        self.assertEqual(reply, "Hi")
+        self.assertNotIn("extra_body", sent)
+        self.assertEqual(sent["max_tokens"], 8192)
+
+    def test_level_sets_effort_and_lifts_the_reply_cap(self):
+        sent, reply = self._run("medium")
+        self.assertEqual(reply, "Hi")
+        self.assertEqual(sent["extra_body"], {"output_config": {"effort": "medium"}})
+        self.assertEqual(sent["max_tokens"], AnthropicLLM.DEFAULT_MAX_TOKENS)
+
+
+class _Lines:
+    """A streamed HTTP body: iterates lines, read() would be the whole thing."""
+
+    def __init__(self, lines: list[str]):
+        self.lines = [l.encode() + b"\n" for l in lines]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
+class StreamingTests(unittest.TestCase):
+    def test_not_streamed_outside_streaming(self):
+        service = OllamaLLM("o", "Ollama", "http://x", "m")
+        with patch("server.llm.urllib.request.urlopen",
+                   return_value=_Response({"message": {"content": "Hi"}})) as call:
+            self.assertEqual(service.complete("s", "u"), "Hi")
+        self.assertFalse(json.loads(call.call_args.args[0].data)["stream"])
+
+    def test_ollama_streams_thinking_and_reply(self):
+        service = OllamaLLM("o", "Ollama", "http://x", "m")
+        body = _Lines([
+            json.dumps({"message": {"thinking": "hm"}, "done": False}),
+            json.dumps({"message": {"thinking": "m", "content": ""}, "done": False}),
+            json.dumps({"message": {"content": "Hel"}, "done": False}),
+            json.dumps({"message": {"content": "lo"}, "done": True}),
+        ])
+        seen = []
+        with patch("server.llm.urllib.request.urlopen", return_value=body) as call:
+            with streaming(lambda kind, text: seen.append((kind, text))):
+                reply = service.complete("s", "u")
+        self.assertEqual(reply, "Hello")
+        self.assertTrue(json.loads(call.call_args.args[0].data)["stream"])
+        self.assertEqual(seen, [("thinking", "hm"), ("thinking", "m"),
+                                ("reply", "Hel"), ("reply", "lo")])
+
+    def test_ollama_error_line_raises(self):
+        service = OllamaLLM("o", "Ollama", "http://x", "m")
+        body = _Lines([json.dumps({"error": "model crashed"})])
+        with patch("server.llm.urllib.request.urlopen", return_value=body):
+            with streaming(lambda *_: None):
+                with self.assertRaisesRegex(RuntimeError, "model crashed"):
+                    service.complete("s", "u")
+
+    def test_openai_streams_reasoning_and_inline_think(self):
+        service = OpenAICompatLLM("l", "LM", "http://x", "m")
+
+        def sse(delta):
+            return "data: " + json.dumps({"choices": [{"delta": delta}]})
+
+        body = _Lines([
+            sse({"reasoning_content": "plan"}),
+            "",
+            sse({"content": "<think>inl"}),
+            sse({"content": "ine</think>"}),
+            sse({"content": "Answer"}),
+            "data: [DONE]",
+        ])
+        seen = []
+        with patch("server.llm.urllib.request.urlopen", return_value=body) as call:
+            with streaming(lambda kind, text: seen.append((kind, text))):
+                reply = service.complete("s", "u")
+        self.assertEqual(reply, "Answer")
+        self.assertTrue(json.loads(call.call_args.args[0].data)["stream"])
+        self.assertEqual([k for k, _ in seen],
+                         ["thinking", "thinking", "thinking", "reply"])
+        self.assertEqual(seen[-1], ("reply", "Answer"))
+
+    def test_aborting_closes_the_connection(self):
+        service = OllamaLLM("o", "Ollama", "http://x", "m")
+        closed = []
+
+        class Body(_Lines):
+            def __exit__(self, *_args):
+                closed.append(True)
+                return False
+
+        body = Body([json.dumps({"message": {"content": "a"}, "done": False})] * 3)
+
+        def gone(kind, text):
+            raise ClientGone
+
+        with patch("server.llm.urllib.request.urlopen", return_value=body):
+            with streaming(gone):
+                with self.assertRaises(ClientGone):
+                    service.complete("s", "u")
+        self.assertEqual(closed, [True])
+
+    def test_whole_run_is_bounded(self):
+        service = OllamaLLM("o", "Ollama", "http://x", "m")
+        body = _Lines([json.dumps({"message": {"content": "a"}, "done": False})] * 3)
+        with patch("server.llm.urllib.request.urlopen", return_value=body):
+            with streaming(lambda *_: None, max_seconds=-1):
+                with self.assertRaisesRegex(RuntimeError, "still generating"):
+                    service.complete("s", "u")
 
 
 if __name__ == "__main__":

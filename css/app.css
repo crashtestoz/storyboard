@@ -1287,6 +1287,12 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 
 .chat-message.assistant { align-self: flex-start; background: var(--panel-raised); }
 .chat-message.pending { color: var(--text-dim); }
+.chat-progress {
+  margin-top: 0.35em;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
 
 /* Storyboard AD's thinking line: three dots fading up in turn. */
 .thinking-dots { margin-left: 0.3em; }
@@ -1345,7 +1351,9 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   gap: var(--sp-2);
   margin-top: var(--sp-2);
 }
-.blade-compose-hint { flex: 1; color: var(--text-faint); font-size: var(--fs-xs); }
+#bladeStop[hidden] { display: none; } /* .btn's display: inline-flex beats [hidden] */
+.blade-compose-hint { flex: 1; min-width: 0; color: var(--text-faint); font-size: var(--fs-xs); }
+#bladeThinking { max-width: 11em; font-size: var(--fs-xs); }
 
 @media (max-width: 720px) {
   .assistant-blade { width: 88vw; min-width: 0; max-width: none; }
