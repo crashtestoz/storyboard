@@ -18,6 +18,7 @@ from .store import Store
 from .render_record import ensure_render_record
 from .llm import CONFIG_NAME as LLM_CONFIG_NAME
 from .llm import load_services as load_llm_services
+from .local_config import protect_local_configs
 from .tts import CONFIG_NAME, load_engines
 
 UI_ROOT = Path(__file__).resolve().parent.parent
@@ -163,6 +164,9 @@ def lan_ip() -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
     bind = "0.0.0.0" if args.lan else args.bind
+    # Before anything reads server-config.json: bring back a settings file a
+    # git checkout removed.
+    protect_local_configs(UI_ROOT)
 
     workspace = (args.workspace
                  or (Path(os.environ["SBV_WORKSPACE"]) if os.environ.get("SBV_WORKSPACE") else None)

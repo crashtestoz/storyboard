@@ -17,3 +17,5 @@ soundtrack-services.json
 voice-presets.json
 # Qwen3-TTS server environment, created by vendor/start-qwen3-tts.sh
 vendor/.venv/
+# Versioned copies of the per-machine config above (server/local_config.py)
+.local-config-backup/
