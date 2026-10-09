@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import assemble as assembly
+from . import refine as refining
 from .backends.base import Backend, ProgressEvent, ShotPaths
 from .dubbing import mux_speech
 from .render_timings import RenderTimings
@@ -142,6 +143,8 @@ def _progress_handler(run: ShotRun) -> Callable[[ProgressEvent], None]:
 SEED_TAKES_DIR = "seed-takes"
 SEED_TAKE_FILE = "take.json"
 MAX_SEED_TAKES = 8
+REFINE_DIR = "refine-runs"      # per shot; each run replaces the last
+REFINE_FILE = "run.json"
 
 
 class Orchestrator:
@@ -215,6 +218,11 @@ class Orchestrator:
         # beside it, never over its own clip (see start_seed_sweep).
         self._seed_sweep: dict[str, Any] | None = None
 
+        # Auto-refine — draft one shot, have the AD's model review the clip,
+        # adjust the prompt, repeat (see start_refine). Like a seed sweep it
+        # renders beside the shot and never touches the board.
+        self._refine: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------ #
     # status
     # ------------------------------------------------------------------ #
@@ -238,6 +246,8 @@ class Orchestrator:
                 return False
             if self._seed_sweep and self._seed_sweep.get("shotId") == shot_id:
                 return True
+            if self._refine and self._refine.get("shotId") == shot_id:
+                return True
             # Queued counts too: queuing already cleared its clip.
             return self._current == shot_id or shot_id in self._runs
 
@@ -257,6 +267,7 @@ class Orchestrator:
                 "queuedBecause": dict(self._queued_because),
                 "assembly": self._assembly,
                 "seedSweep": dict(self._seed_sweep) if self._seed_sweep else None,
+                "refine": copy.deepcopy(self._refine) if self._refine else None,
                 "stills": {
                     "busy": self.stills_busy,
                     "kind": self._stills_kind,
@@ -1446,6 +1457,254 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     # after the render
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    # auto-refine: draft -> review -> adjust the prompt -> repeat
+    # ------------------------------------------------------------------ #
+
+    def refine_dir(self, slug: str, shot_id: str) -> Path:
+        if not shot_id or "/" in shot_id or shot_id.startswith("."):
+            raise ValueError("bad shot id")
+        return self.store.project_dir(slug) / REFINE_DIR / shot_id
+
+    def refine_result(self, slug: str, shot_id: str) -> dict[str, Any] | None:
+        """The last finished refine run for this shot, or None."""
+        try:
+            return json.loads((self.refine_dir(slug, shot_id) / REFINE_FILE).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def start_refine(self, slug: str, shot_id: str, reviewer, *, requirement: str = "",
+                     max_attempts: int = refining.DEFAULT_ATTEMPTS,
+                     pass_percent: int = refining.DEFAULT_PASS_PERCENT,
+                     draft: bool = True, checks: list[str] | None = None) -> dict[str, Any]:
+        """Render a shot, review the clip, rewrite its prompt, and go again.
+
+        Each attempt renders (a draft, unless *draft* is False) into its own
+        folder beside the shot, then *reviewer* — the AD's model — answers a
+        fixed checklist from stills of the clip. The loop stops when
+        *pass_percent* of the checks are met, after *max_attempts* renders,
+        when the model has nothing further to change, on Stop, or on an
+        error. The board is never edited: the best prompt comes back as a
+        proposal, and applying it is the user's call. *checks*, when given
+        (the user's own, edited on the Start card), replace the checklist the
+        model would have written.
+        """
+        if self.busy:
+            raise RuntimeError("a render is already running")
+        if self.stills_busy:
+            raise RuntimeError("still previews are generating — one GPU job at a time")
+        ok, msg = self.backend.health()
+        if not ok:
+            raise RuntimeError(msg)
+        board = self.store.load(slug)
+        idx = next((i for i, s in enumerate(board["shots"]) if s["id"] == shot_id), None)
+        if idx is None:
+            raise ValueError("no such shot")
+        shot = board["shots"][idx]
+        if shot.get("locked"):
+            raise RuntimeError("this shot is locked — unlock it to refine it")
+        if not (shot.get("prompt") or "").strip():
+            raise RuntimeError("this shot has no prompt yet")
+        max_attempts = max(1, min(int(max_attempts or 0), refining.MAX_ATTEMPTS))
+        pass_percent = max(1, min(int(pass_percent or 0), 100))
+        checks = [c.strip()[:240] for c in checks or [] if isinstance(c, str) and c.strip()]
+        checks = checks[:refining.MAX_CHECKS]
+
+        root = self.refine_dir(slug, shot_id)
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        self._cancel.clear()
+        self._operation = "refine"
+        self._slug = slug
+        self._order, self._runs, self._queued_because = [], {}, {}
+        self._error = ""
+        self._assembly = None
+        self._batch_started = time.time()
+        self._batch_ended = None
+        self._refine = {
+            "slug": slug, "shotId": shot_id, "number": idx + 1,
+            "requirement": requirement, "maxAttempts": max_attempts,
+            "passPercent": pass_percent, "draft": draft,
+            "state": "starting",
+            "phase": "Starting" if checks else "Writing the checklist",
+            "checks": list(checks), "attempts": [], "stopReason": "", "stopDetail": "",
+            "best": None, "summary": "", "proposal": None,
+        }
+
+        def note(**fields) -> None:
+            with self._lock:
+                self._refine.update(fields)
+
+        def work() -> None:
+            try:
+                self._refine_loop(slug, shot_id, idx, reviewer, root, note,
+                                  max_attempts, pass_percent, draft, checks)
+            except Exception as exc:  # noqa: BLE001 - reported to the UI
+                note(stopReason="error", stopDetail=f"{type(exc).__name__}: {exc}")
+            finally:
+                try:
+                    self._finish_refine(root)
+                finally:
+                    with self._lock:
+                        self._current = None
+                        self._batch_ended = time.time()
+
+        self._thread = threading.Thread(target=work, name="refine", daemon=True)
+        self._thread.start()
+        return self.status()
+
+    def _refine_loop(self, slug, shot_id, idx, reviewer, root, note,
+                     max_attempts, pass_percent, draft, checks) -> None:
+        board = self.store.load(slug)
+        shot = board["shots"][idx]
+        if not checks:
+            note(phase="Writing the checklist")
+            checks = reviewer.checklist(shot, board)
+            note(checks=checks)
+        prompt = shot["prompt"]
+        history: list[dict[str, Any]] = []
+        for n in range(1, max_attempts + 1):
+            if self._cancel.is_set():
+                note(stopReason="stopped")
+                return
+            rid = f"{shot_id}:refine:{n}"
+            run = ShotRun(shot_id=rid)
+            with self._lock:
+                self._runs[rid] = run
+                self._order.append(rid)
+                self._queued_because[rid] = f"auto-refine attempt {n} of {max_attempts}"
+            attempt: dict[str, Any] = {"n": n, "prompt": prompt, "score": None, "results": [],
+                                       "overall": "", "clipUrl": None, "status": "rendering",
+                                       "reason": ""}
+            with self._lock:
+                self._refine["attempts"].append(attempt)
+            note(state="rendering", phase=f"Attempt {n} of {max_attempts}: rendering a "
+                                           f"{'draft' if draft else 'full-quality'} clip")
+            clip = self._refine_render(slug, shot_id, idx, prompt, root / f"attempt-{n}", run, draft)
+            if self._cancel.is_set():
+                note(stopReason="stopped")
+                return
+            if clip is None:
+                with self._lock:
+                    attempt.update(status="failed", reason=run.reason)
+                note(stopReason="render-failed", stopDetail=run.reason)
+                return
+            with self._lock:
+                attempt.update(status="reviewing", clipUrl=self._as_url(clip))
+            note(state="reviewing", phase=f"Attempt {n} of {max_attempts}: reviewing the clip")
+            seconds = refining.clip_seconds(
+                clip, max(int(board["shots"][idx].get("frames") or 0), 1) / 24.0)
+            verdict = reviewer.judge(shot, board, checks, clip, seconds, clip.parent)
+            with self._lock:
+                attempt.update(status="reviewed", score=verdict["score"],
+                               results=verdict["results"], overall=verdict["overall"])
+            history.append(dict(attempt))
+            if verdict["score"] >= pass_percent:
+                note(stopReason="passed")
+                return
+            if n == max_attempts:
+                note(stopReason="max-attempts")
+                return
+            if self._cancel.is_set():
+                note(stopReason="stopped")
+                return
+            note(state="adjusting", phase=f"Attempt {n} of {max_attempts}: adjusting the prompt")
+            revised = reviewer.revise(shot, board, prompt, verdict["results"], history[:-1])
+            if not revised or revised.strip() == prompt.strip():
+                note(stopReason="no-change",
+                     stopDetail="The model had nothing further to change in the prompt.")
+                return
+            prompt = revised
+
+    def _refine_render(self, slug, shot_id, idx, prompt, attempt_dir, run, draft) -> Path | None:
+        """Render one attempt into *attempt_dir*; its clip, or None (see run.reason)."""
+        board = self.store.load(slug)
+        shots = board["shots"]
+        # A copy of the board and the shot: the real ones keep their prompt,
+        # their draft setting and their status as they were.
+        shot = copy.deepcopy(shots[idx])
+        shot["prompt"] = prompt
+        board["defaults"] = {**(board.get("defaults") or {}), "draft": draft}
+        with self._lock:
+            self._current = run.shot_id
+        problem = self._resolve_chain(shot, shots, slug)
+        if problem:
+            run.status, run.reason = "blocked", problem
+            return None
+        attempt_dir.mkdir(parents=True)
+        paths = ShotPaths(
+            workspace=self.workspace, abs_dir=attempt_dir,
+            rel_dir=str(attempt_dir.relative_to(self.data_dir)), data_dir=self.data_dir,
+        )
+        try:
+            spec = self.backend.prepare(shot, board, paths)
+        except Exception as exc:  # noqa: BLE001
+            run.status, run.reason = "failed", f"could not prepare: {exc}"
+            return None
+        spec.expected_seconds = self._expected_seconds(spec) or 0.0
+        spec.started_at = time.time()
+        run.summary = f"refine · {spec.summary}"
+        run.status, run.started_at = "running", time.time()
+        result = self.backend.run(spec, _progress_handler(run), self._cancel.is_set)
+        run.ended_at = time.time()
+        if result.cancelled or self._cancel.is_set():
+            run.status, run.reason = "interrupted", "Stopped before completion."
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+            return None
+        validation = self.backend.validate(spec, result)
+        if self.timings is not None and validation.verdict in ("done", "review"):
+            g = self._geometry(spec)
+            if g:
+                self.timings.record(**g, seconds=result.seconds)
+        run.validation = validation.to_json()
+        run.status, run.reason = validation.verdict, validation.reason
+        run.progress = 100.0 if validation.ok else run.progress
+        self._write_log(attempt_dir, run, spec, result)
+        clip = next((p for p in spec.expected_outputs if p.suffix == ".mp4" and p.exists()), None)
+        run.outputs = [self._as_url(p) for p in spec.expected_outputs if p.exists()]
+        return clip if validation.ok and clip else None
+
+    def _finish_refine(self, root: Path) -> None:
+        """Pick the best attempt, write the summary and the prompt proposal."""
+        with self._lock:
+            r = self._refine
+            for a in r["attempts"]:
+                if a["status"] in ("rendering", "reviewing"):
+                    a["status"] = "interrupted"
+            reviewed = [a for a in r["attempts"] if a["score"] is not None]
+            best = max(reviewed, key=lambda a: (a["score"], a["n"]), default=None)
+            reason = r["stopReason"] or "stopped"
+            r["stopReason"], r["state"], r["phase"] = reason, "finished", ""
+            r["best"] = best["n"] if best else None
+            name = f"Scene {r['number']}"
+            scores = ", ".join(f"{a['n']}: {a['score']}%" for a in reviewed) or "none reviewed"
+            lead = {
+                "passed": f"{name} passed its checklist on attempt {reviewed[-1]['n'] if reviewed else '?'}.",
+                "max-attempts": f"{name} used all {r['maxAttempts']} attempts without meeting "
+                                f"{r['passPercent']}% of its checks.",
+                "no-change": f"{name}: the model had nothing further to change.",
+                "stopped": f"{name}: stopped.",
+                "render-failed": f"{name}: a draft render failed — {r['stopDetail'] or 'see the render log'}.",
+                "error": f"{name}: the refine run hit an error — {r['stopDetail']}.",
+            }.get(reason, f"{name}: finished.")
+            text = f"{lead} Scores by attempt — {scores}."
+            first = reviewed[0] if reviewed else None
+            if best and first and best["n"] != first["n"] and best["score"] > first["score"]:
+                r["proposal"] = {"tool": "update_shot", "shotId": r["shotId"],
+                                 "fields": {"prompt": best["prompt"]}}
+                text += (f" Attempt {best['n']}'s prompt scored best; apply it to the shot, "
+                         "then render for real.")
+            elif best:
+                text += " The shot's own prompt scored as well as any revision, so there is nothing to apply."
+            r["summary"] = text
+            snapshot = copy.deepcopy(r)
+        try:
+            (root / REFINE_FILE).write_text(json.dumps(snapshot, indent=2) + "\n")
+        except OSError:
+            pass
 
     def _relay_speech(self, shot: dict, shot_dir: Path, run: ShotRun) -> None:
         """Put an already-spoken line back onto the clip that just rendered.

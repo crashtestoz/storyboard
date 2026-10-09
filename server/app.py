@@ -39,6 +39,10 @@ Routes
 ``DELETE /api/boards/<slug>/shots/<id>/seed-takes``  delete them
 ``POST /api/boards/<slug>/shots/<id>/seed-takes/<seed>/adopt``  make a take
                                 the shot's own clip and seed
+``POST /api/refine``            draft -> AI review -> adjust prompt loop on one
+                                shot ``{slug, shotId, requirement?, checks?,
+                                maxAttempts?, draft?, service?, thinking?}``
+``GET  /api/boards/<slug>/shots/<id>/refine``  that shot's last refine run
 ``POST /api/stop``              stop the running batch
 ``POST /api/services/start``    start a local engine server ``{group, id}``
 ``GET  /api/status``            live queue state (polled by the UI)
@@ -86,6 +90,7 @@ from . import services as local_services
 from .dubbing import speaker_for
 from .ad_memory import MEMORY_FILE as AD_MEMORY_FILE
 from .storyboard_chat import chat as storyboard_chat
+from . import refine as refining
 from .store import Store, default_shot, render_fingerprint, stale_reason
 from .tts import load_engines as load_tts_engines
 from .backends.mflux_backend import load_config as load_mflux_config
@@ -490,8 +495,8 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/media/"):
                 return self._serve_media(path[len("/media/"):])
             return self._serve_static(path)
-        except BrokenPipeError:
-            pass
+        except (BrokenPipeError, ConnectionResetError):
+            pass    # the browser left, e.g. a <video> dropping a range it no longer needs
         except ValueError as exc:
             # A bad query parameter is the caller's mistake, not the server's.
             # do_POST already drew this distinction; GET reported 500 for it.
@@ -660,6 +665,10 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/boards/([^/]+)/soundtrack", path)
         if m:
             return self._send_json(self._soundtrack_status(m.group(1)))
+
+        m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/refine", path)
+        if m:
+            return self._send_json({"run": self.ctx.orch.refine_result(m.group(1), m.group(2))})
 
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/seed-takes", path)
         if m:
@@ -1103,6 +1112,22 @@ class Handler(BaseHTTPRequestHandler):
                 service.thinking = thinking
 
             def run(on_event=None):
+                # "Draft it, review it, adjust it until it matches": spotted
+                # in code, not left to the model, and answered with a Start
+                # card — the loop spends GPU time, so it is never silent.
+                refine = refining.parse_refine_request(
+                    payload.get("message") or "", board, payload.get("selectedShotId"))
+                if refine is not None:
+                    checks = []
+                    if "error" not in refine:
+                        # Written now so the user can fix them before any GPU
+                        # time is spent; a model failure just leaves it to the run.
+                        checks = refining.draft_checklist(
+                            service, ctx.data_dir,
+                            next(s for s in board["shots"] if s["id"] == refine["shotId"]),
+                            board, refine["requirement"], on_event)
+                    return {**refining.refine_reply(refine, board, checks),
+                            "service": service.label, "model": service.model}
                 return storyboard_chat(
                     service,
                     board,
@@ -1176,6 +1201,34 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(payload.get("board"), dict):
                 self._save_from_page(slug, payload["board"])
             return self._send_json(ctx.orch.start(slug, payload.get("shotIds")))
+
+        if path == "/api/refine":
+            payload = self._read_json() or {}
+            slug, shot_id = payload.get("slug"), payload.get("shotId")
+            if not slug or not shot_id:
+                raise ValueError("slug and shotId are required")
+            if isinstance(payload.get("board"), dict):
+                self._save_from_page(slug, payload["board"])
+            service = ctx.llm(
+                payload.get("service")
+                or (ctx.store.load(slug).get("defaults") or {}).get("llm"))
+            ok, why = service.health()
+            if not ok:
+                raise RuntimeError(why)
+            thinking = str(payload.get("thinking") or "none")
+            if thinking not in THINKING_LEVELS:
+                raise ValueError(f"thinking must be one of {', '.join(THINKING_LEVELS)}")
+            service = copy.copy(service)
+            service.thinking = thinking
+            reviewer = refining.Reviewer(service, ctx.data_dir,
+                                         str(payload.get("requirement") or "")[:1500])
+            return self._send_json(ctx.orch.start_refine(
+                slug, shot_id, reviewer,
+                requirement=reviewer.requirement,
+                checks=payload.get("checks") if isinstance(payload.get("checks"), list) else None,
+                max_attempts=int(payload.get("maxAttempts") or refining.DEFAULT_ATTEMPTS),
+                pass_percent=int(payload.get("passPercent") or refining.DEFAULT_PASS_PERCENT),
+                draft=payload.get("draft") is not False))
 
         if path == "/api/render-seeds":
             payload = self._read_json() or {}
@@ -1816,18 +1869,46 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_file(target, cache=True)
 
     def _send_file(self, target: Path, *, cache: bool) -> None:
+        """Send *target*, honouring a single ``Range: bytes=`` request.
+
+        Browsers fetch video in ranges: Safari will not play a clip from a
+        server that cannot answer one with 206, and every browser needs it to
+        seek. A multi-range or malformed header is ignored and the whole file
+        is sent, which the spec allows.
+        """
         ctype, _ = mimetypes.guess_type(str(target))
         size = target.stat().st_size
-        self.send_response(HTTPStatus.OK)
+        start, end, status = 0, size - 1, HTTPStatus.OK
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:  # "-N": the last N bytes
+                start, end = max(size - int(m.group(2)), 0), size - 1
+            if start >= size or start > end:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        self.send_response(status)
         self.send_header("Content-Type", ctype or "application/octet-stream")
-        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header(
             "Cache-Control", "public, max-age=60" if cache else "no-store"
         )
         self.end_headers()
+        remaining = end - start + 1
         with target.open("rb") as fh:
-            while chunk := fh.read(64 * 1024):
+            fh.seek(start)
+            while remaining > 0 and (chunk := fh.read(min(64 * 1024, remaining))):
                 self.wfile.write(chunk)
+                remaining -= len(chunk)
 
 
 def _dialogue_context(shot: dict, board: dict) -> str:

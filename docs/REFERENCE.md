@@ -267,6 +267,46 @@ app; or, for scripting it, the full MCP server below, which has tools like
 `sbv_dub_shot` and `sbv_start_render` that an external MCP client (Claude
 Desktop, Claude Code) can call directly.
 
+### Auto-refine: draft, review, adjust, repeat
+
+Say it in plain words in the AD chat — for example *"draft scene 3, review the
+clip, then adjust the prompt until the dog is on the left, up to 4 attempts"*,
+or `/refine scene 3 the dog is on the left`. The app recognises the request in
+code (a draft/render, a review and an adjustment named together, or `/refine`),
+so it works however weak the local model is, and answers with a **Start** card.
+Starting it spends GPU time, so it is never silent.
+
+The loop, all on the AD's own model (a local vision model is fine):
+
+1. **Checklist** — once, the shot's prompt plus your request become up to eight
+   things a still frame can show. The same list judges every attempt.
+2. **Draft** — the shot renders in draft mode (say "full-quality" to override)
+   into `refine-runs/<shot>/attempt-N/`, beside the shot, never over its clip.
+3. **Review** — four stills from the clip, plus the shot's cast portraits, go to
+   the model, which answers met / not met per check. The score is the share
+   met, computed by the app, not a number the model invents.
+4. **Adjust** — the unmet checks, and what earlier attempts already tried, go
+   back to the model to rewrite the shot's prompt. Then back to 2.
+
+It stops when every check is met, after the attempt limit (default 3, at most
+8; say "up to N attempts" / "stop after N tries"), when the model has nothing
+further to change, on **Stop**, or on an error. Progress, per-attempt scores,
+unmet checks and a **Watch** link for each draft clip appear live in the chat.
+**The board is not edited**: the run ends with the best-scoring prompt as an
+ordinary Apply/Discard card (if no revision beat your own prompt, there is
+nothing to apply). Applying it makes the shot stale — render it for real
+afterwards.
+
+Needs a vision-capable AD model (the review sends images) and ffmpeg. A model
+that cannot read images shows up as "the model's review was unreadable". Judging
+is only as good as the model: small local models are lenient or erratic on
+fine detail, so treat a pass as a strong hint and watch the clip. Only one GPU
+job runs at a time, so a refine run waits behind a running render. The loop
+shares the engine with ordinary renders; the model swap between the render and
+the review happens on the same machine, so allow for Ollama loading the model.
+API: `POST /api/refine`, progress in `GET /api/status` → `refine`, last result
+at `GET /api/boards/<slug>/shots/<id>/refine`.
+
 It knows enough to say which, too: its system prompt (`server/storyboard_chat.py`)
 carries a compact, hand-written reference on how a board actually works —
 dialogueSource, model auto-selection, frame rate, staleness — plus the full

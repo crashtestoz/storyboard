@@ -643,6 +643,11 @@ function batchOutcome(status) {
       kind: bad && !status.cancelRequested ? "warn" : "info",
     };
   }
+  if (status.operation === "refine" && status.refine) {
+    const r = status.refine;
+    return {msg: r.summary || "Auto-refine finished.",
+            kind: ["error", "render-failed"].includes(r.stopReason) ? "error" : "info"};
+  }
   if (status.operation === "dialogue") {
     return {msg: status.error ? `Dialogue preparation failed: ${status.error}` : status.cancelRequested ? "Dialogue preparation stopped." : "Dialogue takes are ready to preview. Video clips were not regenerated.", kind: status.error ? "error" : "info"};
   }
@@ -718,7 +723,7 @@ function persistChat(slug) {
   try {
     // A "thinking…" bubble mid-request is not worth restoring as itself;
     // the reply (or the "Chat failed" turn) that replaces it is what matters.
-    const turns = (state.chats[slug] || []).filter((t) => !t.pending).slice(-CHAT_HISTORY_LIMIT);
+    const turns = (state.chats[slug] || []).filter((t) => !t.pending && !t.refineLive).slice(-CHAT_HISTORY_LIMIT);
     if (turns.length) localStorage.setItem(chatStorageKey(slug), JSON.stringify(turns));
     else localStorage.removeItem(chatStorageKey(slug));
   } catch {
@@ -852,6 +857,11 @@ function proposalSummary(action) {
     }
     return "Start rendering every shot that needs it";
   }
+  if (action.tool === "refine_shot") {
+    const s = shotById(action.shotId);
+    return `Auto-refine “${s ? s.title || action.shotId : action.shotId}”: ` +
+      `${action.draft === false ? "full-quality" : "draft"} render → review → adjust`;
+  }
   if (action.tool === "dub_shot") {
     const s = shotById(action.shotId);
     return `Generate dialogue for “${s ? s.title : action.shotId}”`;
@@ -897,7 +907,8 @@ function renderAssistantChat() {
       msg.appendChild(el("div", "chat-progress", chatProgressText()));
       host.appendChild(msg);
     } else {
-      host.appendChild(el("div", cls, turn.content));
+      if (turn.content) host.appendChild(el("div", cls, turn.content));
+      if (turn.refine) host.appendChild(renderRefineBlock(turn.refine, turn));
     }
     if (turn.actions && turn.actions.length && !turn.dismissed) {
       const proposal = el("div", `chat-proposal${turn.applied ? " applied" : ""}`);
@@ -906,6 +917,11 @@ function renderAssistantChat() {
           : `${turn.actions.length} proposed change${turn.actions.length === 1 ? "" : "s"}`));
       const list = el("div", "chat-proposal-list");
       turn.actions.forEach((action) => {
+        if (action.tool === "refine_shot" && !turn.applied) {
+          list.appendChild(el("div", "chat-proposal-item", `• ${proposalSummary(action)}`));
+          list.appendChild(renderRefineEditor(action));
+          return;
+        }
         const row = el("div", "chat-proposal-item");
         row.appendChild(el("span", null, `• ${proposalSummary(action)}`));
         const fields = proposalDetailFields(action);
@@ -1033,7 +1049,7 @@ function applyBoardEditActions(actions) {
 // board-field edit. Kept as one set so applyAssistantActions can split a
 // proposal into "apply these fields" and "then run these" without the two
 // kinds of action needing to know about each other.
-const OPERATION_TOOLS = new Set(["start_render", "dub_shot", "stop_render", "assemble"]);
+const OPERATION_TOOLS = new Set(["start_render", "refine_shot", "dub_shot", "stop_render", "assemble"]);
 
 /* Runs one operation action and returns a human sentence describing what
    happened, for the toast(s) shown after a proposal is applied. Shares the
@@ -1046,6 +1062,10 @@ async function runAssistantOperation(action) {
     return action.shotIds && action.shotIds.length
       ? "Started rendering the requested shot(s)."
       : "Started rendering every shot that needs it.";
+  }
+  if (action.tool === "refine_shot") {
+    await runRefine(action);
+    return "Auto-refine started — its progress shows here in the chat.";
   }
   if (action.tool === "dub_shot") {
     const r = await runDubShot(action.shotId);
@@ -1553,6 +1573,24 @@ async function runStartRender(shotIds) {
   state.status = await API.render(state.slug, shotIds && shotIds.length ? shotIds : undefined, state.board);
   state.awaitingBatch = true;
   state.followRender = true;
+  startPolling();
+  render();
+}
+
+/* Auto-refine, started from Storyboard AD's refine_shot card. The loop runs on
+   the server and only ever renders beside the shot; refreshStatus feeds its
+   progress into the chat (syncRefineTurn). */
+async function runRefine(action) {
+  await saveNow();
+  state.status = await API.refine(state.slug, action.shotId, {
+    requirement: action.requirement,
+    maxAttempts: action.maxAttempts,
+    checks: action.checks || [],
+    draft: action.draft !== false,
+    thinking: $("#bladeThinking").value || "none",
+    service: (currentLLM() || {}).id,
+  }, state.board);
+  state.awaitingBatch = true;
   startPolling();
   render();
 }
@@ -3398,6 +3436,192 @@ async function refreshSystemLoad() {
   paintSystemLoad();
 }
 
+/* Auto-refine progress, kept as one turn in the AD chat: it fills in while the
+   loop runs and, when it ends, becomes the summary plus an ordinary Apply
+   card for the best prompt (a `update_shot`). Keyed by the run's start time,
+   so a page reload mid-run picks the same run back up. */
+function syncRefineTurn(s) {
+  const r = s.refine;
+  if (!r || s.operation !== "refine" || r.slug !== state.slug || !s.batchStartedAt) return;
+  const key = `${r.slug}:${r.shotId}:${Math.round(s.batchStartedAt)}`;
+  const turns = chatTurns();
+  let turn = turns.find((t) => t.refineKey === key);
+  const finished = r.state === "finished";
+  if (!turn) {
+    if (finished) return;   // a run we never watched; its chat card is gone
+    turn = {role: "assistant", content: "", refineKey: key, refineLive: true};
+    turns.push(turn);
+  }
+  // The status is polled every second; repainting the chat that often would
+  // stop a clip that is playing and fold the prompts the user opened. Only
+  // repaint when something the card shows has changed.
+  const sig = JSON.stringify([r.state, r.phase, r.stopReason, r.best, (r.attempts || []).map(
+    (a) => [a.status, a.score, a.clipUrl])]);
+  if (turn.refineSig === sig) return;
+  turn.refineSig = sig;
+  turn.refine = r;
+  if (finished && turn.refineLive) {
+    turn.refineLive = false;
+    turn.content = r.summary;
+    turn.actions = r.proposal ? [r.proposal] : [];
+    persistChat(state.slug);
+  }
+  renderAssistantChat();
+}
+
+/* Puts one attempt's prompt on the scene — the same edit as the Apply card,
+   offered per attempt so any of them can be chosen, not only the best. */
+async function useRefinePrompt(r, attempt) {
+  if (!shotById(r.shotId)) throw new Error("that scene no longer exists");
+  applyBoardEditActions([{tool: "update_shot", shotId: r.shotId, fields: {prompt: attempt.prompt}}]);
+  await saveNow();
+  render();
+  renderAssistantChat();
+  toast(`Scene ${r.number}'s prompt is now attempt ${attempt.n}'s. Render it to see the result.`);
+}
+
+/* The Start card's editable part. The checklist is what every draft is judged
+   against, so it is put in front of the user before any GPU time is spent;
+   edits go straight onto the action, which is what Apply then sends. */
+function renderRefineEditor(action) {
+  const box = el("div", "chat-refine-editor");
+  box.appendChild(el("label", null, "Checks every draft must pass — one per line"));
+  const ta = el("textarea");
+  ta.value = (action.checks || []).join("\n");
+  ta.rows = Math.min(14, Math.max(4, (action.checks || []).length + 1));
+  ta.placeholder = "Empty: the checklist is written when the run starts.";
+  ta.addEventListener("input", () => {
+    action.checks = ta.value.split("\n").map((x) => x.trim()).filter(Boolean);
+  });
+  ta.addEventListener("change", () => persistChat(state.slug));
+  box.appendChild(ta);
+  const row = el("label", "chat-refine-attempts", "Attempts, at most ");
+  const n = el("input");
+  n.type = "number";
+  n.min = "1";
+  n.max = "8";
+  n.value = String(action.maxAttempts);
+  n.addEventListener("input", () => {
+    action.maxAttempts = Math.max(1, Math.min(8, parseInt(n.value, 10) || 1));
+  });
+  n.addEventListener("change", () => persistChat(state.slug));
+  row.appendChild(n);
+  box.appendChild(row);
+  return box;
+}
+
+/* One checklist line with its verdict: a green tick when the clip met it, a red
+   cross when it did not, nothing until a draft has been reviewed. Why it failed
+   is shown only on the per-attempt list. */
+function refineCheckItem(check, verdict, showEvidence) {
+  const li = el("li", "chat-refine-check");
+  const known = verdict && typeof verdict.met === "boolean";
+  const mark = el("span", "chat-refine-mark" + (known ? (verdict.met ? " met" : " unmet") : ""),
+    known ? (verdict.met ? "✓" : "✗") : "·");
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", known ? (verdict.met ? "Met" : "Not met") : "Not reviewed yet");
+  li.appendChild(mark);
+  const failed = known && !verdict.met && showEvidence && verdict.evidence;
+  li.appendChild(el("span", null, failed ? `${check} — ${verdict.evidence}` : check));
+  return li;
+}
+
+function renderRefineBlock(r, turn) {
+  // What the user has opened survives a repaint (see syncRefineTurn).
+  const ui = (turn.refineUi = turn.refineUi || {});
+  const remember = (node, id) => {
+    node.open = !!ui[id];
+    node.addEventListener("toggle", () => { ui[id] = node.open; });
+  };
+  const live = r.state !== "finished";
+  const box = el("div", "chat-refine");
+  box.appendChild(el("div", "chat-refine-head",
+    live ? `Auto-refine · scene ${r.number} — ${r.phase || "working"}`
+         : `Auto-refine · scene ${r.number} — ${{
+             passed: "passed", "max-attempts": "ran out of attempts", "no-change": "nothing left to change",
+             stopped: "stopped", "render-failed": "render failed", error: "error",
+           }[r.stopReason] || "finished"}`));
+  if (r.checks && r.checks.length) {
+    const checks = el("details", "chat-refine-checks");
+    remember(checks, "checks");
+    checks.appendChild(el("summary", null, `Checklist (${r.checks.length}) · pass at ${r.passPercent}%`));
+    // Each item carries the verdict from the latest reviewed attempt, so the
+    // list reads as a scoreboard once a draft has been judged.
+    const judged = (r.attempts || []).filter((a) => (a.results || []).length).pop();
+    const verdicts = new Map(((judged && judged.results) || []).map((x) => [x.check, x]));
+    const ul = el("ul", "chat-refine-list");
+    r.checks.forEach((c) => ul.appendChild(refineCheckItem(c, verdicts.get(c))));
+    checks.appendChild(ul);
+    box.appendChild(checks);
+  }
+  const current = (shotById(r.shotId) || {}).prompt;
+  (r.attempts || []).forEach((a) => {
+    const isBest = r.best === a.n && !live;
+    const row = el("div", "chat-refine-attempt" + (isBest ? " best" : ""));
+    const score = a.score === null || a.score === undefined ? a.status : `${a.score}%`;
+    row.appendChild(el("span", "chat-refine-n", `#${a.n}`));
+    row.appendChild(el("span", "chat-refine-score", score));
+    if (isBest) row.appendChild(el("span", "chat-refine-tag", "best"));
+    box.appendChild(row);
+    if (a.clipUrl) {
+      const play = el("details", "chat-refine-clip");
+      remember(play, `clip${a.n}`);
+      play.appendChild(el("summary", null, "Play draft"));
+      let video = null;
+      // The <video> is only built once opened, so a long run is not N players.
+      const mount = () => {
+        if (video || !play.open) return;
+        video = el("video", "chat-refine-video");
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = "metadata";
+        video.src = a.clipUrl;
+        play.appendChild(video);
+      };
+      play.addEventListener("toggle", () => { mount(); if (!play.open && video) video.pause(); });
+      mount();
+      box.appendChild(play);
+    }
+    if (a.prompt) {
+      const view = el("details", "chat-refine-prompt");
+      remember(view, `prompt${a.n}`);
+      view.appendChild(el("summary", null, isBest ? "Prompt (best)" : "Prompt"));
+      view.appendChild(el("div", "chat-refine-prompt-text", a.prompt));
+      if (a.prompt.trim() === (current || "").trim()) {
+        view.appendChild(el("div", "chat-refine-note", "This is the scene's current prompt."));
+      } else if (!live && a.score !== null && a.score !== undefined) {
+        const use = el("button", "btn btn-sm btn-primary", "Update scene with this prompt");
+        use.addEventListener("click", async () => {
+          use.disabled = true;
+          try { await useRefinePrompt(r, a); }
+          catch (err) { use.disabled = false; toast(`Could not update the scene: ${err.message}`, "error"); }
+        });
+        view.appendChild(use);
+      }
+      box.appendChild(view);
+    }
+    const results = a.results || [];
+    if (results.length) {
+      const unmet = results.filter((x) => !x.met).length;
+      const d = el("details", "chat-refine-unmet");
+      remember(d, `unmet${a.n}`);
+      d.appendChild(el("summary", null,
+        unmet ? `${results.length - unmet} of ${results.length} met · ${unmet} unmet`
+              : `All ${results.length} checks met`));
+      const ul = el("ul", "chat-refine-list");
+      results.forEach((x) => ul.appendChild(refineCheckItem(x.check, x, true)));
+      d.appendChild(ul);
+      box.appendChild(d);
+    }
+  });
+  if (live) {
+    const stop = el("button", "btn btn-sm btn-ghost", "Stop");
+    stop.addEventListener("click", () => runStopRender().catch((e) => toast(e.message, "error")));
+    box.appendChild(stop);
+  }
+  return box;
+}
+
 /* ==========================================================================
    Polling
    ========================================================================== */
@@ -3419,6 +3643,7 @@ async function refreshStatus() {
     const wasStillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
     const wasProjectBatch = !!(state.status && state.status.projectBatch && state.status.projectBatch.active);
     state.status = s;
+    syncRefineTurn(s);
 
     const stillsBusy = !!(s.stills && s.stills.busy);
     if ((s.busy || stillsBusy) && !state.poll) startPolling();

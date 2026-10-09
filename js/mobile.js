@@ -169,7 +169,7 @@ function renderNow() {
     const run = (s.runs || {})[s.currentShotId];
     const sc = sceneOf(s.slug, s.currentShotId);
     st = "running";
-    label = s.operation === "dialogue" ? "Preparing dialogue" : "Rendering";
+    label = s.operation === "dialogue" ? "Preparing dialogue" : s.operation === "refine" ? "Auto-refining" : "Rendering";
     title = boardName(s.slug);
     if (sc) sub = `Scene ${sc.n} of ${sc.total} · ${sc.title}`;
     if (run) {

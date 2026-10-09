@@ -210,6 +210,11 @@ const API = {
     req("GET", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes`),
   adoptSeedTake: (slug, shotId, seed) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes/${seed}/adopt`),
+  // Auto-refine: draft the shot, have the AD's model review the clip, adjust
+  // the prompt, repeat. Progress rides on /api/status's `refine`; the board is
+  // not touched until the user applies the proposed prompt.
+  refine: (slug, shotId, { requirement, maxAttempts, draft, thinking, service } = {}, board) =>
+    req("POST", "/api/refine", { slug, shotId, requirement, maxAttempts, draft, thinking, service, board }),
   deleteSeedTakes: (slug, shotId) =>
     req("DELETE", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/seed-takes`),
 
