@@ -242,6 +242,8 @@ and what Terminal printed.
 
 ## More documentation
 
+- [User guide](docs/USER-GUIDE.md) — a plain-language walkthrough with
+  screenshots: quick start, characters, dialogue, Rewrite and `/refine`.
 - [Advanced setup](docs/ADVANCED-SETUP.md) — installing by hand, building vpipe
   from source, keeping models elsewhere, server options and every setting.
 - [How Storyboard works](docs/REFERENCE.md) — what each part does, the engines,
