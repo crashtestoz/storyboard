@@ -954,7 +954,9 @@ function renderAssistantChat() {
       proposal.appendChild(list);
       if (!turn.applied) {
         const buttons = el("div", "chat-proposal-actions");
-        const apply = el("button", "btn btn-sm btn-primary", "Apply changes");
+        // A refine card starts a run, it doesn't edit the board, so say so.
+        const startsRun = turn.actions.every((a) => a.tool === "refine_shot");
+        const apply = el("button", "btn btn-sm btn-primary", startsRun ? "Start refine" : "Apply changes");
         apply.addEventListener("click", async () => {
           apply.disabled = true;
           const slugBefore = state.slug;

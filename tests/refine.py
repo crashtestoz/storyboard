@@ -242,6 +242,26 @@ class IntentTests(unittest.TestCase):
         self.assertTrue(r["requirement"].startswith("The dog sits frame left"))
         self.assertEqual((r["shotId"], r["maxAttempts"]), ("s3", 5))
 
+    def test_refine_at_the_end_of_a_description_triggers(self):
+        # The wording that was ignored: the problem first, /refine last, a
+        # typo in "attempts", and no draft/render/clip word anywhere.
+        message = ("with scene 3 there are a few continuity issues. first there are no windows in "
+                   "front of the desk like in scene 2. second the actor falls asleep too early. "
+                   "/refine with 5 attepmts")
+        r = self.parse(message, "s1")
+        self.assertEqual((r["shotId"], r["maxAttempts"]), ("s3", 5))
+        self.assertTrue(r["requirement"].startswith("there are a few continuity issues."))
+        self.assertTrue(r["requirement"].endswith("falls asleep too early."))
+        self.assertNotIn("/refine", r["requirement"])
+        self.assertNotIn("attepmts", r["requirement"])
+
+    def test_with_n_attempts_sets_the_limit(self):
+        for text, n in (("/refine scene 2 x with 4 attempts", 4), ("/refine scene 2 x in 6 tries", 6)):
+            self.assertEqual(self.parse(text)["maxAttempts"], n, text)
+
+    def test_a_path_is_not_the_command(self):
+        self.assertIsNone(self.parse("open docs/refine/notes", "s1"))
+
     def test_a_locked_shot_gets_no_card(self):
         board = a_board(2)
         board["shots"][1]["locked"] = True

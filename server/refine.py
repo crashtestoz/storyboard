@@ -59,6 +59,13 @@ _WORDS = r"(?:tries|try|attempts?|times|rounds?|iterations?|passes|pass|renders?
 _COUNT = re.compile(
     rf"\b(?:up to|max(?:imum)?(?: of)?|at most|no more than|stop after|limit(?:ed)? to|after)\s+"
     rf"(\d{{1,2}})\s*{_WORDS}\b|\b(\d{{1,2}})\s*{_WORDS}\s+(?:max|maximum|at most|tops)\b", re.I)
+# "with 5 attempts", "in 3 tries": the count without "up to" in front. Any
+# word starting "att" counts, since "attepmts" is a typo people really make.
+_COUNT_WITH = re.compile(
+    r"\b(?:with|in|using|for|over)\s+(\d{1,2})\s*(?:att\w*|tries|try|rounds?|iterations?|goes|passes)\b", re.I)
+# /refine anywhere in the message, not only first: people describe the
+# problem and then say "/refine". Not part of a path like a/refine.
+_REFINE_CMD = re.compile(r"(?<![\w/])/refine\b:?", re.I)
 _SHOT = re.compile(r"\b(?:scene|shot)s?\s*#?\s*(\d{1,3})\b", re.I)
 _RENDERY = re.compile(r"\b(draft|render|clip|preview|video|take)\b", re.I)
 _REVIEWY = re.compile(r"\b(review|check|compare|look at|watch|inspect|judge|evaluate|critique)\b", re.I)
@@ -71,12 +78,13 @@ _LOOPY = re.compile(r"\b(keep trying|try again|loop|repeat|iterate|over and over
 def wants_refine(message: str) -> bool:
     """Does *message* ask for the draft → review → adjust loop?
 
-    Either the explicit ``/refine`` (or "auto-refine"), or the three steps
-    named together: a draft/render, a review, and an adjustment. A cheap
-    false positive costs one click on Discard, so this leans towards matching.
+    Either the explicit ``/refine`` (or "auto-refine"), anywhere in the
+    message, or the three steps named together: a draft/render, a review, and
+    an adjustment. A cheap false positive costs one click on Discard, so this
+    leans towards matching.
     """
     text = message or ""
-    if re.match(r"\s*/refine\b", text, re.I) or re.search(r"\bauto[- ]?refine\b", text, re.I):
+    if _REFINE_CMD.search(text) or re.search(r"\bauto[- ]?refine\b", text, re.I):
         return True
     if not _RENDERY.search(text):
         return False
@@ -110,13 +118,17 @@ def parse_refine_request(message: str, board: dict[str, Any],
     c = _COUNT.search(message)
     if c:
         attempts = int(c.group(1) or c.group(2))
+    elif (w := _COUNT_WITH.search(message)):
+        attempts = int(w.group(1))
     attempts = max(1, min(attempts, MAX_ATTEMPTS))
     # What the clip should show, without the instructions for running the loop.
-    requirement = re.sub(r"^\s*/refine\b:?", "", message, flags=re.I)
+    requirement = _REFINE_CMD.sub("", message)
     requirement = _COUNT.sub("", requirement)
-    requirement = re.sub(r"^[\s,:.;\-]*(?:for\s+)?(?:scene|shot)s?\s*#?\d{1,3}[\s,:.;\-]*", "",
-                         requirement, flags=re.I)
-    requirement = re.sub(r"^[\s,:.;\-]+", "", requirement).strip()
+    requirement = _COUNT_WITH.sub("", requirement)
+    requirement = re.sub(r"^[\s,:.;\-]*(?:(?:with|for|in|on|about|regarding)\s+)?"
+                         r"(?:scene|shot)s?\s*#?\d{1,3}[\s,:.;\-]*", "", requirement, flags=re.I)
+    requirement = re.sub(r"^[\s,:.;\-]+", "", requirement)
+    requirement = re.sub(r"\s{2,}", " ", requirement).strip()
     return {
         "shotId": shots[number - 1]["id"],
         "number": number,
