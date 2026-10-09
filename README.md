@@ -8,18 +8,232 @@ shot with **MiniMax H3**, a video model that makes picture and sound together.
 ![Storyboard — creators, not workflow engineers](assets/storyboard-infographic.png)
 
 Storyboard is for creators who want to direct a sequence of shots without
-building or debugging a node workflow.
+building or debugging a node workflow. New here? The
+[User guide](docs/USER-GUIDE.md) walks through it with screenshots.
 
-- **Shot-by-shot storytelling** — plan, reorder and refine a complete piece.
-- **Characters that stay the same** — give a character a portrait and a
-  description, and they look the same in every shot.
-- **Dialogue, sound and music** — write spoken lines, clone a character's
-  voice, and add a soundtrack under the finished video.
-- **AI help** — rewrite rough ideas into clear shot prompts, or ask the
-  Storyboard AD (a chat assistant) to review and edit your board.
+## Key features
+
+**Plan**
+
+- **Shot-by-shot storytelling** — a storyboard strip of shots you can add,
+  reorder, rename and lock. Write what stays the same once (scene, look,
+  background sound); each shot only describes what happens.
+- **Prompt guide** — click the logo for framing, camera-movement and dialogue
+  wording you can copy straight into a shot, with diagrams.
+- **Saved prompt versions** — keep and rate versions of a shot prompt, and go
+  back to one that worked.
+
+**Characters, voice and sound**
+
+- **Characters that stay the same** — a portrait and a description keep a
+  character looking the same in every shot.
+- **Cloned voices and dialogue** — attach a voice clip to a character, hear a
+  line before you render the video, and direct the delivery ("tired, quiet").
+  Or let H3 speak the line itself, lip-synced.
+- **Layered sound** — background ambience, per-shot sound accents, and a
+  soundtrack under the finished video that ducks under dialogue.
+
+**Refine with AI**
+
+- **Rewrite** — turn rough words into a clear prompt for the scene, a shot,
+  sound, dialogue or a character. You see a proposal and choose **Use this** or
+  **Discard**; nothing is replaced behind your back.
+- **Storyboard AD** — a chat assistant that knows your whole board. It reviews
+  continuity and proposes edits you can apply or discard.
+- **`/refine`** — the AD renders a draft, checks it against a checklist
+  (green ticks and red crosses show what passed), rewrites the prompt where it
+  fell short, and tries again.
+
+**Render and finish**
+
+- **Draft mode and seed comparison** — fast rough renders to test an idea, and
+  the same shot at several seeds to tell a prompt problem from a bad roll.
+- **Continuity** — start a shot from the last frame of the one before it, or
+  guide it with start/end frames, reference images and style references.
 - **Render, review, assemble** — see what worked and why something failed,
-  then join the shots into one video.
-- **Runs on your own Mac** — nothing is uploaded; your models, your files.
+  render one shot, all shots, or several projects overnight, then join the
+  shots into one video with trims and fades.
+- **Drive it from an AI assistant** — a built-in MCP server lets Claude and
+  other assistants use every feature.
+- **Fully local, or cloud for the AI helper** — video, voices, music and
+  images always run on your Mac. For Rewrite, the Storyboard AD and `/refine`
+  you choose: a local model (Ollama, LM Studio and others) or a cloud one
+  (Claude, OpenAI, Gemini and more). [Details below.](#run-fully-local-or-use-the-cloud)
+- **Your files stay yours** — projects live in a folder on your Mac. Nothing is
+  uploaded unless you pick a cloud AI helper (see below).
+
+## Key features in detail
+
+### Run fully local, or use the cloud
+
+Storyboard has two kinds of AI. The first makes your film: video, speech,
+music and pictures. That **always runs on your Mac**. The second is the
+*language-model helper* behind **Rewrite**, the **Storyboard AD** and
+`/refine`. You choose where that one runs, per project, under
+**Settings → General → Prompt rewriting**. Add as many services as you like and
+switch between them with one click.
+
+**Language model helper (Rewrite, Storyboard AD, `/refine`)**
+
+| Where it runs | Platforms |
+| --- | --- |
+| **Fully local, on your Mac** | [Ollama](https://ollama.com), [LM Studio](https://lmstudio.ai), and any server that speaks the OpenAI chat API, such as llama.cpp, vLLM and oMLX (MLX models work well) |
+| **Another machine on your network** | The same servers, pointed at a URL such as `http://mac-mini.local:8000` |
+| **Cloud** | [Anthropic Claude](https://www.anthropic.com), [OpenAI](https://platform.openai.com), [Google Gemini](https://ai.google.dev), [OpenRouter](https://openrouter.ai), [Groq](https://groq.com), [Mistral](https://mistral.ai) |
+
+- **Fully local means nothing leaves your Mac.** Choose a local model, or
+  *None* to switch the AI helper off. The video, voice, music and image tools
+  need no internet once they are installed.
+- **With a cloud service, the text it works on is sent to that provider**: your
+  scene, cast and shot prompts, and the board the AD is reviewing. If the model
+  can see, pictures are sent too: a shot's reference images, character
+  portraits and style references, plus stills from draft clips during
+  `/refine`. Your finished videos are not sent. A character's voice clip is sent
+  only when you ask the AI to describe that character. Choose a cloud service
+  only for work you are happy to share with it.
+- **Setting one up** is a few fields: pick the service type, the model name and,
+  for cloud, your API key. The key is stored on your Mac, or read from an
+  environment variable if you prefer. Storyboard checks the service is online
+  and that the model exists, and tells you if not.
+- **Pick a model that can see** if you want `/refine`, because it reviews
+  pictures. Most current Claude, OpenAI and Gemini models can, and so can some
+  local models. Check that the one you choose accepts images, or `/refine` will
+  report that the review was unreadable.
+
+**Everything else is local, by design**
+
+| Job | Runs locally with |
+| --- | --- |
+| **Video and picture-with-sound** | MiniMax H3, through [vpipe](https://github.com/tgo-app-dev/vpipe) or [h3.c](https://github.com/antirez/h3.c) (Apple silicon, Metal). Wan 2.2 and LTX-2.5 are optional, experimental engines through vpipe |
+| **Cloned voices** | MOSS-TTS 8B (through vpipe) or Qwen3-TTS. A plain sherpa-onnx voice is available without cloning. Speech engines are *linked by URL*, so one can also run on another machine on your network |
+| **Soundtrack music** | Stable Audio 3 (MLX), or your own audio file |
+| **Create Image** | Krea-2 Turbo (through vpipe or mflux) or Z-Image Turbo (mflux) |
+| **Web research for the AD** (optional) | Any SearXNG-style search engine you run, at a URL you give it |
+
+### `/refine`: fix a shot without the trial and error
+
+AI video is hit and miss. A shot is often *almost* right: an actor on the wrong
+side, a camera that doesn't move, a window that should not be there. The usual
+fix is to edit the prompt, wait half an hour, look, and repeat. `/refine` does
+that loop for you, on cheap drafts, and tells you exactly what it found.
+
+You describe the problem in your own words, in the AD chat:
+
+> `/refine scene 9 there should be no windows in front of the desk, like in
+> scene 7, and Spectral Elias should only fall asleep once he is out of view.
+> Up to 5 attempts.`
+
+Then Storyboard:
+
+1. **Turns your words into a checklist** of up to eight yes/no things a single
+   frame can show. You can edit the list and the number of attempts before it
+   starts. The same list judges every attempt, so attempt 3 is comparable with
+   attempt 1.
+2. **Renders a quick draft** of the shot. Your real clip is never overwritten.
+3. **Reviews stills from the draft** (about one a second) alongside the
+   character portraits, and marks each check **✓ met** or **✗ not met**, with
+   the reason. The score is the share of checks met, counted by the app, not a
+   number the model makes up.
+4. **Rewrites the prompt for the checks that failed**, remembering what earlier
+   attempts already tried, and goes round again, up to your attempt limit.
+
+It stops when every check passes, the attempts run out, it has nothing left to
+change, or you press **Stop**. Your board is not edited. At the end you get the
+best-scoring prompt as a card to apply or discard, plus every attempt's draft
+clip and prompt to compare. After applying, render the shot for real.
+
+**Why it helps:** you decide *what* is wrong and the machine does the repetitive
+trying, using cheap drafts instead of full renders. The ticks and crosses show
+what each attempt fixed, so you can see progress, not just wait. It needs an
+AD model that can look at pictures, and a pass is a strong hint, not a
+guarantee, so watch the clip.
+
+### Troubleshooting with Compare seeds
+
+Every render starts from a random "seed". When a shot looks wrong you can't
+tell whether your *prompt* is the problem or you just had a bad roll of the
+dice. **Compare seeds** answers that. It renders the same shot several times,
+changing only the seed, and shows the takes side by side so you can play them
+together.
+
+- **Most takes share the problem:** the prompt is at fault. Fix the words.
+- **Only some takes have it:** it was the dice. Pick a good take.
+
+Takes are kept beside the shot. The shot's own clip is only replaced when you
+pick one. Each take costs about as long as a normal render, so use it on shots
+that matter. **Delete takes** frees the disk space afterwards.
+
+### Storyboard sketches: one image, in pencil
+
+**Create Image** makes a single picture of a shot's opening frame, from its
+prompt plus the scene and cast descriptions. It is a cheap way to check
+composition, framing and mood before you spend time on video.
+
+In **Settings → Image** you choose the look:
+
+- **Follow project Render Style:** the same look as your video.
+- **Coloured pencil sketch**, or **Black-and-white pencil sketch:** a classic
+  storyboard-panel look. This changes Create Image only, not your videos.
+
+**Size** is *Small* (a fast preview) or *Large* (reference quality, slower, and
+good enough to use as a Start frame or reference image). For moving previews,
+turn on **Draft mode** and then **Sketch preview**: silent, pencil-outline
+clips that render fastest, with the same camera move you'll get in the final.
+Create Image needs one of the image add-ons.
+
+### Rate and save your prompts
+
+Prompts take trial and error, and the words that worked can be lost when a
+tweak makes things worse. Each shot keeps a history of its prompt:
+
+- **Save version** keeps the words on screen. A dropdown (newest first) brings
+  any version back with one click.
+- **Three stars** rate a version, so you can mark the good ones.
+- **Every render saves the prompt it was given**, so a clip you like can always
+  be traced back to the exact words that made it.
+- A shot holds up to 30 versions. When it is full, the oldest, lowest-rated,
+  unstarred one makes room. Versions you rated are kept.
+
+### Build a character, with a cloned voice
+
+A character is made once and reused in every shot, so they stay the same:
+
+1. **Portrait.** Upload one, pick one already in your project, or generate one.
+2. **Description.** Age, build, hair, clothes. The AI can draft this from the
+   portrait.
+3. **Voice description.** How they sound, for example "low, dry, slightly
+   gravelly, unhurried". This is added to every line they speak.
+4. **Voice clip and transcript.** Attach a clean clip of the voice you want, and
+   the words it says (**Transcribe** fills them in). Storyboard clones the
+   voice from this.
+
+Then write a line for the shot and click **Generate** to *hear it in the
+character's cloned voice before any video is rendered*. Change the wording,
+add delivery notes such as "tired, quiet, slight smile" (guidance only, not
+spoken aloud) and re-record in seconds. Takes are trimmed of silence and levelled
+to a consistent volume. Or let MiniMax H3 speak the line itself in the
+character's voice, lip-synced, while it makes the picture. Voices need one of the speech
+add-ons.
+
+### A soundtrack for the finished video
+
+Add one piece of music under the whole cut, separate from the ambient sound
+inside each shot. In **Settings → Soundtrack**, either:
+
+- **Generate** it from a description of genre, instruments, mood and tempo
+  (Stable Audio 3, running on your Mac), optionally steered by a reference
+  recording you have the rights to, or
+- **Use your own audio file**.
+
+Storyboard waits until every shot has a clip so the music is made to the
+**exact length of the finished video** (up to 2 minutes with the small model, 6
+minutes 20 seconds with the medium; longer cuts loop). It then mixes it in
+when the shots are joined, and can **duck the music under dialogue**: the
+volume dips just before each line and returns afterwards. You control the
+volume, how far it ducks and how quickly it recovers. The result is saved with
+the project, so re-assembling reuses it, and a **seed** makes it repeatable.
+**Rewrite** turns a reference such as "like a famous film theme" into a
+description the generator understands.
 
 ## What you need
 
