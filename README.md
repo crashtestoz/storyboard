@@ -126,9 +126,10 @@ You describe the problem in your own words, in the AD chat:
 Then Storyboard:
 
 1. **Turns your words into a checklist** of up to eight yes/no things a single
-   frame can show. You can edit the list and the number of attempts before it
-   starts. The same list judges every attempt, so attempt 3 is comparable with
-   attempt 1.
+   frame can show, and marks the **critical** ones: what you stressed, and what
+   the shot is wrong without. You can edit the list and the number of attempts
+   before it starts, and start any line with `!` to make it critical. The same
+   list judges every attempt, so attempt 3 is comparable with attempt 1.
 2. **Renders a quick draft** of the shot. Your real clip is never overwritten.
 3. **Reviews stills from the draft** (about one a second) alongside the
    character portraits, and marks each check **✓ met** or **✗ not met**, with
@@ -137,8 +138,12 @@ Then Storyboard:
 4. **Rewrites the prompt for the checks that failed**, remembering what earlier
    attempts already tried, and goes round again, up to your attempt limit.
 
-It stops when every check passes, the attempts run out, it has nothing left to
-change, or you press **Stop**. Your board is not edited. At the end you get the
+**Critical checks decide when it stops.** A clip that scores 92% but misses a
+critical check is *not* a pass: the loop keeps going until every critical check
+is met, however well the rest do. If the model has nothing new to change it is
+asked again more firmly, and if the words still can't move, the same prompt is
+tried on a new seed. It also stops when the attempts run out or you press
+**Stop**. Your board is not edited. At the end you get the
 best-scoring prompt as a card to apply or discard, plus every attempt's draft
 clip and prompt to compare. After applying, render the shot for real.
 

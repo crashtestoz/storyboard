@@ -79,7 +79,7 @@ Click **Render this shot**. The card in the strip shows progress. The first rend
 
 Repeat steps 3 and 4 for each new shot, then click **▶ Render all**. When every shot is done, open the **Final Video** tab and click **Download**.
 
-![The Final Video tab with Re-assemble and Download](images/user-guide/output-final-video.png)
+![The Final Video tab with Re-Assemble and Download](images/user-guide/output-final-video.png)
 
 That's the whole loop. The rest of this guide is about making each step better.
 
@@ -108,13 +108,11 @@ On the far right edge is the **Storyboard AD** tab, an assistant you can chat wi
 | --- | --- | --- |
 | 1 | **New** | Starts a new project. |
 | 2 | **Open** | Lists every project on your Mac, with how many shots are rendered. |
-| 3 | **⚙ Settings** | Project and system options. |
-| 4 | **▶ Render all** | Renders every shot that is new or has changed. |
-| 5 | **Batch Render** | Renders several projects one after another, for example overnight. |
-| 6 | **Assemble** | Joins the finished clips into one video. |
-| 7 | **Export Storyboard** | Downloads the project folder as a ZIP (words, pictures and voices, without the rendered video). |
-
-The plain **Export** button next to **Settings** downloads just the storyboard file.
+| 3 | **Export ▾** | Downloads the project as a ZIP. Choose **Export All** (everything, including the rendered clips and the final video) or **Export Setup (no video)** (your words, pictures, voices, prompts and logs, without the video). |
+| 4 | **⚙ Settings** | Project and system options. |
+| 5 | **▶ Render all** | Renders every shot that is new or has changed. |
+| 6 | **Batch Render** | Renders several projects one after another, for example overnight. |
+| 7 | **Re-Assemble** | Joins the finished clips into one video. |
 
 ### The shot strip
 
@@ -373,12 +371,16 @@ You can also write it in plain words: "draft scene 3, review the clip, then adju
 
 **What happens next:**
 
-1. **Checklist.** The AD turns your request into a short list of things a single frame can show (up to eight). You'll see this on a **Start** card. You can edit the list and the number of attempts before you click **Start**. Starting uses your Mac's graphics power, so it never starts by itself.
+1. **Checklist.** The AD turns your request into a short list of things a single frame can show (up to eight), and marks the **critical** ones, the things the shot is wrong without. You'll see this on a **Start** card. You can edit the list and the number of attempts before you click **Start refine**. Start a line with `!` to make it critical. Starting uses your Mac's graphics power, so it never starts by itself.
 2. **Draft.** It renders a quick, rough version of the shot. Your real clip is not touched.
 3. **Review.** It looks at pictures from the draft and marks each check as met or not met.
-4. **Adjust.** For anything that failed, it rewrites the prompt and tries again.
+4. **Adjust.** For anything that failed, it rewrites the prompt and tries again. It is told which checks already passed and to leave the sentences behind them exactly as written, so a fix shouldn't disturb what was working.
 
-It stops when every check passes, when it runs out of attempts (3 by default, at most 8), when it has nothing left to change, or when you click **Stop**.
+It stops when every **critical** check is met, when it runs out of attempts (3 by default, at most 8), or when you click **Stop**. A clip that scores 92% but misses a critical check does not count as a pass, so it keeps going. If the AD has no new idea for the prompt, it is asked again more firmly, and if that fails it tries the same prompt on a new seed.
+
+![The Start card, with the checklist and critical checks marked with !](images/user-guide/refine-start.png)
+
+> **Which checks should be critical?** The things you would reject the shot for, such as the continuity problem you started `/refine` to fix. Keep it to one to three. If everything is critical, nothing is.
 
 #### Reading the results
 
@@ -389,10 +391,12 @@ Each checklist item has a mark beside it:
 | **✓** green tick | The draft met this check. |
 | **✗** red cross | The draft did not meet it. The reason the AD gave is shown next to it. |
 | **·** grey dot | Not reviewed yet. |
+| **critical** tag | A check the run will not stop without. Each attempt also shows how many critical checks it met, such as **1/2 critical**, in red while any are missed. |
+| **new seed** tag | The prompt could not be improved, so that attempt used the same words on a different seed. |
 
 ![A finished /refine run, with ticks and crosses](images/user-guide/refine-result.png)
 
-*An example result.* The top **Checklist** shows how the *latest* attempt did. Every attempt has its own score and its own list, so you can see what each try fixed. Open **Play draft** to watch an attempt, and **Prompt** to read the words it used.
+*An example result.* The top **Checklist** shows how the *latest* attempt did. Every attempt has its own score and its own list, so you can see what each try fixed. Open **Play draft** to watch an attempt, and **Prompt** to read the words it used. **Changes from #N** shows exactly what an attempt changed: words removed are struck through in red and words added are in green. If most of the earlier prompt was rewritten, it says so, which is your cue to check that nothing that was working got lost.
 
 #### Keeping the result
 
@@ -420,6 +424,8 @@ Pictures keep your film looking consistent. They live in the shot editor, below 
 **Tag a reference image** with a name such as `@vr-headset`, then use that tag in your prompt to point at it directly.
 
 ![Style references](images/user-guide/style-references.png)
+
+When you click **+** to choose a style reference, start frame or character picture, the picker shows your project's images twelve at a time, as large thumbnails with their pixel size. Tick the boxes to select several images, or hold **Shift** and click to select a whole range (⌘ or Ctrl-click toggles one); then add them together or delete them in one go. Use **Prev** and **Next** to move through the pages, and **Show … from other projects** to browse pictures from your other projects (picking one copies it in). The files `/refine` and **Compare seeds** make while they work are kept out of the picker.
 
 There's a limit to how many pictures and voice clips one shot can use, and Storyboard checks this before rendering. Characters, style pictures and references all count toward it, so keep only what the shot needs.
 
@@ -462,6 +468,8 @@ Remove frames from the start or end of a shot (24 frames is one second) to cut a
 
 Click **Lock** at the top of the editor when a shot is right. A locked shot can't be edited, re-rendered or changed by Render all, the AD or project-wide settings. Click **Unlock** to change it.
 
+The **All ▾** button beside **Lock** locks or unlocks every scene at once. Choose **Lock all scenes** once a cut is final, or **Unlock all scenes** to open everything up again. Unlocking asks you to confirm first, because **Render all** will then re-render any scene that has changed since it was rendered. A scene that is rendering at that moment is left unlocked.
+
 ---
 
 ## 13. Rendering, reviewing and finishing
@@ -499,14 +507,14 @@ If a render looks suspect, Storyboard says so rather than hiding it. A shot is o
 ### Make the final video
 
 1. Render every shot you want.
-2. Open **Final Video** and click **Re-assemble** (or the **Assemble** button in the top bar).
+2. Open **Final Video** and click **Re-Assemble** (or the **Re-Assemble** button in the top bar).
 3. Click **Download** to save it, or **Open** to view it.
 
 Shots that haven't been rendered are left out, and the video is marked **Incomplete** with the missing shots named. The **Continuity, dialogue & cut** panel has fades, crossfades and audio level settings.
 
 ### Back up or share a project
 
-**Export Storyboard** downloads a ZIP of your words, pictures and voices. It doesn't include the rendered video, so the file stays small. Your projects live in the `storyboard-projects` folder, one folder per project, and you can also copy that folder to back it up.
+**Export ▾** in the top bar downloads the project as a ZIP, with two choices. **Export Setup (no video)** has your words, pictures, voices, prompts and logs, so the file stays small and you can re-render anywhere. **Export All** adds the rendered clips, the final video and the soundtrack, so it can be very large. Your projects live in the `storyboard-projects` folder, one folder per project, and you can also copy that folder to back it up.
 
 ---
 
