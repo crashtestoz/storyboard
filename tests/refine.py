@@ -24,6 +24,7 @@ class DraftBackend:
 
     def __init__(self):
         self.prepared = []   # (prompt, draft flag the render would see)
+        self.seeds = []      # the seed each render was given
 
     def health(self):
         return True, ""
@@ -33,6 +34,7 @@ class DraftBackend:
 
     def prepare(self, shot, project, paths):
         self.prepared.append((shot["prompt"], bool(project["defaults"].get("draft"))))
+        self.seeds.append(shot.get("seed"))
         return JobSpec(shot_id=shot["id"], payload={"draft": project["defaults"].get("draft")},
                        expected_outputs=[paths.abs_dir / "clip.mp4"],
                        frames_dir=paths.abs_frames)
@@ -51,6 +53,7 @@ class FakeReviewer:
         self.revisions = list(revisions or [])
         self.on_judge = on_judge
         self.revise_calls = []
+        self.escalations = []   # the escalate flag of each revise call
 
     def checklist(self, shot, board):
         return ["a dog sits frame left", "it is raining"]
@@ -63,9 +66,24 @@ class FakeReviewer:
         results = [{"check": c, "met": i < met, "evidence": "seen"} for i, c in enumerate(checks)]
         return {"results": results, "overall": "ok", "score": score}
 
-    def revise(self, shot, board, prompt, results, history):
+    def revise(self, shot, board, prompt, results, history, escalate=False):
         self.revise_calls.append((prompt, len(history)))
+        self.escalations.append(escalate)
+        self.last_results = results
         return self.revisions.pop(0) if self.revisions else prompt
+
+
+class ScriptedReviewer(FakeReviewer):
+    """Verdicts given as lists of met flags, one list per attempt, in check order."""
+
+    def __init__(self, verdicts, revisions=None):
+        super().__init__([], revisions)
+        self.verdicts = list(verdicts)
+
+    def judge(self, shot, board, checks, clip, seconds, workdir):
+        flags = self.verdicts.pop(0)
+        results = [{"check": c, "met": f, "evidence": "seen"} for c, f in zip(checks, flags)]
+        return {"results": results, "overall": "ok", "score": refine.percent_met(results)}
 
 
 class RefineLoopTests(unittest.TestCase):
@@ -124,10 +142,81 @@ class RefineLoopTests(unittest.TestCase):
         r = self.refine(FakeReviewer([50]), pass_percent=50)
         self.assertEqual(r["stopReason"], "passed")
 
-    def test_an_unchanged_prompt_ends_the_loop(self):
-        r = self.refine(FakeReviewer([50, 50]), max_attempts=4)
-        self.assertEqual((r["stopReason"], len(r["attempts"])), ("no-change", 1))
-        self.assertIsNone(r["proposal"])
+    def test_an_unchanged_prompt_is_asked_again_then_tried_on_a_new_seed(self):
+        rev = FakeReviewer([50, 50, 50], [])
+        r = self.refine(rev, max_attempts=3)
+        # The model never changes the prompt, but the loop keeps going.
+        self.assertEqual((r["stopReason"], len(r["attempts"])), ("max-attempts", 3))
+        self.assertEqual(rev.escalations, [False, True, False, True])
+        self.assertEqual([a["reseeded"] for a in r["attempts"]], [False, True, True])
+        self.assertIsNone(self.backend.seeds[0] or None)      # the first uses the shot's own
+        self.assertEqual(len(set(self.backend.seeds[1:])), 2)  # then a new seed each time
+
+    def test_a_firmer_second_ask_is_used_when_it_changes_the_prompt(self):
+        class Stubborn(FakeReviewer):
+            def revise(self, shot, board, prompt, results, history, escalate=False):
+                super().revise(shot, board, prompt, results, history, escalate)
+                return "A firm rewrite." if escalate else prompt
+        r = self.refine(Stubborn([50, 100]), max_attempts=3)
+        self.assertEqual(self.backend.prepared[1][0], "A firm rewrite.")
+        self.assertEqual([a["reseeded"] for a in r["attempts"]], [False, False])
+        self.assertEqual(r["stopReason"], "passed")
+
+    # --- critical checks: the run does not stop on a high score with one missed ---
+
+    CHECKS = ["! no windows in front of the desk", "he is asleep at the end"] + \
+             [f"detail {i}" for i in range(10)]
+
+    def test_a_high_score_with_a_missed_critical_check_keeps_going(self):
+        miss = [False] + [True] * 11          # 11 of 12 = 92%, the critical one failed
+        hit = [True] * 12
+        r = self.refine(ScriptedReviewer([miss, miss, hit], ["v2", "v3"]),
+                        checks=self.CHECKS, max_attempts=5)
+        self.assertEqual([a["score"] for a in r["attempts"]], [92, 92, 100])
+        self.assertEqual((r["stopReason"], len(r["attempts"])), ("passed", 3))
+        self.assertTrue(r["attempts"][0]["results"][0]["critical"])
+        self.assertFalse(r["attempts"][0]["results"][1]["critical"])
+        self.assertEqual(r["critical"], [True] + [False] * 11)
+
+    def test_every_critical_met_passes_even_if_others_fail(self):
+        checks = ["! the one that matters"] + [f"detail {i}" for i in range(5)]
+        r = self.refine(ScriptedReviewer([[True] + [False] * 5]), checks=checks, max_attempts=4)
+        self.assertEqual((r["stopReason"], len(r["attempts"])), ("passed", 1))
+        self.assertEqual(r["attempts"][0]["score"], 17)
+
+    def test_without_critical_checks_the_pass_percent_still_decides(self):
+        checks = ["a", "b", "c", "d"]
+        r = self.refine(ScriptedReviewer([[True, True, True, False]]), checks=checks, pass_percent=75)
+        self.assertEqual(r["stopReason"], "passed")
+        r = self.refine(ScriptedReviewer([[True, True, True, False]] * 2, ["v2"]),
+                        checks=checks, max_attempts=2)
+        self.assertEqual(r["stopReason"], "max-attempts")      # 75% is short of the default 100
+
+    def test_the_revision_is_told_which_unmet_checks_are_critical(self):
+        rev = ScriptedReviewer([[False, True], [True, True]], ["v2"])
+        self.refine(rev, checks=["! must", "nice"], max_attempts=2)
+        self.assertEqual([(x["check"], x["critical"]) for x in rev.last_results],
+                         [("must", True), ("nice", False)])
+
+    def test_the_best_attempt_prefers_met_criticals_over_a_higher_score(self):
+        checks = ["! must"] + [f"d{i}" for i in range(4)]
+        verdicts = [[False, True, True, True, True],     # 80%, critical missed
+                    [True, False, False, False, False],  # 20%, critical met -> passes
+                    ]
+        r = self.refine(ScriptedReviewer(verdicts, ["v2"]), checks=checks, max_attempts=3)
+        self.assertEqual((r["best"], r["stopReason"]), (2, "passed"))
+        # and with none passing, the attempt with fewer missed criticals still wins
+        checks2 = ["! a", "! b", "c"]
+        r2 = self.refine(ScriptedReviewer([[False, False, True], [True, False, False]], ["v2"]),
+                         checks=checks2, max_attempts=2)
+        self.assertEqual(r2["best"], 2)
+
+    def test_a_reseeded_winner_is_proposed_with_its_seed(self):
+        rev = ScriptedReviewer([[False], [True]], [])           # prompt never changes
+        r = self.refine(rev, checks=["! must"], max_attempts=2)
+        self.assertEqual(r["stopReason"], "passed")
+        self.assertEqual(r["proposal"]["fields"]["seed"], r["attempts"][1]["seed"])
+        self.assertIn("seed", r["summary"])
 
     def test_the_best_attempt_wins_even_if_a_later_one_is_worse(self):
         r = self.refine(FakeReviewer([50, 0, 50], ["v2", "v3"]), max_attempts=3)
@@ -262,6 +351,23 @@ class IntentTests(unittest.TestCase):
     def test_a_path_is_not_the_command(self):
         self.assertIsNone(self.parse("open docs/refine/notes", "s1"))
 
+    def test_exclamation_marks_a_check_critical(self):
+        texts, flags = refine.split_checks(["! no windows", "  !  ★ he sleeps ", "detail", "", "!"])
+        self.assertEqual((texts, flags), (["no windows", "he sleeps", "detail"], [True, True, False]))
+
+    def test_the_models_critical_flags_become_exclamation_marks(self):
+        raw = [{"check": "no windows", "critical": True}, {"check": "detail", "critical": False},
+               "plain string", {"check": "no windows", "critical": True}]
+        self.assertEqual(refine._clean_checks(raw), ["! no windows", "detail", "plain string"])
+
+    def test_is_pass_follows_the_critical_checks_when_there_are_any(self):
+        ok = {"met": True}
+        bad = {"met": False}
+        self.assertFalse(refine.is_pass([{**bad, "critical": True}, ok, ok, ok], 75, 50))
+        self.assertTrue(refine.is_pass([{**ok, "critical": True}, bad, bad, bad], 25, 100))
+        self.assertTrue(refine.is_pass([ok, ok, bad, ok], 75, 75))
+        self.assertFalse(refine.is_pass([], 0, 1))
+
     def test_a_locked_shot_gets_no_card(self):
         board = a_board(2)
         board["shots"][1]["locked"] = True
@@ -287,6 +393,84 @@ class FakeLLM:
         return self.replies.pop(0)
 
 
+class PickerLibraryTests(unittest.TestCase):
+    """The reference picker lists material to pick from, not a run's working files."""
+
+    def test_refine_review_stills_and_seed_takes_stay_out_of_the_library(self):
+        from server.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(workspace=root, data_dir=root)
+            files = ["proj/refs/logo.png", "proj/refs/car.jpg",
+                     "proj/shots/01/still.png",
+                     "proj/refine-runs/s1/attempt-1/review-1.jpg",
+                     "proj/refine-runs/s1/attempt-2/review-8.jpg",
+                     "proj/seed-takes/s1/seed-0/take.png",
+                     "proj/shots/01/frames/frame-0001.png"]
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"x")
+            listed = sorted(i["path"] for i in store.library(kind="image"))
+            self.assertEqual(listed, ["proj/refs/car.jpg", "proj/refs/logo.png", "proj/shots/01/still.png"])
+
+
+class SeenLLM(FakeLLM):
+    """A FakeLLM that keeps what it was asked."""
+
+    def complete(self, system, user, **kw):
+        self.system, self.user = system, user
+        return super().complete(system, user, **kw)
+
+
+class ReviseRequestTests(unittest.TestCase):
+    """What the revision is told: what to fix, and what must stay."""
+
+    def revise(self, results, escalate=False):
+        llm = SeenLLM(['{"prompt": "Camera: a revised prompt."}'])
+        board = a_board(1)
+        out = refine.Reviewer(llm, Path("."), "the dog is on the left").revise(
+            board["shots"][0], board, "Camera: the old prompt.", results, [], escalate=escalate)
+        return out, llm
+
+    RESULTS = [
+        {"check": "dog frame left", "met": False, "critical": True, "evidence": "dog is centred"},
+        {"check": "it is raining", "met": True, "critical": False, "evidence": "rain in f2"},
+        {"check": "camera pushes in", "met": True, "critical": True, "evidence": "yes"},
+        {"check": "lamp flickers", "met": False, "critical": False, "evidence": "steady"},
+    ]
+
+    def test_the_checks_that_pass_are_listed_to_keep(self):
+        out, llm = self.revise(self.RESULTS)
+        self.assertEqual(out, "Camera: a revised prompt.")
+        met_block = llm.user.split("ALREADY MET (keep these true):")[1].split("\n\n")[0]
+        self.assertIn("- it is raining", met_block)
+        self.assertIn("- camera pushes in", met_block)
+        self.assertNotIn("dog frame left", met_block)
+
+    def test_unmet_checks_are_split_into_critical_and_other(self):
+        _, llm = self.revise(self.RESULTS)
+        unmet = llm.user.split("UNMET CHECKS:")[1].split("ALREADY MET")[0]
+        self.assertLess(unmet.index("CRITICAL (must be fixed)"), unmet.index("OTHER"))
+        self.assertLess(unmet.index("dog frame left"), unmet.index("OTHER"))
+        self.assertGreater(unmet.index("lamp flickers"), unmet.index("OTHER"))
+
+    def test_nothing_met_adds_no_empty_keep_section(self):
+        none_met = [dict(r, met=False) for r in self.RESULTS]
+        _, llm = self.revise(none_met)
+        self.assertNotIn("ALREADY MET", llm.user)
+
+    def test_the_instructions_say_to_leave_working_sentences_alone(self):
+        _, llm = self.revise(self.RESULTS)
+        self.assertIn("ALREADY MET", llm.system)
+        self.assertIn("word for word", llm.system)
+
+    def test_the_firmer_retry_still_protects_the_rest(self):
+        _, llm = self.revise(self.RESULTS, escalate=True)
+        self.assertIn("MUST change the prompt", llm.user)
+        self.assertIn("Leave every other sentence exactly as it is", llm.user)
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg needed to take stills")
 class ReviewerTests(unittest.TestCase):
     def setUp(self):
@@ -308,6 +492,29 @@ class ReviewerTests(unittest.TestCase):
         v = self.judge(llm)
         self.assertEqual(v["score"], 67)
         self.assertEqual(llm.media, [refine.still_count(2.0)])
+
+    def test_the_review_stills_are_deleted_after_the_review(self):
+        # A failed review (unreadable reply) cleans up too.
+        for reply in ('{"results":[{"check":"a","met":true}]}', "not json"):
+            llm = FakeLLM([reply, reply])
+            try:
+                self.judge(llm)
+            except RuntimeError:
+                pass
+            self.assertEqual(list(self.root.glob("review-*.jpg")), [], reply)
+        self.assertTrue((self.root / "clip.mp4").is_file())       # the draft clip stays
+
+    def test_cast_portraits_sent_to_the_judge_are_never_deleted(self):
+        portrait = self.root / "cast.jpg"
+        portrait.write_bytes(b"portrait")
+        import server.refine as r
+        original = r._chat_reference_images
+        r._chat_reference_images = lambda *a, **k: ([portrait], ["Character portrait: Ana"])
+        try:
+            self.judge(FakeLLM(['{"results":[{"check":"a","met":true}]}']), checks=("a",))
+        finally:
+            r._chat_reference_images = original
+        self.assertTrue(portrait.is_file())
 
     def test_a_skipped_check_counts_as_unmet_and_stays_in_the_list(self):
         v = self.judge(FakeLLM(['{"results":[{"check":"a","met":true}]}']))

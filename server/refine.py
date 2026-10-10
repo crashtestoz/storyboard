@@ -157,7 +157,9 @@ def refine_reply(request: dict[str, Any], board: dict[str, Any],
     how = "draft" if request["draft"] else "full-quality"
     if checks:
         listed = ("Here is what each clip will be judged against — edit the checks, or the "
-                  "number of attempts, before you start; the run is only as good as this list.")
+                  "number of attempts, before you start; the run is only as good as this list. "
+                  "Checks marked ! are critical: I keep going until every one is met, "
+                  "however well the rest do.")
     else:
         listed = "I'll write the checklist when the run starts."
     return {
@@ -201,6 +203,55 @@ def percent_met(results: list[dict[str, Any]]) -> int:
     return round(100 * sum(1 for r in results if r.get("met")) / len(results))
 
 
+# --- critical checks ------------------------------------------------------ #
+# A checklist line that starts with "!" is critical: the shot is wrong without
+# it. That is how it is typed on the Start card and how the model's checklist
+# is handed over; it is stripped before the checks reach the judge.
+
+_CRITICAL_LEAD = re.compile(r"^\s*(?:[!★]\s*)+")
+
+
+def split_checks(raw: Any) -> tuple[list[str], list[bool]]:
+    """Checklist lines as typed → (check texts, critical flags), same order."""
+    texts: list[str] = []
+    flags: list[bool] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, str):
+            continue
+        lead = _CRITICAL_LEAD.match(item)
+        text = item[lead.end():].strip() if lead else item.strip()
+        if text:
+            texts.append(text[:240])
+            flags.append(bool(lead))
+    return texts[:MAX_CHECKS], flags[:MAX_CHECKS]
+
+
+def critical_counts(results: list[dict[str, Any]]) -> tuple[int, int]:
+    """(critical checks met, critical checks in total)."""
+    crit = [r for r in results if r.get("critical")]
+    return sum(1 for r in crit if r.get("met")), len(crit)
+
+
+def is_pass(results: list[dict[str, Any]], score: int, pass_percent: int) -> bool:
+    """Is this attempt good enough to stop on?
+
+    When the checklist has critical checks, they alone decide: every one met
+    is a pass, however many of the rest are not, and one missed is never a
+    pass, however high the score. Without any, the share of checks met has to
+    reach *pass_percent*.
+    """
+    met, total = critical_counts(results)
+    if total:
+        return met == total
+    return score >= pass_percent
+
+
+def rank(attempt: dict[str, Any]) -> tuple[int, int, int]:
+    """Sort key for the best attempt: criticals first, then the score."""
+    met, total = critical_counts(attempt.get("results") or [])
+    return (int(met == total), met, attempt.get("score") or 0)
+
+
 def _brief(shot: dict[str, Any], board: dict[str, Any]) -> str:
     wanted = set(shot.get("characterIds") or [])
     cast = [f"- {c.get('name') or 'unnamed'}: {(c.get('description') or '').strip()}"
@@ -222,7 +273,7 @@ def _json(reply: str) -> dict[str, Any]:
 CHECKLIST_SYSTEM = """\
 You turn what a user wants a video clip to show into a checklist for judging \
 the rendered clip from still frames taken about a second apart. Reply with \
-ONLY JSON: {"checks": ["...", "..."]}.
+ONLY JSON: {"checks": [{"check": "...", "critical": true|false}]}.
 - USER REQUEST is the source of truth. When it describes what the clip should \
 show, write one check per concrete statement in it (split compound sentences), \
 in the order things happen. Where the shot prompt disagrees with it, the \
@@ -241,15 +292,26 @@ camera is behind him", "at the end". "Falls asleep while hidden" becomes: \
 before the block he is working, during it he is out of view, after it he is \
 already asleep.
 - Never include dialogue, sound, music or fine motion between frames.
-- Phrase each as a statement that is true when the clip is right.""" % MAX_CHECKS
+- Phrase each as a statement that is true when the clip is right.
+- Set "critical": true on the checks the shot cannot be accepted without: what \
+the user stressed or complained about, and the continuity or story point the \
+shot exists for. Usually one to three. Everything else is false. Never mark \
+every check critical.""" % MAX_CHECKS
 
 
 def _clean_checks(raw: Any) -> list[str]:
+    """The model's checks as lines, critical ones starting "! " (see split_checks)."""
     out: list[str] = []
+    seen: set[str] = set()
     for item in raw if isinstance(raw, list) else []:
+        crit = isinstance(item, dict) and item.get("critical") is True
         text = (item.get("check") if isinstance(item, dict) else item)
-        if isinstance(text, str) and text.strip() and text.strip() not in out:
-            out.append(text.strip()[:240])
+        if not isinstance(text, str):
+            continue
+        texts, flags = split_checks([text])
+        if texts and texts[0] not in seen:
+            seen.add(texts[0])
+            out.append(("! " if crit or flags[0] else "") + texts[0])
     return out[:MAX_CHECKS]
 
 
@@ -274,6 +336,14 @@ You rewrite ONE shot's video prompt so the next render fixes what the last one \
 got wrong. Reply with ONLY JSON: {"prompt": "<the complete revised prompt>"}.
 - Keep the prompt's existing structure, voice and length; change only what the \
 unmet checks need. Do not touch what already works.
+- CRITICAL unmet checks come first: the shot is unusable until they are met. \
+Fix them before anything else, and never trade a met critical check away for \
+another.
+- ALREADY MET lists what the last clip got right. Keep every sentence and \
+phrase that delivers one of those exactly as written, word for word. Edit only \
+the sentences that carry an unmet check, and leave every other sentence \
+untouched. If a met check and an unmet one share a sentence, change only the \
+part that serves the unmet one.
 - Do not repeat a change an earlier attempt already made without success — try \
 a different, more explicit wording (frame-relative placement, an ordered \
 action, what fills the frame).
@@ -281,6 +351,15 @@ action, what fills the frame).
 write only this shot's prompt.
 
 """ + H3_VISUAL_RULES
+
+
+ESCALATE_NOTE = """
+
+The last rewrite came back unchanged, but the unmet checks above are still \
+unmet, so you MUST change the prompt now. Rewrite the sentence that carries the \
+critical check: say it plainly and literally, and describe what is on screen \
+instead (what fills that part of the frame), not what is absent. Leave every \
+other sentence exactly as it is."""
 
 
 class Reviewer:
@@ -312,6 +391,18 @@ class Reviewer:
                              count=still_count(seconds), edge=JUDGE_STILL_EDGE)
         if not stills:
             raise RuntimeError("Could not take stills from the drafted clip (is ffmpeg installed?).")
+        try:
+            return self._judge_stills(shot, board, checks, stills, seconds)
+        finally:
+            # The stills are evidence for this one review, not material to keep:
+            # left in the project they pile up eight an attempt and turn up
+            # wherever the project's images are listed. (The cast portraits sent
+            # alongside are the project's own files and are never touched.)
+            for path, _ in stills:
+                path.unlink(missing_ok=True)
+
+    def _judge_stills(self, shot: dict[str, Any], board: dict[str, Any], checks: list[str],
+                      stills: list[tuple[Path, float]], seconds: float) -> dict[str, Any]:
         portraits, portrait_labels = _chat_reference_images(
             {"shots": [shot], "characters": board.get("characters") or []},
             shot.get("id"), self.data_dir)
@@ -347,16 +438,26 @@ class Reviewer:
     # -- 3 -------------------------------------------------------------- #
 
     def revise(self, shot: dict[str, Any], board: dict[str, Any], prompt: str,
-               results: list[dict[str, Any]], history: list[dict[str, Any]]) -> str:
+               results: list[dict[str, Any]], history: list[dict[str, Any]],
+               escalate: bool = False) -> str:
         tried = "\n\n".join(
             f"Attempt {a['n']} ({a['score']}% met) prompt:\n{a['prompt']}\n"
             f"Unmet: " + "; ".join(r["check"] for r in a["results"] if not r["met"])
             for a in history)
-        unmet = "\n".join(f"- {r['check']}  (seen: {r['evidence'] or 'no evidence given'})"
-                          for r in results if not r["met"])
+
+        def lines(rows):
+            return "\n".join(f"- {r['check']}  (seen: {r['evidence'] or 'no evidence given'})"
+                             for r in rows)
+        critical = [r for r in results if not r["met"] and r.get("critical")]
+        other = [r for r in results if not r["met"] and not r.get("critical")]
+        unmet = ((f"CRITICAL (must be fixed):\n{lines(critical)}\n\n" if critical else "")
+                 + (f"OTHER:\n{lines(other)}" if other else "")).strip()
+        met = "\n".join(f"- {r['check']}" for r in results if r["met"])
         user = (f"CURRENT PROMPT:\n{prompt}\n\nUNMET CHECKS:\n{unmet}\n\n"
-                f"{_brief(shot, board)}\n\nUSER REQUEST:\n{self.requirement or '(none)'}"
-                + (f"\n\nEARLIER ATTEMPTS:\n{tried}" if tried else ""))
+                + (f"ALREADY MET (keep these true):\n{met}\n\n" if met else "")
+                + f"{_brief(shot, board)}\n\nUSER REQUEST:\n{self.requirement or '(none)'}"
+                + (f"\n\nEARLIER ATTEMPTS:\n{tried}" if tried else "")
+                + (ESCALATE_NOTE if escalate else ""))
         reply = self.service.complete(REVISE_SYSTEM, user, timeout=MODEL_TIMEOUT)
         revised = _json(reply).get("prompt")
         return revised.strip() if isinstance(revised, str) else ""

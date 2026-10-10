@@ -1482,13 +1482,16 @@ class Orchestrator:
 
         Each attempt renders (a draft, unless *draft* is False) into its own
         folder beside the shot, then *reviewer* — the AD's model — answers a
-        fixed checklist from stills of the clip. The loop stops when
-        *pass_percent* of the checks are met, after *max_attempts* renders,
-        when the model has nothing further to change, on Stop, or on an
-        error. The board is never edited: the best prompt comes back as a
-        proposal, and applying it is the user's call. *checks*, when given
-        (the user's own, edited on the Start card), replace the checklist the
-        model would have written.
+        fixed checklist from stills of the clip. A check written with a leading
+        "!" is critical. The loop stops when every critical check is met (or,
+        with none marked, when *pass_percent* of the checks are met), after
+        *max_attempts* renders, on Stop, or on an error. A model with nothing
+        to change is asked again more firmly, then the same prompt is tried
+        on a new seed, so the loop does not give up while attempts remain.
+        The board is never edited: the best prompt comes back as a proposal,
+        and applying it is the user's call. *checks*, when given (the user's
+        own, edited on the Start card), replace the checklist the model would
+        have written.
         """
         if self.busy:
             raise RuntimeError("a render is already running")
@@ -1508,8 +1511,7 @@ class Orchestrator:
             raise RuntimeError("this shot has no prompt yet")
         max_attempts = max(1, min(int(max_attempts or 0), refining.MAX_ATTEMPTS))
         pass_percent = max(1, min(int(pass_percent or 0), 100))
-        checks = [c.strip()[:240] for c in checks or [] if isinstance(c, str) and c.strip()]
-        checks = checks[:refining.MAX_CHECKS]
+        checks, critical = refining.split_checks(checks)
 
         root = self.refine_dir(slug, shot_id)
         if root.exists():
@@ -1530,7 +1532,8 @@ class Orchestrator:
             "passPercent": pass_percent, "draft": draft,
             "state": "starting",
             "phase": "Starting" if checks else "Writing the checklist",
-            "checks": list(checks), "attempts": [], "stopReason": "", "stopDetail": "",
+            "checks": list(checks), "critical": list(critical),
+            "attempts": [], "stopReason": "", "stopDetail": "",
             "best": None, "summary": "", "proposal": None,
         }
 
@@ -1541,7 +1544,7 @@ class Orchestrator:
         def work() -> None:
             try:
                 self._refine_loop(slug, shot_id, idx, reviewer, root, note,
-                                  max_attempts, pass_percent, draft, checks)
+                                  max_attempts, pass_percent, draft, checks, critical)
             except Exception as exc:  # noqa: BLE001 - reported to the UI
                 note(stopReason="error", stopDetail=f"{type(exc).__name__}: {exc}")
             finally:
@@ -1557,14 +1560,16 @@ class Orchestrator:
         return self.status()
 
     def _refine_loop(self, slug, shot_id, idx, reviewer, root, note,
-                     max_attempts, pass_percent, draft, checks) -> None:
+                     max_attempts, pass_percent, draft, checks, critical) -> None:
         board = self.store.load(slug)
         shot = board["shots"][idx]
         if not checks:
             note(phase="Writing the checklist")
-            checks = reviewer.checklist(shot, board)
-            note(checks=checks)
+            checks, critical = refining.split_checks(reviewer.checklist(shot, board))
+            note(checks=checks, critical=critical)
         prompt = shot["prompt"]
+        seed = None       # None: the shot's own; set once the prompt alone stops helping
+        reseeded = False
         history: list[dict[str, Any]] = []
         for n in range(1, max_attempts + 1):
             if self._cancel.is_set():
@@ -1578,12 +1583,13 @@ class Orchestrator:
                 self._queued_because[rid] = f"auto-refine attempt {n} of {max_attempts}"
             attempt: dict[str, Any] = {"n": n, "prompt": prompt, "score": None, "results": [],
                                        "overall": "", "clipUrl": None, "status": "rendering",
-                                       "reason": ""}
+                                       "reason": "", "reseeded": reseeded, "seed": seed}
             with self._lock:
                 self._refine["attempts"].append(attempt)
             note(state="rendering", phase=f"Attempt {n} of {max_attempts}: rendering a "
                                            f"{'draft' if draft else 'full-quality'} clip")
-            clip = self._refine_render(slug, shot_id, idx, prompt, root / f"attempt-{n}", run, draft)
+            clip = self._refine_render(slug, shot_id, idx, prompt, root / f"attempt-{n}", run, draft,
+                                       seed)
             if self._cancel.is_set():
                 note(stopReason="stopped")
                 return
@@ -1598,11 +1604,13 @@ class Orchestrator:
             seconds = refining.clip_seconds(
                 clip, max(int(board["shots"][idx].get("frames") or 0), 1) / 24.0)
             verdict = reviewer.judge(shot, board, checks, clip, seconds, clip.parent)
+            for i, r in enumerate(verdict["results"]):
+                r["critical"] = bool(i < len(critical) and critical[i])
             with self._lock:
                 attempt.update(status="reviewed", score=verdict["score"],
                                results=verdict["results"], overall=verdict["overall"])
             history.append(dict(attempt))
-            if verdict["score"] >= pass_percent:
+            if refining.is_pass(verdict["results"], verdict["score"], pass_percent):
                 note(stopReason="passed")
                 return
             if n == max_attempts:
@@ -1614,12 +1622,22 @@ class Orchestrator:
             note(state="adjusting", phase=f"Attempt {n} of {max_attempts}: adjusting the prompt")
             revised = reviewer.revise(shot, board, prompt, verdict["results"], history[:-1])
             if not revised or revised.strip() == prompt.strip():
-                note(stopReason="no-change",
-                     stopDetail="The model had nothing further to change in the prompt.")
-                return
+                # A critical check is still unmet, so giving up is wrong. Ask
+                # once more, firmly; if the words still cannot move, the same
+                # prompt on a different seed is a different roll of the dice.
+                note(phase=f"Attempt {n} of {max_attempts}: asking for a firmer rewrite")
+                revised = reviewer.revise(shot, board, prompt, verdict["results"],
+                                          history[:-1], escalate=True)
+            reseeded = False
+            if not revised or revised.strip() == prompt.strip():
+                base = int(shot.get("seed") or 0)
+                seed = (base + 7919 * n) % 2_147_483_647
+                reseeded = True
+                revised = prompt
             prompt = revised
 
-    def _refine_render(self, slug, shot_id, idx, prompt, attempt_dir, run, draft) -> Path | None:
+    def _refine_render(self, slug, shot_id, idx, prompt, attempt_dir, run, draft,
+                       seed=None) -> Path | None:
         """Render one attempt into *attempt_dir*; its clip, or None (see run.reason)."""
         board = self.store.load(slug)
         shots = board["shots"]
@@ -1627,6 +1645,8 @@ class Orchestrator:
         # their draft setting and their status as they were.
         shot = copy.deepcopy(shots[idx])
         shot["prompt"] = prompt
+        if seed is not None:
+            shot["seed"] = seed
         board["defaults"] = {**(board.get("defaults") or {}), "draft": draft}
         with self._lock:
             self._current = run.shot_id
@@ -1675,16 +1695,19 @@ class Orchestrator:
                 if a["status"] in ("rendering", "reviewing"):
                     a["status"] = "interrupted"
             reviewed = [a for a in r["attempts"] if a["score"] is not None]
-            best = max(reviewed, key=lambda a: (a["score"], a["n"]), default=None)
+            best = max(reviewed, key=lambda a: (*refining.rank(a), a["n"]), default=None)
+            has_critical = any(refining.critical_counts(a["results"])[1] for a in reviewed)
             reason = r["stopReason"] or "stopped"
             r["stopReason"], r["state"], r["phase"] = reason, "finished", ""
             r["best"] = best["n"] if best else None
             name = f"Scene {r['number']}"
             scores = ", ".join(f"{a['n']}: {a['score']}%" for a in reviewed) or "none reviewed"
             lead = {
-                "passed": f"{name} passed its checklist on attempt {reviewed[-1]['n'] if reviewed else '?'}.",
+                "passed": f"{name} {'met every critical check' if has_critical else 'passed its checklist'}"
+                          f" on attempt {reviewed[-1]['n'] if reviewed else '?'}.",
                 "max-attempts": f"{name} used all {r['maxAttempts']} attempts without meeting "
-                                f"{r['passPercent']}% of its checks.",
+                                + ("every critical check." if has_critical
+                                   else f"{r['passPercent']}% of its checks."),
                 "no-change": f"{name}: the model had nothing further to change.",
                 "stopped": f"{name}: stopped.",
                 "render-failed": f"{name}: a draft render failed — {r['stopDetail'] or 'see the render log'}.",
@@ -1692,11 +1715,14 @@ class Orchestrator:
             }.get(reason, f"{name}: finished.")
             text = f"{lead} Scores by attempt — {scores}."
             first = reviewed[0] if reviewed else None
-            if best and first and best["n"] != first["n"] and best["score"] > first["score"]:
-                r["proposal"] = {"tool": "update_shot", "shotId": r["shotId"],
-                                 "fields": {"prompt": best["prompt"]}}
-                text += (f" Attempt {best['n']}'s prompt scored best; apply it to the shot, "
-                         "then render for real.")
+            if best and first and best["n"] != first["n"] and refining.rank(best) > refining.rank(first):
+                fields = {"prompt": best["prompt"]}
+                if best.get("seed") is not None:
+                    fields["seed"] = best["seed"]
+                r["proposal"] = {"tool": "update_shot", "shotId": r["shotId"], "fields": fields}
+                text += (f" Attempt {best['n']}'s prompt scored best"
+                         + (f" on seed {best['seed']}, which is applied with it" if "seed" in fields else "")
+                         + "; apply it to the shot, then render for real.")
             elif best:
                 text += " The shot's own prompt scored as well as any revision, so there is nothing to apply."
             r["summary"] = text

@@ -285,12 +285,28 @@ The loop, all on the AD's own model (a local vision model is fine):
 3. **Review** — four stills from the clip, plus the shot's cast portraits, go to
    the model, which answers met / not met per check. The score is the share
    met, computed by the app, not a number the model invents.
-4. **Adjust** — the unmet checks, and what earlier attempts already tried, go
-   back to the model to rewrite the shot's prompt. Then back to 2.
+4. **Adjust** — the unmet checks (critical ones first), the checks that already
+   passed ("keep these true"), and what earlier attempts already tried go back
+   to the model to rewrite the shot's prompt, with an instruction to leave every
+   sentence that delivers a passing check exactly as written. Then back to 2.
+   The model is trusted to do that, not forced, so each attempt after the first
+   shows a word-level diff against the one before it, and a warning when less
+   than 60% of the earlier words survived.
 
-It stops when every check is met, after the attempt limit (default 3, at most
-8; say "up to N attempts" / "stop after N tries"), when the model has nothing
-further to change, on **Stop**, or on an error. Progress, per-attempt scores,
+It stops when every critical check is met (see below), after the attempt limit
+(default 3, at most 8; say "up to N attempts", "with N attempts" or "stop after
+N tries"), on **Stop**, or on an error. A model that has nothing to change is
+asked once more, firmly; if the prompt still cannot move, the same prompt is
+rendered on a new seed, so the loop does not give up while attempts remain.
+
+**Critical checks.** A checklist line starting with `!` is critical, and the
+checklist the model writes marks the ones the user stressed. Critical checks
+alone decide the run: all met is a pass whatever the rest score, and one missed
+is never a pass, even at 92%. With none marked, the share of checks met must
+reach the pass level (100% by default). The best attempt is the one with the
+most critical checks met, then the highest score. Revisions are told to fix the
+critical misses first, and an attempt that only worked on a new seed is
+proposed with that seed. Progress, per-attempt scores,
 unmet checks and a **Watch** link for each draft clip appear live in the chat.
 **The board is not edited**: the run ends with the best-scoring prompt as an
 ordinary Apply/Discard card (if no revision beat your own prompt, there is
