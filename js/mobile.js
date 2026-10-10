@@ -229,6 +229,15 @@ function downloadLink(label, url) {
   return a;
 }
 
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm)$/i;
+
+/* Plays a clip in the page's own player — no download. */
+function playButton(label, url, title) {
+  const b = el("button", "btn btn-sm", `▶ ${label}`);
+  b.addEventListener("click", (e) => { e.stopPropagation(); openPlayer(url, title); });
+  return b;
+}
+
 function actionButton(label, onClick, primary) {
   const b = el("button", `btn btn-sm${primary ? " btn-primary" : ""}`, label);
   b.disabled = gpuBusy();
@@ -242,8 +251,13 @@ function sceneActions(raw, n) {
     actionButton("▶ Render", () => startRender([raw.id], `Render scene ${n}?`), true),
     actionButton("✦ Create images", () => startStills(raw.id, n))
   );
-  (raw.outputs || []).forEach((url, i, all) =>
-    box.appendChild(downloadLink(all.length > 1 ? `Clip ${i + 1}` : "Clip", url)));
+  const title = raw.title || `Scene ${n}`;
+  (raw.outputs || []).forEach((url, i, all) => {
+    const name = all.length > 1 ? `Clip ${i + 1}` : "Clip";
+    // Watch it here first; the download stays for saving it to the phone.
+    if (VIDEO_EXT.test(url.split("?")[0])) box.appendChild(playButton(`Play ${name.toLowerCase()}`, url, title));
+    box.appendChild(downloadLink(name, url));
+  });
   if (raw.thumb) box.appendChild(downloadLink("Frame", raw.thumb));
   for (const [phase, still] of Object.entries(raw.stills || {})) {
     if (still && still.url) box.appendChild(downloadLink(`Image ${phase}`, still.url));
@@ -394,12 +408,16 @@ function renderPlay() {
   $("btnPlay").hidden = !url;
 }
 
-function openPlayer() {
-  const url = state.board && state.board.finalVideo && state.board.finalVideo.url;
+/* The full-screen player: the assembled video by default, or any clip's URL. */
+function openPlayer(url, title) {
+  if (typeof url !== "string") {
+    url = state.board && state.board.finalVideo && state.board.finalVideo.url;
+    title = boardName(state.slug);
+  }
   if (!url) return;
   const v = $("playerVideo");
   if (v.dataset.src !== url) { v.src = url; v.dataset.src = url; }
-  $("playerTitle").textContent = boardName(state.slug);
+  $("playerTitle").textContent = title || "";
   $("player").hidden = false;
   v.play().catch(() => {}); // a tap started this, so iOS allows sound
 }
@@ -454,7 +472,7 @@ function wire() {
   $("mBatch").addEventListener("click", openBatch);
   $("mRefresh").addEventListener("click", () => refreshAll());
 
-  $("btnPlay").addEventListener("click", openPlayer);
+  $("btnPlay").addEventListener("click", () => openPlayer());
   $("playerClose").addEventListener("click", closePlayer);
 
   $("batchCancel").addEventListener("click", () => ($("batchSheet").hidden = true));

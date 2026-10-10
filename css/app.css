@@ -1048,10 +1048,6 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 /* --- stills --------------------------------------------------------------- */
-.scene-refgen { margin-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
-.scene-refgen textarea { width: 100%; box-sizing: border-box; resize: vertical; }
-.scene-refgen-row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
-.scene-refgen-row input { flex: 1; min-width: 0; }
 .cast-generate { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); }
 
 .stills-status {
@@ -1418,7 +1414,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 .editor-head {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
   margin-bottom: var(--sp-3);
 }
 
@@ -1592,6 +1589,108 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
 }
 
 .pick-project { color: var(--text-faint); }
+.pick-dims { float: right; font-variant-numeric: tabular-nums; }
+
+/* The picker: large thumbnails that show the whole image, a page at a time. */
+#pickerGrid:not(.picker-list) {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  /* Rows keep their natural height and the grid scrolls: cards clip their
+     content (overflow hidden), so left to share the space they would shrink
+     and cut off the name and size line. */
+  grid-auto-rows: max-content;
+  align-content: start;
+}
+#pickerGrid:not(.picker-list) .pick img {
+  aspect-ratio: 3 / 2;
+  object-fit: contain;
+  background: var(--bg-sunken);
+}
+/* A header dropdown: Export ▾ */
+.menu-wrap { position: relative; display: inline-block; }
+.menu-pop {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  width: 21em;
+  padding: var(--sp-1);
+  background: var(--panel-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.menu-pop[hidden] { display: none; }
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--panel-hover); }
+.menu-item-title { display: block; font-weight: 600; }
+.menu-item-hint { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-faint); line-height: 1.35; }
+
+/* Tick boxes on thumbnails, and the bar that appears once something is ticked. */
+.pick-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: rgba(10, 13, 17, 0.72);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+}
+.pick-check input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: var(--accent); }
+.pick.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+/* Shift-clicking a range must not also highlight text across the grid. */
+#pickerGrid .pick { user-select: none; -webkit-user-select: none; }
+.modal-select {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--border);
+  background: var(--panel-raised);
+}
+.modal-select[hidden] { display: none; }
+.modal-select .sel-count { font-weight: 600; margin-right: auto; }
+.picker-gen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-raised);
+}
+.picker-gen[hidden] { display: none; }
+.picker-gen textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.picker-gen-row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+.picker-gen-row input { flex: 1; min-width: 0; }
+.modal-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.modal-pager[hidden] { display: none; }
+.modal-pager .pager-status { min-width: 12em; text-align: center; font-variant-numeric: tabular-nums; }
+.modal-pager .pager-others { margin-left: auto; }
+.modal-pager .pager-note { flex-basis: 100%; font-size: var(--fs-xs); color: var(--text-faint); }
 
 .pick-group-header {
   grid-column: 1 / -1;
@@ -1769,6 +1868,11 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
    choosing a character portrait look like a dead click. */
 #castEditor { z-index: 100; }
 #picker     { z-index: 120; }
+/* Under the seed comparison, which opens from inside it. */
+#troubleDialog { z-index: 95; }
+.trouble-card { width: min(640px, 100%); }
+.trouble-body { display: block; }
+.trouble-body .panel { margin: 0; border: 0; padding: 0; background: none; }
 
 .field-action-head {
   display: flex;
@@ -2675,13 +2779,25 @@ textarea.ta-compact {
 
 /* Length check (Parameters card): is this duration long enough for the
    prompt's actions and dialogue? */
-.length-check {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--border);
+.duration-control { display: flex; align-items: center; gap: var(--sp-2); }
+.duration-control select { flex: 1; min-width: 0; }
+.length-check { position: relative; display: inline-flex; flex: none; }
+.length-btn { white-space: nowrap; }
+/* The estimate, shown on the button: too short / tight / long enough. */
+.length-btn.length-short, .length-btn.length-tight, .length-btn.length-ok { font-weight: 600; }
+.length-pop {
+  position: fixed;
+  z-index: 130;
+  padding: var(--sp-3);
+  background: var(--panel-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  max-height: 70vh;
+  overflow-y: auto;
 }
-.length-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
-.length-title { font-size: var(--fs-sm); color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+.length-pop[hidden] { display: none; }
+.length-pop .length-again { margin-top: var(--sp-2); }
 .length-summary {
   margin-top: var(--sp-2);
   padding: var(--sp-2);
@@ -2808,6 +2924,20 @@ textarea.ta-compact {
 .chat-refine-mark { flex: none; width: 1.1em; text-align: center; font-weight: 700; color: var(--text-dim); }
 .chat-refine-mark.met { color: var(--ok); }
 .chat-refine-mark.unmet { color: var(--err); }
+.chat-refine-diff-text { color: var(--text-dim); }
+.chat-refine-diff-text .diff-add { background: var(--ok-ghost); color: var(--ok); text-decoration: none; }
+.chat-refine-diff-text .diff-del { background: var(--err-ghost); color: var(--err); }
+.chat-refine-warn { color: var(--warn); margin: 0.3em 0; }
+.chat-refine-crit {
+  flex: none;
+  font-size: 0.75em;
+  padding: 0 0.45em;
+  border-radius: 999px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+.chat-refine-attempt .chat-refine-score.short { color: var(--err); }
+
 .chat-refine-tag {
   font-size: 0.8em;
   padding: 0 0.5em;

@@ -129,7 +129,9 @@ const API = {
   renameBoard: (slug, name) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/rename`, { name }),
   exportUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export`,
-  exportZipUrl: (slug) => `/api/boards/${encodeURIComponent(slug)}/export.zip`,
+  // Everything the project is made of; all=true also includes the rendered video.
+  exportZipUrl: (slug, all = false) =>
+    `/api/boards/${encodeURIComponent(slug)}/export.zip${all ? "?video=1" : ""}`,
 
   // Saved to server-config.json; takes effect on the next restart, not
   // immediately — see restartServer.
@@ -250,6 +252,8 @@ const API = {
 
   // Freeze one shot against edits, renders and project-setting changes (or
   // release it). Returns {board, stale}, the server's copy after the change.
+  lockAll: (slug, locked) =>
+    req("POST", `/api/boards/${encodeURIComponent(slug)}/lock-all`, { locked }),
   lockShot: (slug, shotId, locked) =>
     req("POST", `/api/boards/${encodeURIComponent(slug)}/shots/${encodeURIComponent(shotId)}/lock`, { locked }),
 

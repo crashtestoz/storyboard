@@ -35,7 +35,20 @@
 
       <button class="btn btn-ghost btn-sm" id="btnNewBoard" title="New storyboard">New</button>
       <button class="btn btn-ghost btn-sm" id="btnOpen" title="Open a storyboard">Open</button>
-      <button class="btn btn-ghost btn-sm" id="btnExport" title="Download this storyboard">Export</button>
+      <span class="menu-wrap" id="exportWrap">
+        <button class="btn btn-ghost btn-sm" id="btnExport" aria-haspopup="menu" aria-expanded="false"
+          title="Download this project">Export ▾</button>
+        <div class="menu-pop" id="exportMenu" role="menu" hidden>
+          <button class="menu-item" id="btnExportAll" role="menuitem" type="button">
+            <span class="menu-item-title">Export All</span>
+            <span class="menu-item-hint">Everything, including the rendered clips and the final video. Can be large.</span>
+          </button>
+          <button class="menu-item" id="btnExportSetup" role="menuitem" type="button">
+            <span class="menu-item-title">Export Setup (no video)</span>
+            <span class="menu-item-hint">The storyboard, reference images and voices, prompts and logs. Small.</span>
+          </button>
+        </div>
+      </span>
       <button class="btn btn-ghost btn-sm" id="btnSettings" title="Project settings">⚙ Settings</button>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
 
@@ -58,9 +71,7 @@
       <button class="btn btn-ghost" id="btnBatchRender"
         title="Render several projects in sequence, e.g. overnight">☰ Batch Render</button>
       <button class="btn btn-ghost" id="btnAssemble"
-        title="Join the rendered clips into one video">⧉ Assemble</button>
-      <button class="btn btn-ghost" id="btnExportFolder"
-        title="Download this project's folder as a ZIP — storyboard, reference images and voices, prompts and logs, without rendered video">⇩ Export Storyboard</button>
+        title="Join the rendered clips into one video">⧉ Re-Assemble</button>
     </header>
 
 
@@ -81,9 +92,12 @@
       <section class="panel">
         <div class="pane-head pane-head-with-note">
           <div class="card-heading"><span class="card-heading-title">Render style</span><span class="card-heading-desc">reused in every shot</span></div>
+          <div class="header-spacer"></div>
+          <span id="renderStyleWandSlot"></span>
         </div>
         <textarea id="renderStyle" rows="3"
           placeholder="e.g. Photorealistic cinematic live action, natural textures and lighting."></textarea>
+        <div class="proposal-slot" id="renderStyleProposalSlot"></div>
         <div class="field-note">Applied to video generation together with the Scene description. Create Image follows this style unless its image setting overrides it.</div>
       </section>
 
@@ -194,11 +208,28 @@
       <div class="modal-head">
         <span id="pickerTitle">Choose an image</span>
         <div class="header-spacer"></div>
+        <button class="btn btn-sm" id="pickerGenerate" type="button" hidden
+          title="Make a reference image of a prop or a location from a description">✦ Generate image…</button>
         <button class="btn btn-sm" id="pickerUpload">Upload new…</button>
         <button class="btn btn-ghost btn-sm" id="pickerClose">Close</button>
       </div>
+      <div class="picker-gen" id="pickerGen" hidden></div>
       <div class="modal-body" id="pickerGrid"></div>
+      <div class="modal-select" id="pickerSelect" hidden></div>
+      <div class="modal-pager" id="pickerPager" hidden></div>
       <div class="modal-foot" id="pickerFoot"></div>
+    </div>
+  </div>
+
+  <div id="troubleDialog" class="modal" hidden>
+    <div class="modal-card trouble-card">
+      <div class="modal-head">
+        <span id="troubleTitle">Troubleshooting</span>
+        <span class="hint-inline" id="troubleSub"></span>
+        <div class="header-spacer"></div>
+        <button class="btn btn-ghost btn-sm" id="troubleClose">Close</button>
+      </div>
+      <div class="modal-body trouble-body" id="troubleBody"></div>
     </div>
   </div>
 

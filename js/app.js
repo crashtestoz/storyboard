@@ -14,8 +14,6 @@
 "use strict";
 
 const state = {
-  // Scene "Generate image…" forms, by shot id: {open, kind, name, description}.
-  sceneRefGen: {},
   slug: null,
   board: null,
   boards: [],
@@ -52,6 +50,11 @@ const state = {
   // clicked. Cleared the moment someone clicks a different shot themselves,
   // so inspecting an earlier shot mid-batch does not get yanked away.
   followRender: true,
+  // Set when the selection moves by itself (page load, or following a render):
+  // the next strip paint scrolls the timeline to the selected card. Never set
+  // by a click, and never on an ordinary repaint, so hand-scrolling the strip
+  // is left alone.
+  scrollStripToSelected: false,
   // A render may be preceded by several sequential speech-engine calls.
   dialoguePreparing: false,
   // Browser-session conversations, separated by board. Proposed edits remain
@@ -1539,6 +1542,8 @@ function setBoard(slug, board, stale) {
   // the previous one's "changed since render" marks on screen.
   state.stale = stale || { shots: {}, final: "" };
   state.selectedId = board.shots.length ? board.shots[0].id : null;
+  state.scrollOnLoad = true;        // the first status poll may find a render to go to
+  state.followRender = true;
   state.dirty = false;
   $("#saveState").textContent = "saved";
   render();
@@ -1703,6 +1708,7 @@ function wireChrome() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("#settings").hidden) $("#settings").hidden = true;
     if (e.key === "Escape" && !$("#helpDialog").hidden) $("#helpDialog").hidden = true;
+    if (e.key === "Escape" && !$("#troubleDialog").hidden && $("#seedDialog").hidden) closeTroubleshooting();
   });
 
   // The logo doubles as a reference card for shot vocabulary used nowhere
@@ -1762,8 +1768,36 @@ function wireChrome() {
     if (e.target === $("#helpDialog")) $("#helpDialog").hidden = true;
   });
 
-  $("#btnExport").addEventListener("click", () => {
-    if (state.slug) window.location.href = API.exportUrl(state.slug);
+  // Export: one button, two downloads. Both are a ZIP of the project folder;
+  // "All" includes the rendered video, "Setup" leaves it out.
+  {
+    const menu = $("#exportMenu");
+    const btn = $("#btnExport");
+    const close = () => {
+      menu.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onDoc, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+    const onDoc = (e) => { if (!$("#exportWrap").contains(e.target)) close(); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    btn.addEventListener("click", () => {
+      if (!menu.hidden) { close(); return; }
+      menu.hidden = false;
+      btn.setAttribute("aria-expanded", "true");
+      document.addEventListener("click", onDoc, true);
+      document.addEventListener("keydown", onKey, true);
+    });
+    const download = (all) => {
+      close();
+      if (state.slug) window.location.href = API.exportZipUrl(state.slug, all);
+    };
+    $("#btnExportAll").addEventListener("click", () => download(true));
+    $("#btnExportSetup").addEventListener("click", () => download(false));
+  }
+  $("#troubleClose").addEventListener("click", closeTroubleshooting);
+  $("#troubleDialog").addEventListener("click", (e) => {
+    if (e.target === $("#troubleDialog")) closeTroubleshooting();
   });
   $("#seedClose").addEventListener("click", closeSeedDialog);
   $("#seedDialog").addEventListener("click", (e) => {
@@ -1792,9 +1826,6 @@ function wireChrome() {
     $("#seedGrid").querySelectorAll("video").forEach((v) => v.pause());
   });
 
-  $("#btnExportFolder").addEventListener("click", () => {
-    if (state.slug) window.location.href = API.exportZipUrl(state.slug);
-  });
 
   $("#btnOpen").addEventListener("click", openDialog);
   $("#openClose").addEventListener("click", () => ($("#openDialog").hidden = true));
@@ -3475,7 +3506,9 @@ function syncRefineTurn(s) {
    offered per attempt so any of them can be chosen, not only the best. */
 async function useRefinePrompt(r, attempt) {
   if (!shotById(r.shotId)) throw new Error("that scene no longer exists");
-  applyBoardEditActions([{tool: "update_shot", shotId: r.shotId, fields: {prompt: attempt.prompt}}]);
+  // An attempt that needed a new seed to land is only reproducible with it.
+  const fields = attempt.seed != null ? {prompt: attempt.prompt, seed: attempt.seed} : {prompt: attempt.prompt};
+  applyBoardEditActions([{tool: "update_shot", shotId: r.shotId, fields}]);
   await saveNow();
   render();
   renderAssistantChat();
@@ -3487,7 +3520,9 @@ async function useRefinePrompt(r, attempt) {
    edits go straight onto the action, which is what Apply then sends. */
 function renderRefineEditor(action) {
   const box = el("div", "chat-refine-editor");
-  box.appendChild(el("label", null, "Checks every draft must pass — one per line"));
+  box.appendChild(el("label", null, "Checks every draft is judged on — one per line"));
+  box.appendChild(el("div", "chat-refine-note",
+    "Start a line with ! to make it critical. The run keeps going until every critical check is met."));
   const ta = el("textarea");
   ta.value = (action.checks || []).join("\n");
   ta.rows = Math.min(14, Math.max(4, (action.checks || []).length + 1));
@@ -3512,11 +3547,68 @@ function renderRefineEditor(action) {
   return box;
 }
 
+/* Word-level diff of two prompts, for showing what a refine attempt changed.
+   Returns [{kind: "same" | "add" | "del", text}], runs of one kind merged.
+   A plain longest-common-subsequence over words: prompts are about 130 words,
+   so the table is tiny. */
+function diffWords(before, after) {
+  const a = (before || "").split(/\s+/).filter(Boolean);
+  const b = (after || "").split(/\s+/).filter(Boolean);
+  const lcs = Array.from({length: a.length + 1}, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const out = [];
+  const push = (kind, word) => {
+    const last = out[out.length - 1];
+    if (last && last.kind === kind) last.text += " " + word;
+    else out.push({kind, text: word});
+  };
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { push("same", a[i]); i++; j++; }
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) { push("del", a[i]); i++; }
+    else { push("add", b[j]); j++; }
+  }
+  while (i < a.length) push("del", a[i++]);
+  while (j < b.length) push("add", b[j++]);
+  return out;
+}
+
+/* "Changes from #N": what this attempt's prompt did to the one before it, so a
+   fix that also rewrote something that was working is visible. */
+function refineDiffBlock(prev, cur, remember) {
+  const parts = diffWords(prev.prompt, cur.prompt);
+  const count = (kind) => parts.filter((p) => p.kind === kind)
+    .reduce((n, p) => n + p.text.split(" ").length, 0);
+  const added = count("add"), removed = count("del"), kept = count("same");
+  const d = el("details", "chat-refine-diff");
+  remember(d, `diff${cur.n}`);
+  const sum = el("summary", null,
+    !added && !removed ? `Changes from #${prev.n} · same words${cur.reseeded ? ", new seed" : ""}`
+      : `Changes from #${prev.n} · ${added} added, ${removed} removed`);
+  d.appendChild(sum);
+  // Keeping under 60% of the earlier words means most of the prompt was rewritten.
+  const total = kept + removed;
+  if (total && kept / total < 0.6) d.appendChild(el("div", "chat-refine-warn",
+    "Most of the earlier prompt was rewritten, so something that worked may have changed."));
+  const body = el("div", "chat-refine-prompt-text chat-refine-diff-text");
+  parts.forEach((p, k) => {
+    if (k) body.appendChild(document.createTextNode(" "));
+    body.appendChild(p.kind === "same" ? document.createTextNode(p.text)
+      : el(p.kind === "add" ? "ins" : "del", `diff-${p.kind}`, p.text));
+  });
+  d.appendChild(body);
+  return d;
+}
+
 /* One checklist line with its verdict: a green tick when the clip met it, a red
    cross when it did not, nothing until a draft has been reviewed. Why it failed
    is shown only on the per-attempt list. */
-function refineCheckItem(check, verdict, showEvidence) {
-  const li = el("li", "chat-refine-check");
+function refineCheckItem(check, verdict, showEvidence, critical) {
+  const li = el("li", "chat-refine-check" + (critical ? " critical" : ""));
   const known = verdict && typeof verdict.met === "boolean";
   const mark = el("span", "chat-refine-mark" + (known ? (verdict.met ? " met" : " unmet") : ""),
     known ? (verdict.met ? "✓" : "✗") : "·");
@@ -3525,6 +3617,7 @@ function refineCheckItem(check, verdict, showEvidence) {
   li.appendChild(mark);
   const failed = known && !verdict.met && showEvidence && verdict.evidence;
   li.appendChild(el("span", null, failed ? `${check} — ${verdict.evidence}` : check));
+  if (critical) li.appendChild(el("span", "chat-refine-crit", "critical"));
   return li;
 }
 
@@ -3546,13 +3639,17 @@ function renderRefineBlock(r, turn) {
   if (r.checks && r.checks.length) {
     const checks = el("details", "chat-refine-checks");
     remember(checks, "checks");
-    checks.appendChild(el("summary", null, `Checklist (${r.checks.length}) · pass at ${r.passPercent}%`));
+    const nCrit = (r.critical || []).filter(Boolean).length;
+    checks.appendChild(el("summary", null, `Checklist (${r.checks.length}) · ` +
+      (nCrit ? `passes when all ${nCrit} critical check${nCrit === 1 ? " is" : "s are"} met`
+             : `pass at ${r.passPercent}%`)));
     // Each item carries the verdict from the latest reviewed attempt, so the
     // list reads as a scoreboard once a draft has been judged.
     const judged = (r.attempts || []).filter((a) => (a.results || []).length).pop();
     const verdicts = new Map(((judged && judged.results) || []).map((x) => [x.check, x]));
     const ul = el("ul", "chat-refine-list");
-    r.checks.forEach((c) => ul.appendChild(refineCheckItem(c, verdicts.get(c))));
+    r.checks.forEach((c, i) => ul.appendChild(
+      refineCheckItem(c, verdicts.get(c), false, !!(r.critical && r.critical[i]))));
     checks.appendChild(ul);
     box.appendChild(checks);
   }
@@ -3563,6 +3660,13 @@ function renderRefineBlock(r, turn) {
     const score = a.score === null || a.score === undefined ? a.status : `${a.score}%`;
     row.appendChild(el("span", "chat-refine-n", `#${a.n}`));
     row.appendChild(el("span", "chat-refine-score", score));
+    const crit = (a.results || []).filter((x) => x.critical);
+    if (crit.length) {
+      const ok = crit.filter((x) => x.met).length;
+      row.appendChild(el("span", "chat-refine-score" + (ok === crit.length ? "" : " short"),
+        `${ok}/${crit.length} critical`));
+    }
+    if (a.reseeded) row.appendChild(el("span", "chat-refine-tag", "new seed"));
     if (isBest) row.appendChild(el("span", "chat-refine-tag", "best"));
     box.appendChild(row);
     if (a.clipUrl) {
@@ -3602,6 +3706,8 @@ function renderRefineBlock(r, turn) {
       }
       box.appendChild(view);
     }
+    const earlier = (r.attempts || []).find((x) => x.n === a.n - 1);
+    if (earlier && earlier.prompt && a.prompt) box.appendChild(refineDiffBlock(earlier, a, remember));
     const results = a.results || [];
     if (results.length) {
       const unmet = results.filter((x) => !x.met).length;
@@ -3611,7 +3717,7 @@ function renderRefineBlock(r, turn) {
         unmet ? `${results.length - unmet} of ${results.length} met · ${unmet} unmet`
               : `All ${results.length} checks met`));
       const ul = el("ul", "chat-refine-list");
-      results.forEach((x) => ul.appendChild(refineCheckItem(x.check, x, true)));
+      results.forEach((x) => ul.appendChild(refineCheckItem(x.check, x, true, !!x.critical)));
       d.appendChild(ul);
       box.appendChild(d);
     }
@@ -3653,9 +3759,22 @@ async function refreshStatus() {
     // Advance the Output panel scene to scene with the orchestrator's own
     // idea of what it is rendering, rather than leaving it on whatever shot
     // happened to be selected when the batch started.
-    if (s.busy && state.followRender && s.currentShotId &&
-        s.currentShotId !== state.selectedId && shotById(s.currentShotId)) {
-      state.selectedId = s.currentShotId;
+    //
+    // Only for a render of the project that is open: a batch running on
+    // another project names shots this board does not have. When this is the
+    // first look after loading the board, the timeline scrolls to the running
+    // shot even if it was already the selected one, so a long board opens on
+    // what is being made, not at shot 1.
+    if (s.busy && state.followRender && s.slug === state.slug && s.currentShotId &&
+        shotById(s.currentShotId)) {
+      if (s.currentShotId !== state.selectedId) {
+        state.selectedId = s.currentShotId;
+        state.scrollStripToSelected = true;
+      } else if (state.scrollOnLoad) {
+        state.scrollStripToSelected = true;
+        render();
+      }
+      state.scrollOnLoad = false;
     }
 
     if (!s.busy && (wasBusy || state.awaitingBatch)) {
@@ -4008,6 +4127,7 @@ function renderRail() {
   const snd = $("#soundscape");
   if (document.activeElement !== snd) snd.value = state.board.soundscape || "";
   ensureSceneWand();
+  ensureRenderStyleWand();
   ensureSoundscapeWand();
   const sndMode = $("#soundscapeInShots");
   sndMode.checked = state.board.soundscapeInShots !== false;
@@ -4041,9 +4161,9 @@ function renderRail() {
   const add = el("button", "style-ref-add", "+");
   add.title = "Add a reference image (pick an existing one or upload)";
   add.addEventListener("click", async () => {
-    const chosen = await chooseImage("Choose a style reference");
-    if (!chosen) return;
-    state.board.styleRefs.push(chosen);
+    const chosen = await chooseImage("Reference images", {multi: true, generate: true});
+    if (!chosen || !chosen.length) return;
+    state.board.styleRefs.push(...chosen);
     markDirty();
     await saveNow();
     render();
@@ -4449,6 +4569,32 @@ function ensureSceneWand() {
         toast(
           "Scene description replaced. Undo by editing it back — the old text is above."
         );
+      },
+    })
+  );
+}
+
+function ensureRenderStyleWand() {
+  const wandSlot = $("#renderStyleWandSlot");
+  if (!wandSlot || wandSlot.childElementCount) return;
+  wandSlot.appendChild(
+    wandButton({
+      title: (svc) =>
+        `Restyle the render style using ${svc.label} (${svc.model}): the look only — ` +
+        `medium, lens, light and colour. Takes up to a minute on a local model, and ` +
+        `shows you the result before changing anything.`,
+      slot: () => $("#renderStyleProposalSlot"),
+      rewrite: () =>
+        API.rewrite(state.slug, {
+          field: "renderStyle",
+          text: $("#renderStyle").value,
+        }),
+      onUse: (text) => {
+        $("#renderStyle").value = text;
+        state.board.renderStyle = text;
+        markDirty();
+        updateResolvedPreview();
+        toast("Render style replaced. Undo by editing it back — the old text is above.");
       },
     })
   );
@@ -4987,7 +5133,7 @@ function renderFinal(host = $("#preview .final-video-content")) {
     host.appendChild(
       el("div", "final-empty",
          "Not built yet. “Render all” assembles it after the last shot, or " +
-         "press Assemble to join whatever is already rendered.")
+         "press Re-Assemble to join whatever is already rendered.")
     );
     const est = estimatedFinalStats();
     host.appendChild(
@@ -5000,7 +5146,7 @@ function renderFinal(host = $("#preview .final-video-content")) {
 
   renderCutSettings(host, busy);
   const acts = el("div", "final-actions");
-  const btn = el("button", "btn btn-sm", f && f.url ? "Re-assemble" : "Assemble now");
+  const btn = el("button", "btn btn-sm", f && f.url ? "Re-Assemble" : "Assemble now");
   btn.disabled = busy;
   if (busy) btn.title = "A render is running — the clips are still being written.";
   btn.addEventListener("click", () => $("#btnAssemble").click());
@@ -5597,6 +5743,13 @@ function renderStrip() {
   add.append(el("span", "plus", "+"), el("span", null, "Add shot"));
   add.addEventListener("click", addShot);
   strip.appendChild(add);
+
+  if (state.scrollStripToSelected) {
+    state.scrollStripToSelected = false;
+    const card = [...strip.querySelectorAll(".shot-card")].find((c) => c.dataset.id === state.selectedId);
+    // inline only: the page itself must not jump vertically.
+    if (card) requestAnimationFrame(() => card.scrollIntoView({inline: "center", block: "nearest", behavior: "smooth"}));
+  }
 }
 
 const SHOT_DRAG_TYPE = "application/x-storyboard-shot";
@@ -5620,6 +5773,30 @@ function dropAfter(node, axis, e) {
 /* Shot folders are numbered by position, so a locked shot that changed
    position would lose track of its clip (and the server refuses the save).
    Returns true, after saying why, when *next* would move one. */
+/* "Lock All" and "Unlock All", beside the shot's own Lock Scene button. A
+   button greys out when it would change nothing, and says how many it would. */
+function allLockButtons() {
+  const all = shots();
+  const nLocked = all.filter((s) => s.locked).length;
+  const make = (text, locked, count, tip) => {
+    const b = el("button", "btn btn-sm btn-ghost", count ? `${text} (${count})` : text);
+    b.type = "button";
+    b.dataset.lockExempt = "";
+    b.disabled = count === 0;
+    b.title = tip;
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { await setAllShotsLocked(locked); }
+      catch (err) { toast(err.message, "error"); b.disabled = false; }
+    });
+    return b;
+  };
+  return [
+    make("🔒 Lock All", true, all.length - nLocked, "Lock every scene"),
+    make("🔓 Unlock All", false, nLocked, "Unlock every locked scene"),
+  ];
+}
+
 function refuseLockedShift(next) {
   const moved = shots().find((s, i) => s.locked && next.indexOf(s) !== i);
   if (!moved) return false;
@@ -5629,6 +5806,30 @@ function refuseLockedShift(next) {
     "warn"
   );
   return true;
+}
+
+/* Lock or unlock every scene at once. Unlocking asks first: a locked scene is
+   what keeps "Render all" from re-rendering hours of finished video, so taking
+   that protection off everything deserves a second look. */
+async function setAllShotsLocked(locked) {
+  const all = shots();
+  const affected = all.filter((s) => !!s.locked !== locked).length;
+  if (!affected) {
+    toast(locked ? "Every scene is already locked." : "No scenes are locked.");
+    return;
+  }
+  if (!locked && !confirm(
+    `Unlock ${affected === 1 ? "the locked scene" : `all ${affected} locked scenes`}? ` +
+    "Render all will then re-render any that have changed since they were rendered."
+  )) return;
+  await saveNow();
+  const r = await API.lockAll(state.slug, locked);
+  state.board = r.board;
+  state.stale = r.stale || state.stale;
+  state.dirty = false;
+  render();
+  toast(`${locked ? "Locked" : "Unlocked"} ${r.changed} scene${r.changed === 1 ? "" : "s"}` +
+    (r.skipped ? `; ${r.skipped} still rendering was left unlocked.` : "."));
 }
 
 async function setShotLocked(id, locked) {
@@ -5766,6 +5967,7 @@ async function addShot() {
 
 function renderEditor() {
   renderEditorBody();
+  if (state.troubleShotId) paintTroubleshooting();
   const raw = selectedShot();
   if (!raw || !raw.locked) return;
   /* Everything that changes the shot is off; the lock button, players and
@@ -5983,7 +6185,7 @@ function renderEditorBody() {
   }
 
   const lock = el("button", `btn btn-sm${raw.locked ? " btn-primary" : " btn-ghost"}`,
-    raw.locked ? "🔒 Locked" : "🔓 Lock");
+    raw.locked ? "🔓 Unlock Scene" : "🔒 Lock Scene");
   lock.dataset.lockExempt = "";
   lock.title = raw.locked
     ? "Unlock to edit or re-render this shot. Project settings changed while it was locked will then apply to it."
@@ -6051,6 +6253,7 @@ function renderEditorBody() {
   });
   head.appendChild(del);
   head.appendChild(lock);
+  head.append(...allLockButtons());
   host.appendChild(head);
   if (raw.locked) {
     host.appendChild(el("div", "lock-note",
@@ -6144,6 +6347,8 @@ function renderEditorBody() {
   const promptPane = el("div");
   const promptHead = paneHint("Action / camera / mood only", "not the subject or the style");
   promptHead.appendChild(el("div", "header-spacer"));
+  // Seed comparison is for video; a still image has nothing to compare.
+  if (!(cap && cap.kind === "image")) promptHead.appendChild(troubleshootButton(raw));
   promptHead.appendChild(
     wandButton({
       title: (svc) =>
@@ -6497,7 +6702,6 @@ function renderEditorBody() {
     refPanel.style.marginTop = "var(--sp-3)";
     refPanel.appendChild(paneHint("Reference images", null));
     refPanel.appendChild(shotReferenceImages(raw));
-    refPanel.appendChild(sceneReferenceGenerator(raw));
 
     const noteModel = effectiveShotModel(raw);
     const note = noteModel === "wan-i2v"
@@ -6533,15 +6737,18 @@ function renderEditorBody() {
     row.appendChild(
       field(
         "Duration",
-        select(
-          options.map(([f, label]) => [String(f), label]),
-          String(raw.frames),
-          (v) => {
-            live().frames = Number(v);
-            markDirty();
-            renderEditor();   // safe: a select commits on change, not per key
-            renderStrip();
-          }
+        durationControl(
+          select(
+            options.map(([f, label]) => [String(f), label]),
+            String(raw.frames),
+            (v) => {
+              live().frames = Number(v);
+              markDirty();
+              renderEditor();   // safe: a select commits on change, not per key
+              renderStrip();
+            }
+          ),
+          lengthCheck(raw, cap, live)
         ),
         null,
         frameHint(raw.frames, cap)
@@ -6574,7 +6781,6 @@ function renderEditorBody() {
     )
   );
   params.appendChild(row2);
-  if (!isImage) params.appendChild(lengthCheck(raw, cap, live));
 
   const projRes = projectResolution();
   if (cap && cap.resolutions.length && !cap.resolutions.includes(projRes)) {
@@ -6591,7 +6797,6 @@ function renderEditorBody() {
     params.appendChild(el("div", "inline-warn", `⚠ ${cap.unavailableReason}`));
   }
   host.appendChild(params);
-  if (!isImage) host.appendChild(troubleshootingPanel(raw));
 }
 
 /** The one resolution every shot renders at — a storyboard makes one video. */
@@ -6720,57 +6925,98 @@ function lengthEstimateStale(est, shot) {
 
 /**
  * "Is this shot long enough?" — the prompt's action beats and the dialogue,
- * timed and snapped to lengths this model renders. Painted into its own box
- * and repainted in place, so an estimate landing while someone types in the
- * prompt does not rebuild the editor under their cursor.
+ * timed and snapped to lengths this model renders. A button beside the Duration
+ * picker: pressed, it asks for the estimate and then shows it on the button
+ * itself (coloured too short / tight / long enough). Clicking it opens a panel
+ * with the detail and one-click "use minimum" / "use recommended", so changing
+ * the duration is the user's choice. Repainted in place, so an estimate
+ * landing while someone types in the prompt does not rebuild the editor.
  */
 function lengthCheck(raw, cap, live) {
-  const box = el("div", "length-check");
-  const paint = () => {
+  const wrap = el("span", "length-check");
+  const btn = el("button", "btn btn-sm length-btn");
+  btn.type = "button";
+  const pop = el("div", "length-pop");
+  pop.hidden = true;
+  wrap.append(btn, pop);
+
+  const onDoc = (e) => {
+    if (!wrap.isConnected || !wrap.contains(e.target)) close();
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  function close() {
+    pop.hidden = true;
+    document.removeEventListener("click", onDoc, true);
+    document.removeEventListener("keydown", onKey, true);
+  }
+  // Fixed under the button, so no panel or scroll area around it can clip it;
+  // flipped above when it would run off the bottom of the window.
+  function place() {
+    const r = btn.getBoundingClientRect();
+    const w = Math.min(380, window.innerWidth - 24);
+    pop.style.width = `${w}px`;
+    pop.style.left = `${Math.max(12, Math.min(r.left, window.innerWidth - w - 12))}px`;
+    pop.style.top = `${r.bottom + 6}px`;
+    if (r.bottom + 6 + pop.offsetHeight > window.innerHeight - 12) {
+      pop.style.top = `${Math.max(12, r.top - 6 - pop.offsetHeight)}px`;
+    }
+  }
+  function show() {
+    pop.hidden = false;
+    place();
+    document.addEventListener("click", onDoc, true);
+    document.addEventListener("keydown", onKey, true);
+  }
+
+  async function runEstimate() {
     const shot = live();
-    box.replaceChildren();
-    const head = el("div", "length-head");
-    head.appendChild(el("span", "length-title", "Length check"));
+    const id = shot.id;
+    lengthEstimating.add(id);
+    paint();
+    try {
+      const result = await API.lengthEstimate(state.slug, id, {
+        prompt: shot.prompt || "", dialogue: shot.dialogue || "", dialogueStyle: shot.dialogueStyle || "",
+      });
+      const target = shotById(id);
+      if (target) {
+        target.lengthEstimate = result;
+        markDirty();
+      }
+    } catch (err) {
+      toast(`Length check failed: ${err.message}`, "error");
+    } finally {
+      lengthEstimating.delete(id);
+      if (wrap.isConnected) {
+        paint();
+        // The point of asking: show the answer, with the choice to act on it.
+        if (live().lengthEstimate) show();
+      }
+    }
+  }
+
+  function paint() {
+    const shot = live();
     const est = shot.lengthEstimate;
     const busy = lengthEstimating.has(shot.id);
-    const btn = el("button", "btn btn-ghost btn-sm",
-      busy ? "Estimating…" : est ? "Re-estimate" : "Estimate length");
-    btn.disabled = busy || !(shot.prompt || "").trim();
-    btn.title = "Asks the board's AI model to split the prompt into its actions and time "
-      + "each one, then adds the dialogue. Takes about 15–60 seconds.";
-    btn.addEventListener("click", async () => {
-      const id = shot.id;
-      lengthEstimating.add(id);
-      paint();
-      try {
-        const s = live();
-        const result = await API.lengthEstimate(state.slug, id, {
-          prompt: s.prompt || "", dialogue: s.dialogue || "", dialogueStyle: s.dialogueStyle || "",
-        });
-        const target = shotById(id);
-        if (target) {
-          target.lengthEstimate = result;
-          markDirty();
-        }
-      } catch (err) {
-        toast(`Length check failed: ${err.message}`, "error");
-      } finally {
-        lengthEstimating.delete(id);
-        if (box.isConnected) paint();
-      }
-    });
-    head.appendChild(btn);
-    box.appendChild(head);
-
-    if (!est) {
-      box.appendChild(el("div", "field-note",
-        "Checks whether this duration gives every action in the prompt, and the dialogue, "
-        + "enough time. A shot that is too short comes out rushed and cut off."));
-      return;
-    }
-
     const frames = Number(shot.frames) || 0;
-    const v = lengthVerdict(est, frames);
+    const stale = !!(est && lengthEstimateStale(est, shot));
+    const v = est ? lengthVerdict(est, frames) : "";
+
+    btn.className = `btn btn-sm length-btn${est && !busy ? ` length-${v}` : ""}`;
+    btn.textContent = busy ? "⏱ Estimating…"
+      : est ? `⏱ ≈ ${fmtDur(est.comfortableFrames)}${stale ? " ⚠" : ""}`
+      : "⏱ Check length";
+    btn.disabled = busy || (!est && !(shot.prompt || "").trim());
+    btn.title = busy ? "Asking the board's AI model to time each action in the prompt…"
+      : est ? `Estimated ${fmtDur(est.comfortableFrames)} recommended (minimum ${fmtDur(est.minFrames)}). Click for details.`
+      : (shot.prompt || "").trim()
+        ? "Is this duration long enough for every action in the prompt and the dialogue? "
+          + "Asks the board's AI model to time them. Takes about 15–60 seconds."
+        : "Write a shot prompt first: the estimate is made from it.";
+
+    pop.replaceChildren();
+    if (!est) return;
+
     const summary = el("div", `length-summary length-${v}`);
     const say = {
       short: `Too short: ${fmtDur(frames)} is under the ${fmtDur(est.minFrames)} minimum`,
@@ -6782,13 +7028,15 @@ function lengthCheck(raw, cap, live) {
       `Minimum ${fmtDur(est.minFrames)} (${est.minFrames}f) · recommended `
       + `${fmtDur(est.comfortableFrames)} (${est.comfortableFrames}f)`
       + (est.limitedBy === "dialogue" ? " · set by the dialogue" : "")));
-    box.appendChild(summary);
+    pop.appendChild(summary);
 
     const use = el("div", "length-actions");
     [["Use minimum", est.minFrames], ["Use recommended", est.comfortableFrames]].forEach(([label, f]) => {
       if (!f || f === frames) return;
       const b = el("button", "btn btn-sm", `${label} · ${fmtDur(f)}`);
+      b.type = "button";
       b.addEventListener("click", () => {
+        close();
         live().frames = f;
         markDirty();
         renderEditor();
@@ -6796,14 +7044,15 @@ function lengthCheck(raw, cap, live) {
       });
       use.appendChild(b);
     });
-    if (use.children.length) box.appendChild(use);
+    if (use.children.length) pop.appendChild(use);
+    else pop.appendChild(el("div", "field-note", "The duration already matches the estimate."));
 
     if (est.tooLongForOneShot) {
-      box.appendChild(el("div", "field-warn",
+      pop.appendChild(el("div", "field-warn",
         "⚠ More than MiniMax H3's ~15 s per clip — consider splitting this into two shots."));
     }
-    if (lengthEstimateStale(est, shot)) {
-      box.appendChild(el("div", "field-warn",
+    if (stale) {
+      pop.appendChild(el("div", "field-warn",
         "⚠ The prompt or dialogue has changed since this estimate — re-estimate to update it."));
     }
 
@@ -6829,10 +7078,22 @@ function lengthCheck(raw, cap, live) {
     details.appendChild(el("div", "field-note",
       `Timed by ${est.service || "the board's AI model"}. Action times are an estimate; `
       + "dialogue is measured from the take when one exists."));
-    box.appendChild(details);
-  };
+    pop.appendChild(details);
+
+    const again = el("button", "btn btn-ghost btn-sm length-again", "Re-estimate");
+    again.type = "button";
+    again.title = "Time the prompt again. Takes about 15–60 seconds.";
+    again.addEventListener("click", () => { close(); runEstimate(); });
+    pop.appendChild(again);
+  }
+
+  btn.addEventListener("click", () => {
+    if (lengthEstimating.has(live().id)) return;
+    if (!live().lengthEstimate) { runEstimate(); return; }
+    if (pop.hidden) show(); else close();
+  });
   paint();
-  return box;
+  return wrap;
 }
 
 /**
@@ -7622,6 +7883,43 @@ function forumSummaryText(shot) {
    Troubleshooting — seed comparison
    ========================================================================== */
 
+/* --- the Troubleshooting dialog ------------------------------------------ */
+
+function troubleshootButton(raw) {
+  const b = el("button", "btn btn-sm", "🔧 Troubleshoot");
+  b.type = "button";
+  // Comparing takes is reading, not editing, so it stays usable on a locked shot.
+  b.dataset.lockExempt = "";
+  b.title = "Is the problem the prompt, or just this seed? Render the shot at other seeds and compare.";
+  b.addEventListener("click", () => openTroubleshooting(raw.id));
+  return b;
+}
+
+function openTroubleshooting(shotId) {
+  state.troubleShotId = shotId;
+  paintTroubleshooting();
+}
+
+function closeTroubleshooting() {
+  state.troubleShotId = null;
+  $("#troubleDialog").hidden = true;
+}
+
+/* Rebuilt on every editor repaint while open, so takes arriving and the sweep's
+   progress show without closing and reopening it. */
+function paintTroubleshooting() {
+  const dlg = $("#troubleDialog");
+  const raw = state.troubleShotId ? shotById(state.troubleShotId) : null;
+  if (!raw) {
+    if (!dlg.hidden) closeTroubleshooting();
+    return;
+  }
+  const n = shotIndex(raw.id) + 1;
+  $("#troubleSub").textContent = `— shot ${n}${raw.title ? ` · ${raw.title}` : ""}: is the problem the prompt, or just this seed?`;
+  $("#troubleBody").replaceChildren(troubleshootingPanel(raw));
+  dlg.hidden = false;
+}
+
 /* The seed sweep running now, if it is this shot's: {seeds, runs: [[seed, run]]}. */
 function seedSweepFor(shotId) {
   const st = state.status;
@@ -7648,10 +7946,10 @@ async function reloadSeedTakes(shotId) {
   return state.seedTakes[shotId];
 }
 
+/* The seed-comparison controls. Shown in the Troubleshooting dialog, opened by the
+   button beside the shot prompt's Rewrite — not a panel at the foot of the editor. */
 function troubleshootingPanel(raw) {
   const panel = el("div", "panel");
-  panel.style.marginTop = "var(--sp-3)";
-  panel.appendChild(cardHeading("Troubleshooting", "is a problem the prompt, or just this seed?"));
 
   const takes = seedTakesCached(raw.id);
   const sweep = seedSweepFor(raw.id);
@@ -7863,7 +8161,7 @@ function paintSeedDialog(force) {
   });
 
   if (!grid.children.length) {
-    grid.appendChild(el("div", "field-note", "No takes yet — use Render seeds in the Troubleshooting panel."));
+    grid.appendChild(el("div", "field-note", "No takes yet — use Render seeds in Troubleshoot (beside Rewrite)."));
   }
 }
 
@@ -8477,6 +8775,13 @@ function modelLabel(id) {
 
 /* --- small controls ------------------------------------------------------ */
 
+/* The Duration picker with its length-check button on the same line. */
+function durationControl(selectEl, checkEl) {
+  const wrap = el("div", "duration-control");
+  wrap.append(selectEl, checkEl);
+  return wrap;
+}
+
 function field(label, control, hint, warn) {
   const f = el("div", "field");
   const l = el("label", null, label);
@@ -8659,97 +8964,6 @@ async function generateReferenceImage({ name, description, kind }, onProgress) {
   return st.results.image;
 }
 
-/* Generate a prop or location image straight into this scene's reference
-   images, tagged by its name (@headset) so the prompt can point at it. The
-   same file can then be added to other scenes and keeps its tag. */
-function sceneReferenceGenerator(shot) {
-  const draft = (state.sceneRefGen[shot.id] ||= { open: false, kind: "prop", name: "", description: "" });
-  const box = el("div", "scene-refgen");
-  if (!draft.open) {
-    const open = el("button", "btn btn-sm", "Generate image…");
-    open.type = "button";
-    open.title = "Make a reference image of a prop or a location from a description";
-    open.addEventListener("click", () => { draft.open = true; renderEditor(); });
-    box.appendChild(open);
-    return box;
-  }
-
-  const kind = select([["prop", "Prop / object"], ["location", "Location"]], draft.kind,
-    (v) => { draft.kind = v; });
-  kind.setAttribute("aria-label", "Kind of reference image");
-  const name = el("input");
-  name.type = "text";
-  name.placeholder = "Name, e.g. headset (becomes its @tag)";
-  name.value = draft.name;
-  name.dataset.fkey = `scene-refgen-name-${shot.id}`;
-  name.addEventListener("input", () => { draft.name = name.value; });
-  const desc = el("textarea");
-  desc.rows = 3;
-  desc.placeholder = "What it looks like, e.g. a thin, flat band of matte black material, about two fingers tall, curved like wraparound sunglasses with no lenses, faint cold-blue glow along its lower edge";
-  desc.value = draft.description;
-  desc.dataset.fkey = `scene-refgen-desc-${shot.id}`;
-  desc.addEventListener("input", () => { draft.description = desc.value; });
-
-  const note = el("span", "field-note", draft.running ? "Generating…" : "");
-  const go = el("button", "btn btn-sm btn-primary", "Generate");
-  go.type = "button";
-  const gpuBusy = !!(state.status && (state.status.busy ||
-    (state.status.stills && state.status.stills.busy)));
-  go.disabled = !!draft.running || gpuBusy;
-  go.title = gpuBusy ? "Wait for the current render or image to finish" : "";
-  const close = el("button", "btn btn-ghost btn-sm", "Close");
-  close.type = "button";
-  close.addEventListener("click", () => { draft.open = false; renderEditor(); });
-
-  go.addEventListener("click", async () => {
-    if (!draft.description.trim()) {
-      toast("Describe it first — the image is made from the description.", "error");
-      return;
-    }
-    const slug = state.slug;
-    draft.running = true;
-    go.disabled = true;
-    note.textContent = "Generating…";
-    try {
-      const image = await generateReferenceImage(
-        { name: draft.name.trim(), description: draft.description.trim(), kind: draft.kind },
-        (pct) => { note.textContent = `Generating… ${pct}%`; });
-      const current = shotById(shot.id);
-      if (state.slug !== slug || !current) {
-        toast(`Generated ${image.label} — it is in refs/ to add from Reference images.`);
-        return;
-      }
-      if (!Array.isArray(current.referenceImages)) current.referenceImages = [];
-      const tag = draft.name.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "").toLowerCase();
-      const taken = current.referenceImages.some((r) => r.tag === tag);
-      current.referenceImages.push({
-        kind: "upload", ...image,
-        tag: tag && !taken ? tag : "",
-        role: draft.kind === "prop" ? "object appearance" : "environment",
-      });
-      draft.open = false;
-      draft.name = draft.description = "";
-      markDirty();
-      await saveNow();
-      toast(tag && !taken
-        ? `Added ${image.label} as @${tag} — refer to it in the prompt as @${tag}.`
-        : `Added ${image.label} to this scene's reference images.`);
-    } catch (err) {
-      toast(`Could not generate an image: ${err.message}`, "error");
-    } finally {
-      draft.running = false;
-      render();
-    }
-  });
-
-  const row = el("div", "scene-refgen-row");
-  row.append(kind, name);
-  const actions = el("div", "scene-refgen-row");
-  actions.append(go, close, note);
-  box.append(row, desc, actions);
-  return box;
-}
-
 function shotReferenceImages(shot) {
   if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
   const wrap = el("div", "ref-slots");
@@ -8774,7 +8988,7 @@ function shotReferenceImages(shot) {
     const actions = referenceActions(slot, `reference image ${i + 1}`,
       async () => {
         const slug = state.slug;
-        const chosen = await chooseImage("Replace shot reference image");
+        const chosen = await chooseImage("Replace shot reference image", {generate: true});
         if (chosen && state.slug === slug) await replace(chosen);
       },
       async () => {
@@ -8878,13 +9092,20 @@ function referenceTagControl(shot, index, ref) {
 }
 
 async function addShotReferenceImage(shot) {
-  const chosen = await chooseImage("Choose an additional shot reference image");
-  if (!chosen) return;
+  const chosen = await chooseImage("Choose an additional shot reference image",
+    {multi: true, generate: true, applyHints: true});
+  if (!chosen || !chosen.length) return;
   if (!Array.isArray(shot.referenceImages)) shot.referenceImages = [];
-  shot.referenceImages.push({
-    ...chosen,
-    tag: referenceTagFor(chosen) || "",
-  });
+  for (const pick of chosen) {
+    // A tag the picker suggested (a generated prop's name) is used only if this
+    // shot does not already have it; otherwise the tag the file already carries.
+    const suggested = pick.tag && !shot.referenceImages.some((r) => r.tag === pick.tag) ? pick.tag : "";
+    shot.referenceImages.push({
+      ...pick,
+      tag: referenceTagFor(pick) || suggested,
+      role: pick.role || "",
+    });
+  }
   markDirty();
   await saveNow();
   render();
@@ -8945,8 +9166,12 @@ function pickFile(accept) {
   });
 }
 
-async function chooseImage(title) {
-  return chooseMedia(title, "image");
+/* @tag and role for images generated inside the picker, by file path, so the
+   shot reference flows can file them the way the old in-panel generator did. */
+const generatedHints = new Map();
+
+async function chooseImage(title, opts = {}) {
+  return chooseMedia(title, "image", "", opts);
 }
 
 function groupedImageItems(items) {
@@ -8997,18 +9222,29 @@ function usageText(item) {
    name in this project's refs/, keeping the original name as `originalName`
    for the user's own reference -- the Cast editor names a character's files
    after the character. */
-async function chooseMedia(title, kind, saveAs = "") {
+async function chooseMedia(title, kind, saveAs = "", opts = {}) {
   const isAudio = kind === "audio";
+  // multi: several images can be added in one go (the result is an array);
+  // generate: the popup can make a new prop/location image; applyHints: a
+  // generated image comes back carrying the @tag and role its form implied.
+  const { multi = false, generate = false, applyHints = false } = opts;
   const modal = $("#picker");
   const grid = $("#pickerGrid");
+  const pager = $("#pickerPager");
+  const selbar = $("#pickerSelect");
+  const genPanel = $("#pickerGen");
+  const genBtn = $("#pickerGenerate");
   $("#pickerTitle").textContent = title;
   grid.classList.toggle("picker-list", isAudio);
   $("#pickerFoot").textContent = isAudio
     ? "Audio already in your projects. Upload or drop a clip here to add it to this project's refs/. " +
       "Use a clip with no embedded cover art — a file that carries one gets read " +
       "as an image instead of a voice, and the clone is silently skipped."
-    : "Images already in your projects — or upload, or drop one here. Per-frame folders are excluded — use “chain from previous shot” for that." +
-      (title === "Choose a style reference"
+    : "Images already in your projects — or upload, or drop one here. Tick the boxes to select several " +
+      "(Shift-click to select a range, ⌘/Ctrl-click to toggle one) " +
+      (multi ? "and add them together, or to delete the ones you no longer need. " : "and delete the ones you no longer need. ") +
+      "Per-frame folders are excluded — use “chain from previous shot” for that." +
+      (title === "Reference images"
         ? " Aim for around 1024px on the short edge, any aspect ratio — " +
           "references are downscaled to that before rendering (512px in " +
           "draft mode), so more resolution won't add quality and a much " +
@@ -9016,15 +9252,26 @@ async function chooseMedia(title, kind, saveAs = "") {
         : "");
   grid.innerHTML = "";
   grid.appendChild(el("div", "empty-state", "loading…"));
+  pager.hidden = true;
+  selbar.hidden = true;
+  genPanel.hidden = true;
+  genBtn.hidden = !generate || isAudio;
   modal.hidden = false;
 
   return new Promise((resolve) => {
     const finish = (value) => {
       modal.ondragover = modal.ondrop = null;
       modal.hidden = true;
+      pager.hidden = true;
+      selbar.hidden = true;
+      genPanel.hidden = true;
+      genBtn.hidden = true;
+      genBtn.onclick = null;
       grid.innerHTML = "";
       resolve(value);
     };
+    // Multi pickers always answer with an array, so a caller has one shape to handle.
+    const answer = (refs) => (multi ? refs : refs[0]);
 
     $("#pickerClose").onclick = () => finish(null);
     modal.onclick = (e) => {
@@ -9045,7 +9292,7 @@ async function chooseMedia(title, kind, saveAs = "") {
       grid.appendChild(el("div", "empty-state", `Uploading ${f.name}…`));
       try {
         const ref = await API.uploadRef(state.slug, f, saveAs);
-        finish(saveAs ? { ...ref, originalName: f.name } : ref);
+        finish(answer([saveAs ? { ...ref, originalName: f.name } : ref]));
       } catch (err) {
         toast(`Upload failed: ${err.message}`, "error");
         finish(null);
@@ -9059,149 +9306,366 @@ async function chooseMedia(title, kind, saveAs = "") {
       upload((e.dataTransfer.files || [])[0]);
     };
 
-    API.library(kind)
-      .then(({ items }) => {
-        grid.innerHTML = "";
-        const shown = isAudio ? items : groupedImageItems(items);
-        if (!shown.length) {
-          grid.appendChild(
-            el("div", "empty-state",
-               isAudio
-                 ? "No audio in your projects yet — upload a clip."
-                 : "No images in your projects yet — upload one.")
-          );
+    // What is on offer. Default to this project's own images: reuse from
+    // elsewhere is one click away, but it should never just be *there* on
+    // open — a project showing someone else's images beside its own reads as
+    // contamination, not a deliberate choice to browse another library. Shown a
+    // page at a time, since a library grows without bound.
+    const PER_PAGE = isAudio ? 10 : 12;
+    let shown = [];
+    let mine = [];
+    let others = [];
+    let showOthers = false;
+    let page = 0;
+    const selected = new Map();           // item path -> item; survives paging
+    let anchor = null;                    // the last item ticked, where a Shift range starts
+    const visible = () => (showOthers ? [...mine, ...others] : mine);
+
+    // Reflect `selected` on the cards on screen without repainting the page
+    // (which would scroll the grid back to the top mid-selection).
+    const syncChecks = () => {
+      grid.querySelectorAll(".pick[data-path]").forEach((card) => {
+        const on = selected.has(card.dataset.path);
+        card.classList.toggle("selected", on);
+        const cb = card.querySelector(".pick-check input");
+        if (cb) cb.checked = on;
+      });
+      paintSelection();
+    };
+    const toggleOne = (img, on = !selected.has(img.path)) => {
+      if (on) selected.set(img.path, img); else selected.delete(img.path);
+      anchor = img.path;
+      syncChecks();
+    };
+    // Shift: everything from the anchor to this one, in the order shown and
+    // across pages, is selected. With no anchor yet it just selects this one.
+    const selectRange = (img) => {
+      const list = visible();
+      const from = anchor ? list.findIndex((x) => x.path === anchor) : -1;
+      const to = list.findIndex((x) => x.path === img.path);
+      if (from < 0 || to < 0) { toggleOne(img, true); return; }
+      const [lo, hi] = from <= to ? [from, to] : [to, from];
+      for (const item of list.slice(lo, hi + 1)) selected.set(item.path, item);
+      syncChecks();       // the anchor stays put, as in a file manager
+    };
+
+    // Copy the pick into this project rather than pointing at another
+    // project's folder, which would break if that project went away.
+    const adopt = async (img) => {
+      const ref = await API.adoptRef(state.slug, img.path, saveAs);
+      const hint = applyHints ? generatedHints.get(img.path) : null;
+      return {
+        kind: "upload", ...ref,
+        ...(saveAs && ref.label !== img.label ? { originalName: img.label } : {}),
+        ...(hint || {}),
+      };
+    };
+
+    const dropFromLists = (img) => {
+      mine = mine.filter((x) => x !== img);
+      others = others.filter((x) => x !== img);
+      shown = shown.filter((x) => x !== img);
+      selected.delete(img.path);
+    };
+
+    const addCard = (img) => {
+      const card = el("div", isAudio ? "pick pick-audio" : "pick");
+      card.dataset.path = img.path;
+      if (!isAudio && img.used) {
+        card.classList.add("used");
+        card.title = usageText(img) || "Used by a storyboard";
+      }
+      if (isAudio) {
+        card.appendChild(el("div", "pick-audio-icon", "♪"));
+      } else {
+        const im = el("img");
+        im.src = img.url;
+        im.loading = "lazy";
+        im.alt = img.label;
+        card.appendChild(im);
+        // Style references want ~1024px on the short edge, so say what each one is.
+        im.addEventListener("load", () => {
+          if (im.naturalWidth && dims) dims.textContent = `${im.naturalWidth}×${im.naturalHeight}`;
+        });
+        // Select without choosing: the box sits over the thumbnail, the rest of the card still picks.
+        const box = el("label", "pick-check");
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = selected.has(img.path);
+        cb.setAttribute("aria-label", `Select ${img.label}`);
+        card.classList.toggle("selected", cb.checked);
+        box.addEventListener("click", (e) => {
+          e.stopPropagation();
+          // Shift on the box selects the range rather than flipping this one.
+          if (e.shiftKey) { e.preventDefault(); selectRange(img); }
+        });
+        cb.addEventListener("change", () => toggleOne(img, cb.checked));
+        box.appendChild(cb);
+        card.appendChild(box);
+        if (img.unusedDuplicatePaths && img.unusedDuplicatePaths.length) {
+          const del = el("button", "pick-delete", "🗑");
+          del.title = img.unusedDuplicatePaths.length > 1
+            ? `Delete ${img.unusedDuplicatePaths.length} unused duplicate images`
+            : "Delete unused image";
+          del.addEventListener("click", async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const count = img.unusedDuplicatePaths.length;
+            const name = count > 1 ? `${count} unused copies of ${img.label}` : img.label;
+            if (!confirm(`Delete ${name}?`)) return;
+            del.disabled = true;
+            try {
+              await Promise.all(
+                img.unusedDuplicatePaths.map((path) => API.deleteLibraryItem("image", path))
+              );
+              if (img.used) {
+                img.unusedDuplicatePaths = [];
+                del.remove();
+              } else {
+                dropFromLists(img);
+                paint();
+              }
+              toast(`Deleted ${name}.`);
+            } catch (err) {
+              del.disabled = false;
+              toast(`Could not delete ${name}: ${err.message}`, "error");
+            }
+          });
+          card.appendChild(del);
+        }
+      }
+      const dims = isAudio ? null : el("span", "pick-dims");
+      const meta = el("div", "pick-meta");
+      meta.appendChild(el("div", "pick-name", img.duplicates > 1
+        ? `${img.label} (${img.duplicates})`
+        : img.label));
+      const proj = el("div", "pick-project", img.project);
+      if (dims) proj.appendChild(dims);
+      meta.appendChild(proj);
+      const usedAt = usageText(img);
+      if (!isAudio && usedAt) meta.appendChild(el("div", "pick-usage", usedAt));
+      card.appendChild(meta);
+      if (isAudio) {
+        // Audible before you commit to it: one clip of dialogue sounds much
+        // like another in a filename.
+        const au = el("audio");
+        au.src = img.url;
+        au.controls = true;
+        au.preload = "none";
+        au.className = "pick-audio-player";
+        au.onclick = (e) => e.stopPropagation();
+        card.appendChild(au);
+      }
+      card.onclick = async (e) => {
+        // Modifier-clicks select; a plain click still just picks this one.
+        if (!isAudio && e.shiftKey) { e.preventDefault(); selectRange(img); return; }
+        if (!isAudio && (e.metaKey || e.ctrlKey)) { e.preventDefault(); toggleOne(img); return; }
+        try {
+          finish(answer([await adopt(img)]));
+        } catch (err) {
+          toast(`Could not use that file: ${err.message}`, "error");
+          finish(null);
+        }
+      };
+      grid.appendChild(card);
+    };
+
+    // --- selection bar: add several, delete several, clear ----------------
+    const paintSelection = () => {
+      selbar.innerHTML = "";
+      const n = selected.size;
+      selbar.hidden = n === 0;
+      if (!n) return;
+      selbar.appendChild(el("span", "sel-count", `${n} selected`));
+      if (multi) {
+        const add = el("button", "btn btn-sm btn-primary", `Add ${n}`);
+        add.type = "button";
+        add.addEventListener("click", async () => {
+          add.disabled = true;
+          try {
+            const refs = [];
+            for (const img of selected.values()) refs.push(await adopt(img));
+            finish(refs);
+          } catch (err) {
+            toast(`Could not use those files: ${err.message}`, "error");
+            finish(null);
+          }
+        });
+        selbar.appendChild(add);
+      }
+      const del = el("button", "btn btn-sm btn-danger", `Delete ${n}`);
+      del.type = "button";
+      del.title = "Delete the selected images that no storyboard uses";
+      del.addEventListener("click", deleteSelected);
+      const clear = el("button", "btn btn-sm btn-ghost", "Clear");
+      clear.type = "button";
+      clear.addEventListener("click", () => { selected.clear(); anchor = null; syncChecks(); });
+      selbar.append(del, clear);
+    };
+
+    // An image a storyboard still uses is protected, as with the single trash
+    // button: only unused copies go, and the rest are kept and said so.
+    const deleteSelected = async () => {
+      const items = [...selected.values()];
+      const paths = items.flatMap((i) => i.unusedDuplicatePaths || []);
+      const inUse = items.filter((i) => !(i.unusedDuplicatePaths || []).length).length;
+      if (!paths.length) {
+        toast("Everything selected is used by a storyboard, so nothing can be deleted.", "warn");
+        return;
+      }
+      if (!confirm(
+        `Delete ${paths.length} unused image file${paths.length === 1 ? "" : "s"}? This cannot be undone.` +
+        (inUse ? ` ${inUse} selected image${inUse === 1 ? " is" : "s are"} used by a storyboard and will be kept.` : "")
+      )) return;
+      selbar.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      const results = await Promise.allSettled(paths.map((p) => API.deleteLibraryItem("image", p)));
+      const failed = results.filter((r) => r.status === "rejected").length;
+      selected.clear();
+      anchor = null;
+      await load();
+      toast(failed
+        ? `Deleted ${paths.length - failed} of ${paths.length}; ${failed} could not be deleted.`
+        : `Deleted ${paths.length} image${paths.length === 1 ? "" : "s"}.`,
+        failed ? "warn" : "info");
+    };
+
+    // --- the grid and its pager -------------------------------------------
+    const paint = () => {
+      const all = visible();
+      const pages = Math.max(1, Math.ceil(all.length / PER_PAGE));
+      page = Math.min(page, pages - 1);
+      grid.innerHTML = "";
+      if (!all.length) {
+        grid.appendChild(el("div", "empty-state",
+          !shown.length
+            ? (isAudio ? "No audio in your projects yet — upload a clip." : "No images in your projects yet — upload one.")
+            : "No images in this project yet."));
+      }
+      all.slice(page * PER_PAGE, (page + 1) * PER_PAGE).forEach(addCard);
+      grid.scrollTop = 0;
+
+      pager.innerHTML = "";
+      pager.hidden = all.length <= PER_PAGE && !others.length;
+      if (!pager.hidden) {
+        const go = (text, delta, label) => {
+          const b = el("button", "btn btn-sm btn-ghost", text);
+          b.type = "button";
+          b.setAttribute("aria-label", label);
+          b.disabled = page + delta < 0 || page + delta >= pages;
+          b.addEventListener("click", () => { page += delta; paint(); });
+          return b;
+        };
+        pager.append(
+          go("‹ Prev", -1, "Previous page"),
+          el("span", "pager-status",
+            all.length
+              ? `Page ${page + 1} of ${pages} · ${all.length} ${isAudio ? "clip" : "image"}${all.length === 1 ? "" : "s"}`
+              : "Nothing here"),
+          go("Next ›", 1, "Next page"));
+        if (others.length) {
+          const toggle = el("button", "btn btn-sm btn-ghost pager-others",
+            showOthers ? "Hide other projects" : `Show ${others.length} from other projects…`);
+          toggle.type = "button";
+          toggle.title = "Picking one from another project copies it into this one";
+          toggle.addEventListener("click", () => {
+            showOthers = !showOthers;
+            page = 0;
+            paint();
+          });
+          pager.appendChild(toggle);
+          if (showOthers) pager.appendChild(el("span", "pager-note",
+            "Picking one from another project copies it in."));
+        }
+      }
+      paintSelection();
+    };
+
+    const load = () => API.library(kind).then(({ items }) => {
+      shown = isAudio ? items : groupedImageItems(items);
+      mine = shown.filter((img) => img.project === state.slug);
+      others = shown.filter((img) => img.project !== state.slug);
+      // Keep what is still selected, pointing at the fresh items.
+      const live = new Map(shown.map((i) => [i.path, i]));
+      for (const path of [...selected.keys()]) {
+        if (live.has(path)) selected.set(path, live.get(path)); else selected.delete(path);
+      }
+      paint();
+    });
+
+    // --- generate a prop or location image, here, into the library ---------
+    const draft = { open: false, kind: "prop", name: "", description: "", running: false };
+    const paintGenerator = () => {
+      genPanel.innerHTML = "";
+      genPanel.hidden = !draft.open;
+      if (!draft.open) return;
+      const kindSel = select([["prop", "Prop / object"], ["location", "Location"]], draft.kind,
+        (v) => { draft.kind = v; });
+      kindSel.setAttribute("aria-label", "Kind of reference image");
+      const name = el("input");
+      name.type = "text";
+      name.placeholder = "Name, e.g. headset (becomes its @tag)";
+      name.value = draft.name;
+      name.addEventListener("input", () => { draft.name = name.value; });
+      const desc = el("textarea");
+      desc.rows = 3;
+      desc.placeholder = "What it looks like, e.g. a thin, flat band of matte black material, about two fingers tall, curved like wraparound sunglasses with no lenses, faint cold-blue glow along its lower edge";
+      desc.value = draft.description;
+      desc.addEventListener("input", () => { draft.description = desc.value; });
+      const note = el("span", "field-note", draft.running ? "Generating…" : "");
+      const go = el("button", "btn btn-sm btn-primary", "Generate");
+      go.type = "button";
+      const busy = !!(state.status && (state.status.busy || (state.status.stills && state.status.stills.busy)));
+      go.disabled = draft.running || busy;
+      go.title = busy ? "Wait for the current render or image to finish" : "Make the image from this description";
+      const close = el("button", "btn btn-ghost btn-sm", "Close");
+      close.type = "button";
+      close.addEventListener("click", () => { draft.open = false; paintGenerator(); });
+      go.addEventListener("click", async () => {
+        if (!draft.description.trim()) {
+          toast("Describe it first — the image is made from the description.", "error");
           return;
         }
-
-        const addCard = (img) => {
-          const card = el("div", isAudio ? "pick pick-audio" : "pick");
-          if (!isAudio && img.used) {
-            card.classList.add("used");
-            card.title = usageText(img) || "Used by a storyboard";
-          }
-          if (isAudio) {
-            const icon = el("div", "pick-audio-icon", "♪");
-            card.appendChild(icon);
-          } else {
-            const im = el("img");
-            im.src = img.url;
-            im.loading = "lazy";
-            im.alt = img.label;
-            card.appendChild(im);
-            if (img.unusedDuplicatePaths && img.unusedDuplicatePaths.length) {
-              const del = el("button", "pick-delete", "🗑");
-              del.title = img.unusedDuplicatePaths.length > 1
-                ? `Delete ${img.unusedDuplicatePaths.length} unused duplicate images`
-                : "Delete unused image";
-              del.addEventListener("click", async (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const count = img.unusedDuplicatePaths.length;
-                const name = count > 1 ? `${count} unused copies of ${img.label}` : img.label;
-                if (!confirm(`Delete ${name}?`)) return;
-                del.disabled = true;
-                try {
-                  await Promise.all(
-                    img.unusedDuplicatePaths.map((path) =>
-                      API.deleteLibraryItem("image", path)
-                    )
-                  );
-                  if (img.used) {
-                    img.unusedDuplicatePaths = [];
-                    del.remove();
-                  } else {
-                    card.remove();
-                  }
-                  toast(`Deleted ${name}.`);
-                  if (!grid.querySelector(".pick")) {
-                    grid.innerHTML = "";
-                    grid.appendChild(el("div", "empty-state", "No images in your projects yet — upload one."));
-                  }
-                } catch (err) {
-                  del.disabled = false;
-                  toast(`Could not delete ${name}: ${err.message}`, "error");
-                }
-              });
-              card.appendChild(del);
-            }
-          }
-          const meta = el("div", "pick-meta");
-          meta.appendChild(el("div", "pick-name", img.duplicates > 1
-            ? `${img.label} (${img.duplicates})`
-            : img.label));
-          meta.appendChild(el("div", "pick-project", img.project));
-          const usedAt = usageText(img);
-          if (!isAudio && usedAt) {
-            meta.appendChild(el("div", "pick-usage", usedAt));
-          }
-          card.appendChild(meta);
-          if (isAudio) {
-            // Audible before you commit to it: one clip of dialogue sounds
-            // much like another in a filename.
-            const au = el("audio");
-            au.src = img.url;
-            au.controls = true;
-            au.preload = "none";
-            au.className = "pick-audio-player";
-            au.onclick = (e) => e.stopPropagation();
-            card.appendChild(au);
-          }
-          card.onclick = async () => {
-            // copy it into this project rather than pointing at another
-            // project's folder, which would break if that project went away
-            try {
-              const ref = await API.adoptRef(state.slug, img.path, saveAs);
-              finish({
-                kind: "upload", ...ref,
-                ...(saveAs && ref.label !== img.label ? { originalName: img.label } : {}),
-              });
-            } catch (err) {
-              toast(`Could not use that file: ${err.message}`, "error");
-              finish(null);
-            }
-          };
-          grid.appendChild(card);
-        };
-
-        // Default to this project's own images. Reuse from elsewhere is
-        // still one click away, but it should never just be *there* on open
-        // — a project with its own references showing someone else's next
-        // to them, unlabeled context, is what reads as contamination, not a
-        // deliberate choice to go browse another project's library.
-        const mine = shown.filter((img) => img.project === state.slug);
-        const others = shown.filter((img) => img.project !== state.slug);
-        mine.forEach(addCard);
-
-        if (others.length) {
-          if (!mine.length) {
-            grid.appendChild(
-              el("div", "empty-state", "No images in this project yet.")
-            );
-          }
-          const reveal = el(
-            "button", "pick-browse-others",
-            `Browse ${others.length} image${others.length === 1 ? "" : "s"} from other projects…`
-          );
-          reveal.addEventListener("click", () => {
-            reveal.remove();
-            grid.appendChild(
-              el("div", "pick-group-header", "From other projects — picking one copies it in")
-            );
-            others.forEach(addCard);
+        draft.running = true;
+        go.disabled = true;
+        note.textContent = "Generating…";
+        try {
+          const image = await generateReferenceImage(
+            { name: draft.name.trim(), description: draft.description.trim(), kind: draft.kind },
+            (pct) => { note.textContent = `Generating… ${pct}%`; });
+          const tag = draft.name.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "").toLowerCase();
+          generatedHints.set(image.path, {
+            tag, role: draft.kind === "prop" ? "object appearance" : "environment",
           });
-          grid.appendChild(reveal);
-        } else if (!mine.length) {
-          grid.appendChild(
-            el("div", "empty-state", "No images in your projects yet — upload one.")
-          );
+          draft.open = false;
+          draft.name = draft.description = "";
+          await load();
+          // Newest first, so it is on the first page: tick it so it is one click from added.
+          const made = shown.find((i) => i.path === image.path || (i.duplicatePaths || []).includes(image.path));
+          if (made) selected.set(made.path, made);
+          page = 0;
+          paint();
+          toast(`Generated ${image.label}. It is selected: ${multi ? "press Add" : "click it to use it"}, or generate another.`);
+        } catch (err) {
+          toast(`Could not generate an image: ${err.message}`, "error");
+        } finally {
+          draft.running = false;
+          paintGenerator();
         }
-      })
-      .catch((err) => {
-        grid.innerHTML = "";
-        grid.appendChild(
-          el("div", "empty-state", `Could not list ${kind} files: ${err.message}`)
-        );
       });
+      const row = el("div", "picker-gen-row");
+      row.append(kindSel, name);
+      const actions = el("div", "picker-gen-row");
+      actions.append(go, close, note);
+      genPanel.append(row, desc, actions);
+    };
+    genBtn.onclick = () => { draft.open = !draft.open; paintGenerator(); };
+
+    load().catch((err) => {
+      grid.innerHTML = "";
+      grid.appendChild(
+        el("div", "empty-state", `Could not list ${kind} files: ${err.message}`)
+      );
+    });
   });
 }
 
