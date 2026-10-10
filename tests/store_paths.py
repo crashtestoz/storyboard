@@ -308,6 +308,22 @@ def test_export_zip(tmp: Path) -> None:
     check("export keeps a frame the board points at",
           f"{slug}/shots/01/frames/frame-0123.png" in names, str(names))
 
+    # Export All: the rendered video comes too, the frame dumps still do not.
+    full = io.BytesIO()
+    full_name = st.export_zip(slug, full, include_video=True)
+    zf = zipfile.ZipFile(full)
+    full_names = set(zf.namelist())
+    check("export with video is named for it",
+          full_name == "storyboard - Export Me (with video).zip", full_name)
+    check("export with video keeps the clips and the final video",
+          {f"{slug}/shots/01/clip.mp4", f"{slug}/final.mp4"} <= full_names, str(full_names))
+    check("export with video still keeps the setup",
+          {f"{slug}/storyboard.json", f"{slug}/refs/doc.png"} <= full_names, str(full_names))
+    check("export with video still drops unused frame dumps",
+          f"{slug}/shots/01/frames/frame-0000.png" not in full_names, str(full_names))
+    check("video is stored, not recompressed",
+          zf.getinfo(f"{slug}/final.mp4").compress_type == zipfile.ZIP_STORED)
+
 
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="sbv-store-test-"))

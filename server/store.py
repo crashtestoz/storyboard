@@ -636,6 +636,11 @@ class Store:
         "audio": {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"},
     }
 
+    #: Folders inside a project that hold generated work, not material to pick
+    #: from: every auto-refine attempt keeps eight review stills and every seed
+    #: comparison keeps its takes, and left in they bury the references.
+    LIBRARY_SKIP_DIRS = {"refine-runs", "seed-takes"}
+
     def library(self, limit: int = 300, kind: str = "image") -> list[dict[str, Any]]:
         """Files already in the projects tree, for picking without re-uploading.
 
@@ -643,7 +648,8 @@ class Store:
         hand, and rendered stills. Per-frame directories are skipped
         deliberately: a handful of clips is thousands of PNGs, and chaining to
         a previous shot's last frame is already a dedicated control rather
-        than something you hunt for in a grid.
+        than something you hunt for in a grid. So are the working folders of
+        auto-refine and seed comparison (``LIBRARY_SKIP_DIRS``).
         """
         exts = self.LIBRARY_EXTS.get(kind) or self.LIBRARY_EXTS["image"]
         usages = self.media_usages()
@@ -660,6 +666,8 @@ class Store:
             # a whole clip's worth of PNGs that would bury everything else.
             parts = path.relative_to(self.root).parts
             if any(part.startswith("frames") for part in parts[:-1]):
+                continue
+            if any(part in self.LIBRARY_SKIP_DIRS for part in parts[1:-1]):
                 continue
             rel = path.relative_to(self.data_dir)
             rel_name = str(rel).replace("\\", "/")
@@ -1156,18 +1164,22 @@ class Store:
     EXPORT_SKIP_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
     EXPORT_SKIP_DIRS = {"frames", "stills", "sketch-refs"}
 
-    def export_zip(self, slug: str, out) -> str:
+    def export_zip(self, slug: str, out, *, include_video: bool = False) -> str:
         """Write the project folder as a ZIP to the binary file *out*.
 
-        Everything a board is made of — storyboard.json, reference images
-        and voice clips, prompts, logs and job files — but none of the
-        rendered video, which is most of a project's size and can be
-        rendered again. A rendered frame the board itself points at (a
-        chained Start frame) is kept, since the board needs it to re-render.
+        The default is the setup: everything a board is made of —
+        storyboard.json, reference images and voice clips, prompts, logs and
+        job files — but none of the rendered video, which is most of a
+        project's size and can be rendered again. A rendered frame the board
+        itself points at (a chained Start frame) is kept, since the board
+        needs it to re-render. With *include_video* the rendered clips, the
+        final video and the soundtrack come too (the per-frame preview dumps
+        are still left out: they are regenerated and would dwarf the rest).
         Entries sit under ``<slug>/`` so the archive unpacks into a folder
         that can be dropped straight into a projects folder.
 
-        Returns the download name, ``storyboard - <project name>.zip``.
+        Returns the download name: ``storyboard - <project name>.zip``, or
+        ``storyboard - <project name> (with video).zip``.
         """
         import zipfile
 
@@ -1195,15 +1207,18 @@ class Store:
                 if not path.is_file() or path.name == ".DS_Store":
                     continue
                 rel = path.relative_to(folder)
+                is_video = path.suffix.lower() in self.EXPORT_SKIP_EXTS
                 if path.resolve() not in referenced and (
-                    path.suffix.lower() in self.EXPORT_SKIP_EXTS
+                    (is_video and not include_video)
                     or any(part in self.EXPORT_SKIP_DIRS for part in rel.parts[:-1])
                 ):
                     continue
-                zf.write(path, f"{safe}/{rel.as_posix()}")
+                # Video is already compressed: storing it is far quicker and no bigger.
+                zf.write(path, f"{safe}/{rel.as_posix()}",
+                         compress_type=zipfile.ZIP_STORED if is_video else zipfile.ZIP_DEFLATED)
         # Only what a filename cannot hold on macOS/Windows is replaced.
         name = re.sub(r'[\\/:*?"<>|]+', "-", (board.get("name") or safe)).strip() or safe
-        return f"storyboard - {name}.zip"
+        return f"storyboard - {name}{' (with video)' if include_video else ''}.zip"
 
     def import_board(self, raw: str | dict, *, name: str | None = None) -> tuple[str, dict]:
         board = json.loads(raw) if isinstance(raw, str) else dict(raw)
