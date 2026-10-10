@@ -5773,28 +5773,71 @@ function dropAfter(node, axis, e) {
 /* Shot folders are numbered by position, so a locked shot that changed
    position would lose track of its clip (and the server refuses the save).
    Returns true, after saying why, when *next* would move one. */
-/* "Lock All" and "Unlock All", beside the shot's own Lock Scene button. A
-   button greys out when it would change nothing, and says how many it would. */
-function allLockButtons() {
+/* The one lock control. Its label follows this scene (Lock Scene / Unlock
+   Scene); clicking it opens a menu with that action first, then Lock All and
+   Unlock All, each saying how many scenes it would change and greyed out when
+   it would change none. */
+function lockMenu(raw) {
   const all = shots();
   const nLocked = all.filter((s) => s.locked).length;
-  const make = (text, locked, count, tip) => {
-    const b = el("button", "btn btn-sm btn-ghost", count ? `${text} (${count})` : text);
+  const nOpen = all.length - nLocked;
+  const wrap = el("span", "menu-wrap");
+  wrap.dataset.lockExempt = "";
+  const btn = el("button", `btn btn-sm${raw.locked ? " btn-primary" : " btn-ghost"}`,
+    `${raw.locked ? "🔓 Unlock Scene" : "🔒 Lock Scene"} ▾`);
+  btn.type = "button";
+  btn.dataset.lockExempt = "";
+  btn.title = "Lock or unlock this scene, or every scene at once";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-expanded", "false");
+  const menu = el("div", "menu-pop menu-pop-right");
+  menu.hidden = true;
+  menu.setAttribute("role", "menu");
+
+  const close = () => {
+    menu.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onDoc, true);
+    document.removeEventListener("keydown", onKey, true);
+  };
+  const onDoc = (e) => { if (!wrap.isConnected || !wrap.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const item = (title, hint, enabled, run) => {
+    const b = el("button", "menu-item");
     b.type = "button";
     b.dataset.lockExempt = "";
-    b.disabled = count === 0;
-    b.title = tip;
+    b.setAttribute("role", "menuitem");
+    b.disabled = !enabled;
+    b.append(el("span", "menu-item-title", title), el("span", "menu-item-hint", hint));
     b.addEventListener("click", async () => {
-      b.disabled = true;
-      try { await setAllShotsLocked(locked); }
-      catch (err) { toast(err.message, "error"); b.disabled = false; }
+      close();
+      try { await run(); } catch (err) { toast(err.message, "error"); }
     });
     return b;
   };
-  return [
-    make("🔒 Lock All", true, all.length - nLocked, "Lock every scene"),
-    make("🔓 Unlock All", false, nLocked, "Unlock every locked scene"),
-  ];
+  menu.append(
+    raw.locked
+      ? item("🔓 Unlock this scene",
+             "Edit or re-render it. Project settings changed while it was locked will then apply to it.",
+             true, () => setShotLocked(raw.id, false))
+      : item("🔒 Lock this scene",
+             "No edits, renders, takes or dubs, and project setting changes leave it alone.",
+             true, () => setShotLocked(raw.id, true)),
+    item(`🔒 Lock all scenes${nOpen ? ` (${nOpen})` : ""}`,
+         "Every scene that is not locked yet.", nOpen > 0, () => setAllShotsLocked(true)),
+    item(`🔓 Unlock all scenes${nLocked ? ` (${nLocked})` : ""}`,
+         "Asks first: Render all can then re-render any scene that has changed.",
+         nLocked > 0, () => setAllShotsLocked(false)));
+
+  btn.addEventListener("click", () => {
+    if (!menu.hidden) { close(); return; }
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onDoc, true);
+    document.addEventListener("keydown", onKey, true);
+  });
+  wrap.append(btn, menu);
+  return wrap;
 }
 
 function refuseLockedShift(next) {
@@ -6184,21 +6227,7 @@ function renderEditorBody() {
     panelDubRow = dubRow;
   }
 
-  const lock = el("button", `btn btn-sm${raw.locked ? " btn-primary" : " btn-ghost"}`,
-    raw.locked ? "🔓 Unlock Scene" : "🔒 Lock Scene");
-  lock.dataset.lockExempt = "";
-  lock.title = raw.locked
-    ? "Unlock to edit or re-render this shot. Project settings changed while it was locked will then apply to it."
-    : "Lock this shot: no edits, renders, takes or dubs, and project setting changes leave it alone.";
-  lock.addEventListener("click", async () => {
-    lock.disabled = true;
-    try {
-      await setShotLocked(raw.id, !raw.locked);
-    } catch (err) {
-      toast(err.message, "error");
-      lock.disabled = false;
-    }
-  });
+  const lock = lockMenu(raw);
 
   const stillsBusy = !!(state.status && state.status.stills && state.status.stills.busy);
   const one = el("button", "btn btn-sm", "Render this shot");
@@ -6253,7 +6282,6 @@ function renderEditorBody() {
   });
   head.appendChild(del);
   head.appendChild(lock);
-  head.append(...allLockButtons());
   host.appendChild(head);
   if (raw.locked) {
     host.appendChild(el("div", "lock-note",

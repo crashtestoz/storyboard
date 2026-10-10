@@ -221,6 +221,11 @@ textarea, input[type="text"], input[type="number"], input[type="password"], sele
 
 textarea { resize: vertical; line-height: 1.55; min-height: 64px; }
 
+/* The three project-wide text boxes (scene description, render style,
+   background sound) start the same height and can each be dragged taller by
+   the corner handle to read all of a long text. */
+#sceneDescription, #renderStyle, #soundscape { height: calc(5 * 1.55em + 2 * var(--sp-2) + 2px); resize: vertical; }
+
 textarea:focus, input:focus, select:focus {
   border-color: var(--accent-dim);
   box-shadow: 0 0 0 3px var(--accent-ghost);
@@ -1620,6 +1625,8 @@ select { appearance: none; cursor: pointer; padding-right: var(--sp-5); }
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 .menu-pop[hidden] { display: none; }
+/* Opens leftwards, for a button at the right-hand edge. */
+.menu-pop-right { left: auto; right: 0; width: 20em; }
 .menu-item {
   display: block;
   width: 100%;

@@ -468,7 +468,7 @@ Remove frames from the start or end of a shot (24 frames is one second) to cut a
 
 Click **Lock** at the top of the editor when a shot is right. A locked shot can't be edited, re-rendered or changed by Render all, the AD or project-wide settings. Click **Unlock** to change it.
 
-The **All ▾** button beside **Lock** locks or unlocks every scene at once. Choose **Lock all scenes** once a cut is final, or **Unlock all scenes** to open everything up again. Unlocking asks you to confirm first, because **Render all** will then re-render any scene that has changed since it was rendered. A scene that is rendering at that moment is left unlocked.
+There is one lock button. It reads **Lock Scene** or **Unlock Scene** depending on the scene you're on, and clicking it opens a short menu: lock or unlock this scene, **Lock all scenes**, or **Unlock all scenes**. Choose **Lock all scenes** once a cut is final, or **Unlock all scenes** to open everything up again. Each option shows how many scenes it would change and is greyed out when it would change none. Unlocking all asks you to confirm first, because **Render all** will then re-render any scene that has changed since it was rendered. A scene that is rendering at that moment is left unlocked.
 
 ---
 
