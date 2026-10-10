@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from server.app import _keep_locked_shots  # noqa: E402
+from server.app import _keep_locked_shots, _lock_all  # noqa: E402
 from server.orchestrator import Orchestrator  # noqa: E402
 from server.store import (  # noqa: E402
     Store, default_board, default_shot, render_fingerprint, stale_reason,
@@ -48,6 +48,33 @@ def a_board(n: int = 3, locked: tuple[int, ...] = (2,)) -> dict:
     for shot in board["shots"]:
         shot["renderFingerprint"] = render_fingerprint(shot, board)
     return board
+
+
+class LockAll(unittest.TestCase):
+    def test_locks_every_unlocked_shot(self):
+        board = a_board(4, locked=(2,))
+        changed, skipped = _lock_all(board, True, set())
+        self.assertEqual((changed, skipped), (["s1", "s3", "s4"], []))
+        self.assertTrue(all(s["locked"] for s in board["shots"]))
+
+    def test_unlocks_every_locked_shot(self):
+        board = a_board(4, locked=(1, 3))
+        changed, skipped = _lock_all(board, False, set())
+        self.assertEqual((changed, skipped), (["s1", "s3"], []))
+        self.assertFalse(any(s["locked"] for s in board["shots"]))
+
+    def test_a_shot_that_is_rendering_is_skipped_when_locking_only(self):
+        board = a_board(3, locked=())
+        changed, skipped = _lock_all(board, True, {"s2"})
+        self.assertEqual((changed, skipped), (["s1", "s3"], ["s2"]))
+        self.assertFalse(board["shots"][1]["locked"])
+        board = a_board(3, locked=(1, 2, 3))
+        changed, skipped = _lock_all(board, False, {"s2"})   # unlocking never waits
+        self.assertEqual((changed, skipped), (["s1", "s2", "s3"], []))
+
+    def test_nothing_to_do_changes_nothing(self):
+        board = a_board(3, locked=(1, 2, 3))
+        self.assertEqual(_lock_all(board, True, set()), ([], []))
 
 
 class StalenessAndQueue(unittest.TestCase):

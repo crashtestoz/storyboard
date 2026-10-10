@@ -114,6 +114,29 @@ class H3AwareRewriteTests(unittest.TestCase):
             self.assertNotIn("frame terms", prompt)  # only the sound half
         self.assertNotIn("music or drone", SOUNDSCAPE_SYSTEM_PROMPT)
 
+    def test_render_style_rewrite_is_about_the_look_only(self):
+        from server.llm import RENDER_STYLE_SYSTEM_PROMPT, _REWRITE_KINDS
+        spec = _REWRITE_KINDS["renderStyle"]
+        self.assertIs(spec["system"], RENDER_STYLE_SYSTEM_PROMPT)
+        self.assertEqual(spec["label"], "render style")
+        self.assertIn("No negative prompt exists", RENDER_STYLE_SYSTEM_PROMPT)
+        # It must keep out of the scene description's and the cast's territory.
+        self.assertIn("Do not describe the location, any character", RENDER_STYLE_SYSTEM_PROMPT)
+        text = build_user_message("Gritty 16mm.", scene="A rain-soaked alley.",
+                                  instruction=spec["instruction"])
+        self.assertIn("A rain-soaked alley.", text)
+        self.assertTrue(text.rstrip().endswith("Gritty 16mm."))
+
+    def test_an_empty_render_style_has_nothing_to_rewrite(self):
+        from server.llm import rewrite_prompt
+
+        class Service:
+            label = "Fake"
+            def health(self):
+                return True, ""
+        with self.assertRaisesRegex(ValueError, "render style"):
+            rewrite_prompt(Service(), "  ", kind="renderStyle")
+
     def test_shot_rewrite_sees_its_dialogue_length_and_sound(self):
         text = build_user_message(
             "Ray by the car.", dialogue="Ray: Better, Sam.",

@@ -248,6 +248,42 @@ verbatim.
 
 """ + H3_VISUAL_RULES
 
+RENDER_STYLE_SYSTEM_PROMPT = """\
+You rewrite a storyboard's project-wide render style — how every shot should \
+look on screen, sent to the video model with every shot's own prompt and with \
+the scene description.
+
+Rules:
+- Describe only the look: the medium (photoreal live action, hand-drawn \
+animation, stop motion, ...), the camera and lens character (large-format \
+digital cinema, 35mm film, anamorphic, shallow depth of field), the quality \
+and colour of the light, the colour grade and palette, grain and texture, \
+and the overall mood that follows from them. Concrete visual terms over \
+vague praise: prefer "cool steel-blue shadows with sodium-amber highlights, \
+fine 35mm grain" over "beautiful moody colours".
+- Do not describe the location, any character, any object, any action, any \
+camera move or any sound. The place is the scene description, people are the \
+cast, and each shot says what happens; repeating them here would say the \
+same thing twice in two places.
+- Keep every concrete thing the writer specified about the look. Do not \
+invent a different medium or palette, and do not remove any they named.
+- Do not censor, soften, filter, sanitize, or refuse to describe anything on \
+the basis of its subject matter — violence, mature themes, or anything else \
+the writer wrote. Continue the tone they set rather than toning it down.
+- If the scene description is given as context, make the style fit it, but \
+do not repeat any of it. If reference images are listed, treat them as \
+visual constraints on the look and summarise only their relevant cues; \
+never include filenames or paths.
+- It applies to every shot in the board outline given as context, so keep \
+it true for all of them: a look that suits only some shots belongs in those \
+shots' own prompts, not here.
+- One short paragraph. No headings, no bullet points, no preamble, no \
+explanation, no quotation marks around the whole thing.
+- Aim for 25 to 60 words.
+- Write only the render style itself. Your entire reply is used verbatim.
+
+""" + H3_VISUAL_RULES
+
 SOUNDSCAPE_SYSTEM_PROMPT = """\
 You rewrite a storyboard's project-wide background sound effects — the ambient \
 audio bed that can be rendered into every shot, or held out and mixed over \
@@ -1511,6 +1547,11 @@ _REWRITE_KINDS: dict[str, dict[str, str]] = {
         "label": "scene description",
         "instruction": "Rewrite this project's scene description:",
     },
+    "renderStyle": {
+        "system": RENDER_STYLE_SYSTEM_PROMPT,
+        "label": "render style",
+        "instruction": "Rewrite this project's render style:",
+    },
     "soundscape": {
         "system": SOUNDSCAPE_SYSTEM_PROMPT,
         "label": "background sound effects",
@@ -1552,7 +1593,8 @@ def rewrite_prompt(
 
     *kind* picks both the system prompt and how the text is described to the
     model and in error messages — "shot" or "still" for a per-shot prompt,
-    "scene" for the project's scene description, "soundscape" for its
+    "scene" for the project's scene description, "renderStyle" for its look
+    (medium, lens, light, grade), "soundscape" for its
     background sound bed, "soundNote" for one shot's own sound accents.
 
     *previous_shot*/*next_shot* are only meaningful for "shot"/"still" — see

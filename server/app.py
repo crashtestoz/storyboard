@@ -178,6 +178,26 @@ def _keep_locked_shots(board: dict, current: dict) -> None:
             )
 
 
+def _lock_all(board: dict, locked: bool, rendering: set[str]) -> tuple[list[str], list[str]]:
+    """Lock or unlock every shot on *board* that is not already so.
+
+    Returns (ids changed, ids skipped). Only locking can skip: a shot that is
+    rendering right now cannot be frozen, the same rule as locking it alone.
+    Unlocking never waits on anything.
+    """
+    changed: list[str] = []
+    skipped: list[str] = []
+    for shot in board.get("shots") or []:
+        if bool(shot.get("locked")) == locked:
+            continue
+        if locked and shot["id"] in rendering:
+            skipped.append(shot["id"])
+            continue
+        shot["locked"] = locked
+        changed.append(shot["id"])
+    return changed, skipped
+
+
 def _locked_shot(board: dict, shot_id: str) -> dict | None:
     return next((s for s in board.get("shots") or []
                  if s.get("id") == shot_id and s.get("locked")), None)
@@ -678,8 +698,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             import tempfile
             with tempfile.TemporaryFile() as tmp:
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                everything = (query.get("video") or ["0"])[0] in ("1", "true", "yes")
                 try:
-                    filename = ctx.store.export_zip(m.group(1), tmp)
+                    filename = ctx.store.export_zip(m.group(1), tmp, include_video=everything)
                 except FileNotFoundError:
                     return self._err(404, "no such storyboard")
                 size = tmp.tell()
@@ -805,6 +827,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._set_locked(m.group(1), m.group(2), bool((self._read_json() or {}).get("locked")))
 
+        m = re.fullmatch(r"/api/boards/([^/]+)/lock-all", path)
+        if m:
+            return self._set_all_locked(m.group(1), bool((self._read_json() or {}).get("locked")))
+
         m = re.fullmatch(r"/api/boards/([^/]+)/shots/([^/]+)/accept", path)
         if m:
             return self._accept_take(m.group(1), m.group(2))
@@ -885,10 +911,12 @@ class Handler(BaseHTTPRequestHandler):
             field = payload.get("field")
             if not slug:
                 raise ValueError("slug is required")
-            if not shot_id and field not in ("sceneDescription", "soundscape", "soundtrackPrompt"):
+            if not shot_id and field not in (
+                "sceneDescription", "renderStyle", "soundscape", "soundtrackPrompt"
+            ):
                 raise ValueError(
-                    "shotId, or field ('sceneDescription', 'soundscape' or "
-                    "'soundtrackPrompt'), is required"
+                    "shotId, or field ('sceneDescription', 'renderStyle', 'soundscape' "
+                    "or 'soundtrackPrompt'), is required"
                 )
 
             board = ctx.store.load(slug)
@@ -1059,6 +1087,23 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     outline=board_outline(board),
                     kind="scene",
+                )
+            elif field == "renderStyle":
+                # The look only. The scene description goes along as context so
+                # the style fits the place, with the style references as visual
+                # constraints; the model is told not to repeat either.
+                text = payload.get("text")
+                if text is None:
+                    text = board.get("renderStyle") or ""
+                refs = _rewrite_reference_images(None, [], board.get("styleRefs"))
+                proposal = rewrite_prompt(
+                    service,
+                    text,
+                    scene=board.get("sceneDescription") or "",
+                    reference_images=refs,
+                    reference_files=_materialize_rewrite_images(ctx.data_dir, refs),
+                    outline=board_outline(board),
+                    kind="renderStyle",
                 )
             elif field == "soundtrackPrompt":
                 text = payload.get("text")
@@ -1616,6 +1661,22 @@ class Handler(BaseHTTPRequestHandler):
             ensure_render_record(shot, ctx.data_dir, getattr(timings, "path", None))
         board = ctx.store.save(slug, board)
         return self._send_json({"slug": slug, "board": board, "stale": self._staleness(slug, board)})
+
+    def _set_all_locked(self, slug: str, locked: bool) -> None:
+        """Lock or unlock every shot in one save. Like ``_set_locked``, never a page save."""
+        ctx = self.ctx
+        board = ctx.store.load(slug)
+        shots = board.get("shots") or []
+        rendering = {s["id"] for s in shots if ctx.orch.touches(slug, s["id"])}
+        changed, skipped = _lock_all(board, locked, rendering)
+        if locked:
+            timings = getattr(ctx.orch, "timings", None)
+            for shot in shots:
+                if shot["id"] in changed:
+                    ensure_render_record(shot, ctx.data_dir, getattr(timings, "path", None))
+        board = ctx.store.save(slug, board)
+        return self._send_json({"slug": slug, "board": board, "stale": self._staleness(slug, board),
+                                "changed": len(changed), "skipped": len(skipped)})
 
     def _accept_take(self, slug: str, shot_id: str) -> None:
         """Record this shot's existing clip as a render of the board as it is.
